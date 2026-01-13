@@ -1,0 +1,95 @@
+services:
+  # Main LogsCrawler application
+  logscrawler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logscrawler
+    ports:
+      - "8000:8000"
+    environment:
+      - LOGSCRAWLER_HOST=0.0.0.0
+      - LOGSCRAWLER_PORT=8000
+      - LOGSCRAWLER_OLLAMA_HOST=http://ollama:11434
+      - LOGSCRAWLER_OLLAMA_MODEL=llama3.2
+      - LOGSCRAWLER_DEBUG=false
+      # RAG Configuration
+      - LOGSCRAWLER_RAG_ENABLED=true
+      - LOGSCRAWLER_EMBEDDING_MODEL=nomic-embed-text
+      - LOGSCRAWLER_MONGODB_URI=mongodb://mongodb:27017
+      - LOGSCRAWLER_MONGODB_DATABASE=logscrawler
+      - LOGSCRAWLER_DATA_DIR=/app/data
+      - LOGSCRAWLER_LOG_RETENTION_DAYS=30
+      # Ensure DOCKER_HOST is not set incorrectly (will be handled by code)
+      - DOCKER_HOST=
+    volumes:
+      # Mount Docker socket to access container logs
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Persistent storage for vector index
+      - logscrawler-data:/app/data
+    depends_on:
+      - ollama
+      - mongodb
+    networks:
+      - logscrawler-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Ollama LLM Service with GPU support
+  # Optimized for NVIDIA RTX series (RTX 5080, RTX 4090, etc.)
+  # Automatically detects and uses all available GPUs
+  ollama:
+    image: ollama/ollama:latest
+    container_name: logscrawler-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all  # Use all available GPUs
+              capabilities: [gpu]
+    networks:
+      - logscrawler-net
+    restart: unless-stopped
+
+  # MongoDB for log event storage and analytics
+  mongodb:
+    image: mongo:7
+    container_name: logscrawler-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+    environment:
+      # No authentication for simplicity (add MONGO_INITDB_ROOT_* for production)
+      - MONGO_INITDB_DATABASE=logscrawler
+    networks:
+      - logscrawler-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  logscrawler-net:
+    driver: bridge
+
+volumes:
+  ollama-data:
+    driver: local
+  mongodb-data:
+    driver: local
+  logscrawler-data:
+    driver: local

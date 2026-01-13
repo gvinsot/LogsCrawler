@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LogsCrawler - Docker Log Intelligence</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                        <polyline points="7.5 4.21 12 6.81 16.5 4.21"></polyline>
+                        <polyline points="7.5 19.79 7.5 14.6 3 12"></polyline>
+                        <polyline points="21 12 16.5 14.6 16.5 19.79"></polyline>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                        <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                    </svg>
+                    <span class="logo-text">LogsCrawler</span>
+                </div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-view="dashboard">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="14" width="7" height="7"></rect>
+                        <rect x="3" y="14" width="7" height="7"></rect>
+                    </svg>
+                    Dashboard
+                </button>
+                <button class="nav-item" data-view="containers">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                    </svg>
+                    Containers
+                </button>
+                <button class="nav-item" data-view="logs">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                        <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                    Live Logs
+                </button>
+                <button class="nav-item" data-view="ai">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+                    </svg>
+                    AI Assistant
+                </button>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="status-indicators">
+                    <div class="status-item" id="docker-status">
+                        <span class="status-dot"></span>
+                        <span>Docker</span>
+                    </div>
+                    <div class="status-item" id="ai-status">
+                        <span class="status-dot"></span>
+                        <span>AI Engine</span>
+                    </div>
+                </div>
+            </div>
+        </aside>
+        
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard View -->
+            <div class="view active" id="dashboard-view">
+                <header class="view-header">
+                    <h1>Dashboard</h1>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="refreshDashboard()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"></polyline>
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                        <button class="btn btn-primary" onclick="scanForIssues()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"></circle>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            </svg>
+                            Scan Logs
+                        </button>
+                    </div>
+                </header>
+                
+                <div class="dashboard-grid">
+                    <!-- Stats Cards -->
+                    <div class="stats-row">
+                        <div class="stat-card">
+                            <div class="stat-icon containers">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                                </svg>
+                            </div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="total-containers">0</span>
+                                <span class="stat-label">Containers</span>
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-icon running">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                </svg>
+                            </div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="running-containers">0</span>
+                                <span class="stat-label">Running</span>
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-icon issues">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                                </svg>
+                            </div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="active-issues">0</span>
+                                <span class="stat-label">Active Issues</span>
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-icon critical">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"></polygon>
+                                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                                </svg>
+                            </div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="critical-issues">0</span>
+                                <span class="stat-label">Critical</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Issues Panel -->
+                    <div class="panel issues-panel">
+                        <div class="panel-header">
+                            <h2>Detected Issues</h2>
+                            <div class="panel-header-actions">
+                                <select id="issues-severity-filter" class="select-minimal" onchange="filterIssuesBySeverity()">
+                                    <option value="all">All Severities</option>
+                                    <option value="critical">Critical</option>
+                                    <option value="error">Errors</option>
+                                    <option value="warning">Warnings</option>
+                                    <option value="info">Info</option>
+                                </select>
+                                <button class="btn btn-ghost" onclick="clearAllIssues()">Clear All</button>
+                            </div>
+                        </div>
+                        <div class="panel-content">
+                            <div class="issues-list" id="issues-list">
+                                <div class="empty-state">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                                        <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                                    </svg>
+                                    <p>No issues detected</p>
+                                    <span>All systems running smoothly</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Recent Logs Panel -->
+                    <div class="panel logs-panel">
+                        <div class="panel-header">
+                            <h2>Recent Activity</h2>
+                            <select id="dashboard-container-filter" class="select-minimal">
+                                <option value="all">All Containers</option>
+                            </select>
+                        </div>
+                        <div class="panel-content">
+                            <div class="log-stream" id="dashboard-logs">
+                                <div class="empty-state">
+                                    <p>Loading logs...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Containers View -->
+            <div class="view" id="containers-view">
+                <header class="view-header">
+                    <h1>Containers</h1>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="loadContainers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"></polyline>
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                </header>
+                
+                <div class="containers-toolbar">
+                    <div class="search-wrapper">
+                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" id="containers-search" class="search-input" placeholder="Search containers...">
+                    </div>
+                    <div class="filter-group">
+                        <select id="containers-status-filter" class="select-minimal">
+                            <option value="all">All Status</option>
+                            <option value="running">Running</option>
+                            <option value="exited">Stopped</option>
+                        </select>
+                        <span class="containers-count" id="containers-count">0 containers</span>
+                    </div>
+                </div>
+                
+                <div class="containers-grid" id="containers-grid">
+                    <!-- Container cards will be inserted here -->
+                </div>
+            </div>
+            
+            <!-- Logs View -->
+            <div class="view" id="logs-view">
+                <header class="view-header">
+                    <h1>Live Logs</h1>
+                    <div class="header-actions">
+                        <select id="logs-container-select" class="select-styled">
+                            <option value="all">All Containers</option>
+                        </select>
+                        <button class="btn btn-secondary" id="logs-pause-btn" onclick="toggleLogsPause()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="6" y="4" width="4" height="16"></rect>
+                                <rect x="14" y="4" width="4" height="16"></rect>
+                            </svg>
+                            Pause
+                        </button>
+                        <button class="btn btn-secondary" onclick="clearLogs()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                            Clear
+                        </button>
+                    </div>
+                </header>
+                
+                <div class="logs-container">
+                    <div class="logs-toolbar">
+                        <input type="text" id="logs-search" class="search-input" placeholder="Filter logs...">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="logs-autoscroll" checked>
+                            Auto-scroll
+                        </label>
+                    </div>
+                    <div class="log-viewer" id="log-viewer">
+                        <!-- Logs will be streamed here -->
+                    </div>
+                </div>
+            </div>
+            
+            <!-- AI Assistant View -->
+            <div class="view" id="ai-view">
+                <header class="view-header">
+                    <h1>AI Assistant</h1>
+                    <div class="header-actions">
+                        <span class="ai-model-badge" id="ai-model-badge">Model: Loading...</span>
+                    </div>
+                </header>
+                
+                <div class="ai-container">
+                    <div class="chat-messages" id="chat-messages">
+                        <div class="chat-welcome">
+                            <div class="welcome-icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="12" cy="12" r="3"></circle>
+                                    <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+                                </svg>
+                            </div>
+                            <h2>AI Log Analysis Assistant</h2>
+                            <p>Ask questions about your container logs, detect issues, or get recommendations.</p>
+                            <div class="quick-prompts">
+                                <button class="quick-prompt" onclick="sendQuickPrompt('Are there any errors or issues in the recent logs?')">
+                                    Check for issues
+                                </button>
+                                <button class="quick-prompt" onclick="sendQuickPrompt('Summarize the recent activity across all containers')">
+                                    Summarize activity
+                                </button>
+                                <button class="quick-prompt" onclick="sendQuickPrompt('What containers have warnings or errors?')">
+                                    Find problematic containers
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="chat-input-container">
+                        <div class="chat-context-toggle">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="include-logs-context" checked>
+                                Include recent logs in context
+                            </label>
+                            <select id="ai-container-select" class="select-minimal">
+                                <option value="all">All Containers</option>
+                            </select>
+                        </div>
+                        <div class="chat-input-wrapper">
+                            <textarea id="chat-input" placeholder="Ask about your logs..." rows="1"></textarea>
+                            <button class="btn btn-primary chat-send" onclick="sendChatMessage()">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toast-container"></div>
+    
+    <script src="/static/app.js"></script>
+</body>
+</html>

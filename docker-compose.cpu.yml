@@ -1,0 +1,48 @@
+# Docker Compose configuration for CPU-only environments (no GPU)
+version: "3.8"
+
+services:
+  # Main LogsCrawler application
+  logscrawler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logscrawler
+    ports:
+      - "8000:8000"
+    environment:
+      - LOGSCRAWLER_HOST=0.0.0.0
+      - LOGSCRAWLER_PORT=8000
+      - LOGSCRAWLER_OLLAMA_HOST=http://ollama:11434
+      - LOGSCRAWLER_OLLAMA_MODEL=llama3.2
+      - LOGSCRAWLER_DEBUG=false
+    volumes:
+      # Mount Docker socket to access container logs
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - ollama
+    networks:
+      - logscrawler-net
+    restart: unless-stopped
+
+  # Ollama LLM Service (CPU version)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: logscrawler-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - logscrawler-net
+    restart: unless-stopped
+
+networks:
+  logscrawler-net:
+    driver: bridge
+
+volumes:
+  ollama-data:
+    driver: local
