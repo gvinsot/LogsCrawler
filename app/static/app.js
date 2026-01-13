@@ -280,7 +280,7 @@ function renderIssuesList(issues) {
             </div>
             <div class="issue-container">Container: ${escapeHtml(issue.container_name)}</div>
             <div class="issue-description">${escapeHtml(issue.description.substring(0, 200))}${issue.description.length > 200 ? '...' : ''}</div>
-            <div class="issue-excerpt">${escapeHtml(issue.log_excerpt.substring(0, 150))}</div>
+            <div class="issue-excerpt">${escapeHtml(issue.log_excerpt)}</div>
             <div class="issue-footer">
                 <span class="issue-time">${formatTime(issue.detected_at)}</span>
                 <div class="issue-actions">
@@ -346,12 +346,17 @@ function renderDashboardLogs(logs) {
 async function scanForIssues() {
     try {
         showToast('Scanning logs for issues...', 'info');
-        const result = await api('/issues/scan?log_lines=200', { method: 'POST' });
+        const result = await api('/issues/scan?log_lines=500', { method: 'POST' });
+        
+        const status = result.analysis_status;
+        const isInitialScan = !status?.initial_scan_done || status?.total_logs_analyzed <= result.logs_scanned;
         
         if (result.issues_found > 0) {
-            showToast(`Found ${result.issues_found} issue(s)`, 'warning');
+            showToast(`Found ${result.issues_found} issue(s) in ${result.logs_scanned} logs`, 'warning');
+        } else if (isInitialScan) {
+            showToast(`Initial scan complete: ${result.logs_scanned} logs analyzed`, 'success');
         } else {
-            showToast('No issues found', 'success');
+            showToast('No new issues found', 'success');
         }
         
         await loadIssues();
@@ -386,7 +391,16 @@ function filterIssuesBySeverity() {
     if (filter === 'all') {
         renderIssuesList(state.issues);
     } else {
-        const filtered = state.issues.filter(i => i.severity === filter);
+        // Severity hierarchy: info < warning < error < critical
+        // Show selected level and all higher levels
+        const severityLevels = {
+            'info': 0,
+            'warning': 1,
+            'error': 2,
+            'critical': 3
+        };
+        const minLevel = severityLevels[filter] || 0;
+        const filtered = state.issues.filter(i => (severityLevels[i.severity] || 0) >= minLevel);
         renderIssuesList(filtered);
     }
 }
@@ -398,24 +412,38 @@ async function viewIssueLogs(issueId) {
         return;
     }
     
-    // Find container ID from name
-    const container = state.containers.find(c => 
-        c.name === issue.container_name || 
-        issue.container_name.includes(c.name)
-    );
-    
-    if (!container) {
-        showToast('Container not found', 'error');
-        return;
+    // Use the container_id directly from the issue (it's already stored)
+    // Fall back to name lookup only if container_id is missing
+    let containerId = issue.container_id;
+    if (!containerId) {
+        const container = state.containers.find(c => 
+            c.name === issue.container_name || 
+            issue.container_name.includes(c.name)
+        );
+        if (!container) {
+            showToast('Container not found', 'error');
+            return;
+        }
+        containerId = container.id;
     }
     
     // Show modal with loading state
-    showLogsModal(issue, null, true);
+    showLogsModal(issue, null, true, null);
     
     try {
-        // Fetch 100 lines of logs (approximately 50 before and 50 after)
-        const logs = await api(`/logs/${container.id}?tail=100&timestamps=true`);
-        showLogsModal(issue, logs, false);
+        // Use the timestamp-based endpoint to find logs around when the issue was detected
+        // This is more accurate than text search as it uses the actual detection time
+        const timestamp = encodeURIComponent(issue.detected_at);
+        const searchText = encodeURIComponent(issue.log_excerpt || '');
+        const result = await api(`/logs/${containerId}/by-time?timestamp=${timestamp}&search=${searchText}&context_before=50&context_after=50&max_logs=20000`);
+        
+        if (result.found) {
+            showLogsModal(issue, result.logs, false, result.match_index);
+        } else {
+            // Not found by time, show what we have with a warning
+            showToast('Could not find exact log entry, showing logs around detection time', 'warning');
+            showLogsModal(issue, result.logs, false, null);
+        }
     } catch (error) {
         console.error('Failed to fetch logs:', error);
         showToast('Failed to fetch logs', 'error');
@@ -423,7 +451,16 @@ async function viewIssueLogs(issueId) {
     }
 }
 
-function showLogsModal(issue, logs, loading) {
+function showLogsModal(issue, logs, loading, matchIndex = null) {
+    console.log('[Debug] showLogsModal called:', {
+        issueId: issue?.id,
+        issueTitle: issue?.title,
+        logsCount: logs?.length,
+        loading,
+        matchIndex,
+        logExcerpt: issue?.log_excerpt?.substring(0, 100)
+    });
+    
     let modal = document.getElementById('logs-modal');
     
     if (!modal) {
@@ -434,17 +471,94 @@ function showLogsModal(issue, logs, loading) {
         document.body.appendChild(modal);
     }
     
+    // Determine which line to highlight
+    let highlightIndex = matchIndex;
+    
+    // If server didn't find a match, try client-side text search
+    if ((matchIndex === null || matchIndex === -1 || matchIndex === undefined) && logs && logs.length > 0 && issue.log_excerpt) {
+        console.log('[Debug] Server match not found, trying client-side search');
+        const excerpt = issue.log_excerpt;
+        
+        // Try multiple search strategies
+        const searchAttempts = [];
+        
+        // HIGHEST PRIORITY: Extract UUIDs - these are unique identifiers
+        const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+        const uuids = excerpt.match(uuidPattern);
+        if (uuids) searchAttempts.push(...uuids);
+        
+        // Extract connection IDs
+        const connIds = excerpt.match(/conn(\d+)/gi);
+        if (connIds) searchAttempts.push(...connIds);
+        
+        // Extract IP:port combinations
+        const ipPorts = excerpt.match(/\d+\.\d+\.\d+\.\d+:\d+/g);
+        if (ipPorts) searchAttempts.push(...ipPorts);
+        
+        // Extract key patterns from the excerpt
+        const msgMatch = excerpt.match(/"msg":\s*"([^"]+)"/);
+        if (msgMatch) searchAttempts.push(msgMatch[1]);
+        
+        const errorMatch = excerpt.match(/ERROR[:\s]+([^\n]+)/i);
+        if (errorMatch) searchAttempts.push(errorMatch[1].substring(0, 50));
+        
+        const warningMatch = excerpt.match(/WARNING[:\s]+([^\n]+)/i);
+        if (warningMatch) searchAttempts.push(warningMatch[1].substring(0, 50));
+        
+        // Extract INFO/DEBUG/CRITICAL messages
+        const infoMatch = excerpt.match(/INFO\s*[-:]\s*(.{15,})/i);
+        if (infoMatch) searchAttempts.push(infoMatch[1].substring(0, 60));
+        
+        const debugMatch = excerpt.match(/DEBUG\s*[-:]\s*(.{15,})/i);
+        if (debugMatch) searchAttempts.push(debugMatch[1].substring(0, 60));
+        
+        const criticalMatch = excerpt.match(/CRITICAL\s*[-:]\s*(.{15,})/i);
+        if (criticalMatch) searchAttempts.push(criticalMatch[1].substring(0, 60));
+        
+        // Split by "..." and try each part (for truncated excerpts)
+        const parts = excerpt.split('...');
+        for (const part of parts) {
+            const trimmed = part.trim();
+            if (trimmed.length > 15 && !trimmed.startsWith('[')) {
+                searchAttempts.push(trimmed.substring(0, 80));
+            }
+        }
+        
+        // Search for matches
+        for (const attempt of searchAttempts) {
+            if (!attempt || attempt.length < 3) continue;
+            for (let i = 0; i < logs.length; i++) {
+                if (logs[i].message && logs[i].message.includes(attempt)) {
+                    console.log('[Debug] Client-side match found:', { 
+                        attempt, 
+                        index: i, 
+                        logMessage: logs[i].message.substring(0, 100) 
+                    });
+                    highlightIndex = i;
+                    break;
+                }
+            }
+            if (highlightIndex >= 0) break;
+        }
+        
+        if (highlightIndex < 0) {
+            console.log('[Debug] No client-side match found. Search attempts were:', searchAttempts);
+        }
+    }
+    
+    console.log('[Debug] Final highlightIndex:', highlightIndex, 'Total logs:', logs?.length || 0);
+    
     const logsContent = loading 
         ? '<div class="loading"><div class="spinner"></div></div>'
         : logs && logs.length > 0 
-            ? logs.map(log => {
+            ? logs.map((log, index) => {
                 const time = log.timestamp ? formatTime(log.timestamp) : '';
                 const colorizedMessage = colorizeLogMessage(log.message);
-                // Highlight lines that match the issue excerpt
-                const isMatch = issue.log_excerpt && log.message.includes(issue.log_excerpt.substring(0, 50));
+                // Highlight the matched line
+                const isMatch = highlightIndex !== null && highlightIndex >= 0 && index === highlightIndex;
                 // Determine log level for line styling
                 const logLevel = detectLogLevel(log.message);
-                return `<div class="modal-log-entry ${isMatch ? 'highlight' : ''} ${logLevel}">
+                return `<div class="modal-log-entry ${isMatch ? 'highlight' : ''} ${logLevel}" ${isMatch ? 'data-match="true"' : ''}>
                     <span class="log-time">${time}</span>
                     <span class="log-message">${colorizedMessage}</span>
                 </div>`;
@@ -456,7 +570,6 @@ function showLogsModal(issue, logs, loading) {
             <div class="modal-header">
                 <div class="modal-title">
                     <h3>Logs: ${escapeHtml(issue.container_name)}</h3>
-                    <span class="modal-subtitle">${escapeHtml(issue.title)}</span>
                 </div>
                 <button class="btn btn-ghost modal-close" onclick="closeLogsModal()">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
@@ -464,6 +577,34 @@ function showLogsModal(issue, logs, loading) {
                         <line x1="6" y1="6" x2="18" y2="18"></line>
                     </svg>
                 </button>
+            </div>
+            <div class="modal-issue-info">
+                <div class="modal-issue-header">
+                    <div class="modal-issue-title-row">
+                        <span class="issue-badge ${issue.severity}">${issue.severity.toUpperCase()}</span>
+                        <span class="issue-badge occurrence">×${issue.occurrence_count || 1}</span>
+                        <h4>${escapeHtml(issue.title)}</h4>
+                    </div>
+                    <div class="modal-issue-actions">
+                        <button class="btn btn-primary btn-sm" onclick="closeLogsModal(); investigateIssue('${issue.id}')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                <circle cx="12" cy="12" r="3"></circle>
+                                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+                            </svg>
+                            Analyze with AI
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="closeLogsModal(); resolveIssue('${issue.id}')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                <polyline points="20 6 9 17 4 12"></polyline>
+                            </svg>
+                            Resolve
+                        </button>
+                    </div>
+                </div>
+                <div class="modal-issue-description">${escapeHtml(issue.description)}</div>
+                <div class="modal-issue-excerpt">
+                    <strong>Detected log:</strong> <code>${escapeHtml(issue.log_excerpt)}</code>
+                </div>
             </div>
             <div class="modal-body">
                 <div class="modal-logs-viewer">
@@ -479,6 +620,41 @@ function showLogsModal(issue, logs, loading) {
     
     modal.style.display = 'flex';
     document.body.style.overflow = 'hidden';
+    
+    // Auto-scroll to highlighted line within the logs viewer
+    setTimeout(() => {
+        const logsViewer = modal.querySelector('.modal-logs-viewer');
+        // Find the matched line (prioritize data-match attribute)
+        const highlightedLine = modal.querySelector('.modal-log-entry[data-match="true"]') || 
+                                modal.querySelector('.modal-log-entry.highlight');
+        
+        console.log('[Debug] Scroll Logic:', {
+            viewerExists: !!logsViewer,
+            highlightedLineExists: !!highlightedLine,
+            highlightedLineIndex: highlightedLine ? Array.from(logsViewer.querySelectorAll('.modal-log-entry')).indexOf(highlightedLine) : -1,
+            totalLogs: logsViewer ? logsViewer.querySelectorAll('.modal-log-entry').length : 0
+        });
+        
+        if (logsViewer && highlightedLine) {
+            // Use offsetTop for accurate positioning within the scroll container
+            const lineOffsetTop = highlightedLine.offsetTop;
+            const viewerHeight = logsViewer.clientHeight;
+            const lineHeight = highlightedLine.clientHeight;
+            
+            // Calculate scroll position to center the highlighted line
+            const scrollTarget = lineOffsetTop - (viewerHeight / 2) + (lineHeight / 2);
+            
+            console.log('[Debug] Scroll Calculation:', {
+                lineOffsetTop,
+                viewerHeight,
+                lineHeight,
+                scrollTarget,
+                currentScrollTop: logsViewer.scrollTop
+            });
+            
+            logsViewer.scrollTo({ top: Math.max(0, scrollTarget), behavior: 'smooth' });
+        }
+    }, 300);
     
     // Close on backdrop click
     modal.addEventListener('click', (e) => {
@@ -515,42 +691,11 @@ function colorizeLogMessage(message) {
     // Escape HTML first
     let html = escapeHtml(message);
     
-    // Log levels - ERROR, WARN, INFO, DEBUG (case insensitive, word boundaries)
-    html = html.replace(/\b(ERROR|FATAL|PANIC|EXCEPTION)\b/gi, '<span class="log-error">$1</span>');
+    // Only highlight log levels - keep it simple and readable
+    html = html.replace(/\b(ERROR|FATAL|PANIC|EXCEPTION|FAILED|FAILURE)\b/gi, '<span class="log-error">$1</span>');
     html = html.replace(/\b(WARN|WARNING)\b/gi, '<span class="log-warn">$1</span>');
     html = html.replace(/\b(INFO)\b/gi, '<span class="log-info">$1</span>');
     html = html.replace(/\b(DEBUG|TRACE)\b/gi, '<span class="log-debug">$1</span>');
-    
-    // HTTP status codes
-    html = html.replace(/\b([2]\d{2})\b/g, '<span class="log-status-success">$1</span>');  // 2xx
-    html = html.replace(/\b([4]\d{2})\b/g, '<span class="log-status-warning">$1</span>');  // 4xx
-    html = html.replace(/\b([5]\d{2})\b/g, '<span class="log-status-error">$1</span>');    // 5xx
-    
-    // HTTP methods
-    html = html.replace(/\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/g, '<span class="log-method">$1</span>');
-    
-    // URLs and paths (simplified)
-    html = html.replace(/(https?:\/\/[^\s"'<>]+)/g, '<span class="log-url">$1</span>');
-    html = html.replace(/("\/[^"]*")/g, '<span class="log-path">$1</span>');
-    
-    // IP addresses
-    html = html.replace(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d+)?\b/g, '<span class="log-ip">$1$2</span>');
-    
-    // Numbers with units (ms, s, bytes, etc.)
-    html = html.replace(/\b(\d+\.?\d*)(ms|s|kb|mb|gb|bytes?)\b/gi, '<span class="log-number">$1$2</span>');
-    
-    // Quoted strings
-    html = html.replace(/"([^"]*?)"/g, '<span class="log-string">"$1"</span>');
-    html = html.replace(/'([^']*?)'/g, '<span class="log-string">\'$1\'</span>');
-    
-    // Brackets and braces for JSON-like content
-    html = html.replace(/(\{|\}|\[|\])/g, '<span class="log-bracket">$1</span>');
-    
-    // Key-value pairs (key=value or key: value)
-    html = html.replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)=/g, '<span class="log-key">$1</span>=');
-    
-    // Timestamps in logs [HH:MM:SS] or similar
-    html = html.replace(/\[(\d{2}:\d{2}:\d{2})\]/g, '[<span class="log-timestamp">$1</span>]');
     
     return html;
 }
@@ -568,35 +713,63 @@ async function investigateIssue(issueId) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector('[data-view="ai"]').classList.add('active');
     
-    // Find container ID from name
-    const container = state.containers.find(c => 
-        c.name === issue.container_name || 
-        issue.container_name.includes(c.name)
-    );
+    // Use the container_id directly from the issue
+    let containerId = issue.container_id;
+    const container = containerId 
+        ? state.containers.find(c => c.id === containerId)
+        : state.containers.find(c => c.name === issue.container_name || issue.container_name.includes(c.name));
+    
+    if (!containerId && container) {
+        containerId = container.id;
+    }
     
     // Set container context if found
     const aiSelect = document.getElementById('ai-container-select');
-    if (aiSelect && container) {
-        aiSelect.value = container.id;
+    if (aiSelect && containerId) {
+        aiSelect.value = containerId;
     } else if (aiSelect) {
         aiSelect.value = 'all';
     }
     
-    // Build detailed investigation prompt
+    // Fetch logs to get context around the issue using the timestamp-based endpoint
+    let logContext = issue.log_excerpt;
+    if (containerId) {
+        try {
+            const timestamp = encodeURIComponent(issue.detected_at);
+            const searchText = encodeURIComponent(issue.log_excerpt || '');
+            const result = await api(`/logs/${containerId}/by-time?timestamp=${timestamp}&search=${searchText}&context_before=1&context_after=5&max_logs=20000`);
+            
+            if (result.found && result.logs.length > 0) {
+                const matchIndex = result.match_index;
+                logContext = result.logs.map((log, idx) => {
+                    const time = log.timestamp ? formatTime(log.timestamp) : '';
+                    const marker = (idx === matchIndex) ? '>>> ' : '    ';
+                    return `${marker}[${time}] ${log.message}`;
+                }).join('\n');
+            }
+        } catch (error) {
+            console.error('Failed to fetch logs for AI context:', error);
+        }
+    }
+    
+    // Build detailed investigation prompt with log context
     const prompt = `I detected a ${issue.severity.toUpperCase()} issue in container "${issue.container_name}".
 
 **Issue Title:** ${issue.title}
 **Description:** ${issue.description}
-**Log excerpt:** ${issue.log_excerpt}
+
+**Log context (line before, issue line marked with >>>, and 5 lines after):**
+\`\`\`
+${logContext}
+\`\`\`
 
 Please help me understand:
 1. Is this a serious error that needs immediate attention?
-2. Does this error happen frequently or is it a one-time occurrence?
-3. What is the root cause of this error?
-4. How can I fix or resolve this issue?
-5. Show me more context around this log entry if available.
+2. What is the root cause of this error based on the log context?
+3. How can I fix or resolve this issue?
+4. Are there any related issues visible in the surrounding logs?
 
-Please analyze the recent logs from this container and provide detailed recommendations.`;
+Please provide detailed recommendations.`;
     
     // Send the prompt
     sendQuickPrompt(prompt);
@@ -661,7 +834,8 @@ function filterContainers() {
     let visibleCount = 0;
     
     cards.forEach(card => {
-        const name = card.querySelector('.container-name')?.textContent.toLowerCase() || '';
+        const name = (card.querySelector('.container-name')?.textContent.toLowerCase() || '') + 
+                     (card.dataset.containerName?.toLowerCase() || '');
         const image = card.querySelector('.container-image')?.textContent.toLowerCase() || '';
         const status = card.querySelector('.container-status-badge')?.textContent.toLowerCase() || '';
         
@@ -673,6 +847,17 @@ function filterContainers() {
             visibleCount++;
         } else {
             card.classList.add('hidden');
+        }
+    });
+    
+    // Hide empty groups
+    const groups = document.querySelectorAll('#containers-grid .container-group');
+    groups.forEach(group => {
+        const visibleCards = group.querySelectorAll('.container-card:not(.hidden)');
+        if (visibleCards.length === 0) {
+            group.classList.add('hidden');
+        } else {
+            group.classList.remove('hidden');
         }
     });
     
@@ -704,48 +889,95 @@ function renderContainersGrid(containers) {
         return;
     }
     
-    grid.innerHTML = containers.map(c => {
-        const statusClass = c.status === 'running' ? 'running' : 
-                           c.status === 'exited' ? 'stopped' : 'error';
-        return `
-            <div class="container-card" data-container-id="${c.id}" onclick="viewContainerLogs('${c.id}')">
-                <div class="container-card-header">
-                    <span class="container-name" title="${escapeHtml(c.name)}">
-                        <span class="container-status-dot ${statusClass}"></span>
-                        ${escapeHtml(c.name)}
-                    </span>
-                    <span class="container-status-badge ${statusClass}">${c.status}</span>
+    // Group containers by docker-compose project
+    const groups = {};
+    containers.forEach(c => {
+        const project = c.labels?.['com.docker.compose.project'] || 'Other Containers';
+        if (!groups[project]) {
+            groups[project] = [];
+        }
+        groups[project].push(c);
+    });
+    
+    // Sort groups: docker-compose projects first (alphabetically), then "Other Containers" last
+    const sortedGroupNames = Object.keys(groups).sort((a, b) => {
+        if (a === 'Other Containers') return 1;
+        if (b === 'Other Containers') return -1;
+        return a.localeCompare(b);
+    });
+    
+    // Render grouped containers
+    let html = '';
+    sortedGroupNames.forEach(groupName => {
+        const groupContainers = groups[groupName];
+        const runningCount = groupContainers.filter(c => c.status === 'running').length;
+        
+        html += `
+            <div class="container-group">
+                <div class="container-group-header">
+                    <div class="container-group-title">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        <span>${escapeHtml(groupName)}</span>
+                    </div>
+                    <span class="container-group-count">${runningCount}/${groupContainers.length} running</span>
                 </div>
-                <div class="container-image" title="${escapeHtml(c.image)}">${escapeHtml(c.image)}</div>
-                <div class="container-meta">
-                    <span class="container-meta-item" title="ID: ${c.id}">
-                        ID: ${c.id}
-                    </span>
-                    ${c.ports.length > 0 ? `
-                        <span class="container-meta-item" title="${c.ports.join(', ')}">
-                            ${c.ports.slice(0, 2).join(', ')}${c.ports.length > 2 ? '...' : ''}
+                <div class="container-group-grid">
+        `;
+        
+        groupContainers.forEach(c => {
+            const statusClass = c.status === 'running' ? 'running' : 
+                               c.status === 'exited' ? 'stopped' : 'error';
+            const serviceName = c.labels?.['com.docker.compose.service'] || c.name;
+            
+            html += `
+                <div class="container-card" data-container-id="${c.id}" data-container-name="${escapeHtml(c.name)}" onclick="viewContainerLogs('${c.id}')">
+                    <div class="container-card-header">
+                        <span class="container-name" title="${escapeHtml(c.name)}">
+                            <span class="container-status-dot ${statusClass}"></span>
+                            ${escapeHtml(serviceName)}
                         </span>
-                    ` : ''}
+                        <span class="container-status-badge ${statusClass}">${c.status}</span>
+                    </div>
+                    <div class="container-image" title="${escapeHtml(c.image)}">${escapeHtml(c.image)}</div>
+                    <div class="container-meta">
+                        <span class="container-meta-item" title="ID: ${c.id}">
+                            ID: ${c.id}
+                        </span>
+                        ${c.ports.length > 0 ? `
+                            <span class="container-meta-item" title="${c.ports.join(', ')}">
+                                ${c.ports.slice(0, 2).join(', ')}${c.ports.length > 2 ? '...' : ''}
+                            </span>
+                        ` : ''}
+                    </div>
+                    <div class="container-actions">
+                        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); viewContainerLogs('${c.id}')" title="View Logs">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                <polyline points="14 2 14 8 20 8"></polyline>
+                            </svg>
+                            Logs
+                        </button>
+                        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); analyzeContainer('${c.id}')" title="Analyze with AI">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="3"></circle>
+                                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+                            </svg>
+                            AI
+                        </button>
+                    </div>
                 </div>
-                <div class="container-actions">
-                    <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); viewContainerLogs('${c.id}')" title="View Logs">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                            <polyline points="14 2 14 8 20 8"></polyline>
-                        </svg>
-                        Logs
-                    </button>
-                    <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); analyzeContainer('${c.id}')" title="Analyze with AI">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="12" cy="12" r="3"></circle>
-                            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
-                        </svg>
-                        AI
-                    </button>
+            `;
+        });
+        
+        html += `
                 </div>
             </div>
         `;
-    }).join('');
+    });
+    
+    grid.innerHTML = html;
 }
 
 function viewContainerLogs(containerId) {
@@ -1050,13 +1282,24 @@ function escapeHtml(text) {
 function formatTime(isoString) {
     if (!isoString) return 'Unknown';
     const date = new Date(isoString);
-    return date.toLocaleString();
+    // Use 24h format: YYYY-MM-DD HH:MM:SS
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
 function formatLogTime(isoString) {
     if (!isoString) return '--:--:--';
     const date = new Date(isoString);
-    return date.toLocaleTimeString();
+    // Use 24h format: HH:MM:SS
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${hours}:${minutes}:${seconds}`;
 }
 
 function detectLogLevel(message) {

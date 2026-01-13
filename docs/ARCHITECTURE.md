@@ -43,8 +43,8 @@ Docker Containers
        ▼                    ▼                    ▼
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │  Raw Logs   │    │   Events    │    │  Embeddings │
-│  (Recent)   │    │  Database   │    │  (ChromaDB) │
-│  In-Memory  │    │ (SQLite/PG) │    │             │
+│  (Recent)   │    │  Database   │    │  (USearch) │
+│  In-Memory  │    │ (Mongo/PG)  │    │             │
 └─────────────┘    └─────────────┘    └─────────────┘
 ```
 
@@ -53,8 +53,8 @@ Docker Containers
 | Store | Purpose | Retention |
 |-------|---------|-----------|
 | In-Memory Buffer | Real-time streaming | Last 1000 logs |
-| SQLite/PostgreSQL | Structured events, counts | Unlimited |
-| ChromaDB | Semantic search | Last 30 days |
+| Mongo/PostgreSQL | Structured events, counts | Unlimited |
+| USearch | Semantic search | Last 30 days |
 | Compressed Archives | Long-term backup | 1+ year |
 
 ### 3. Event Extraction
@@ -86,7 +86,7 @@ User: "Did this error happen many times last month?"
         ┌───────────┼───────────┐
         ▼           ▼           ▼
    ┌─────────┐ ┌─────────┐ ┌─────────┐
-   │ SQL     │ │ Vector  │ │ Recent  │
+   │ Mongo   │ │ Vector  │ │ Recent  │
    │ Query   │ │ Search  │ │ Logs    │
    │(counts) │ │(similar)│ │(context)│
    └────┬────┘ └────┬────┘ └────┬────┘
@@ -106,12 +106,12 @@ User: "Did this error happen many times last month?"
 
 ## Implementation Plan
 
-### Phase 1: Event Database (SQLite)
+### Phase 1: Event Database (Mongo)
 - Store parsed log events with timestamps
 - Track error/warning counts per container
 - Enable SQL queries for aggregations
 
-### Phase 2: Vector Store (ChromaDB)
+### Phase 2: Vector Store (USearch)
 - Generate embeddings for log messages
 - Enable semantic search ("find similar errors")
 - Retrieve relevant context for AI
@@ -125,8 +125,8 @@ User: "Did this error happen many times last month?"
 
 | Component | Technology | Why |
 |-----------|------------|-----|
-| Vector DB | ChromaDB | Lightweight, embedded, Python-native |
-| SQL DB | SQLite | Zero-config, embedded, fast |
+| Vector DB | USearch | Lightweight, embedded, Python-native |
+| SQL DB | Mongo | Zero-config, embedded, fast |
 | Embeddings | Ollama (nomic-embed-text) | Local, free, fast |
 | LLM | Ollama (llama3.2) | Local, GPU-accelerated |
 
@@ -155,19 +155,19 @@ User: "Did this error happen many times last month?"
 services:
   # ... existing services ...
   
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: logscrawler-chromadb
+  USearch:
+    image: USearch/chroma:latest
+    container_name: logscrawler-USearch
     ports:
       - "8001:8000"
     volumes:
-      - chromadb-data:/chroma/chroma
+      - USearch-data:/chroma/chroma
     networks:
       - logscrawler-net
     restart: unless-stopped
 
 volumes:
-  chromadb-data:
+  USearch-data:
     driver: local
 ```
 

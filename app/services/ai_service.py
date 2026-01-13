@@ -32,6 +32,12 @@ class AIService:
         self._chat_history: List[ChatMessage] = []
         self._rag_available = False
         
+        # Incremental analysis tracking
+        self._last_analyzed_timestamp: Optional[datetime] = None
+        self._analyzed_log_hashes: set = set()  # Track analyzed logs by hash
+        self._initial_scan_done: bool = False
+        self._total_logs_analyzed: int = 0
+        
     async def initialize_rag(self) -> bool:
         """Initialize RAG components (call after storage/vector services are ready)."""
         if not settings.rag_enabled:
@@ -381,13 +387,112 @@ Provide a detailed, helpful response."""
             "daily_distribution": daily,
         }
     
+    def _get_log_hash(self, log: ContainerLog) -> str:
+        """Generate a unique hash for a log entry."""
+        import hashlib
+        # Use container, timestamp and first 100 chars of message for hash
+        ts_str = log.timestamp.isoformat() if log.timestamp else ""
+        content = f"{log.container_id}:{ts_str}:{log.message[:100]}"
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def _filter_new_logs(self, logs: List[ContainerLog]) -> List[ContainerLog]:
+        """Filter logs to only include ones that haven't been analyzed yet."""
+        new_logs = []
+        for log in logs:
+            log_hash = self._get_log_hash(log)
+            if log_hash not in self._analyzed_log_hashes:
+                new_logs.append(log)
+        return new_logs
+    
+    def _mark_logs_as_analyzed(self, logs: List[ContainerLog]) -> None:
+        """Mark logs as analyzed to avoid re-processing."""
+        for log in logs:
+            log_hash = self._get_log_hash(log)
+            self._analyzed_log_hashes.add(log_hash)
+            self._total_logs_analyzed += 1
+        
+        # Update last analyzed timestamp
+        if logs:
+            latest = max((log.timestamp for log in logs if log.timestamp), default=None)
+            if latest and (self._last_analyzed_timestamp is None or latest > self._last_analyzed_timestamp):
+                self._last_analyzed_timestamp = latest
+        
+        # Limit hash set size to prevent memory issues (keep last 100k hashes)
+        if len(self._analyzed_log_hashes) > 100000:
+            # Clear oldest half
+            self._analyzed_log_hashes = set(list(self._analyzed_log_hashes)[-50000:])
+    
+    def get_analysis_status(self) -> Dict[str, Any]:
+        """Get the current incremental analysis status."""
+        return {
+            "initial_scan_done": self._initial_scan_done,
+            "total_logs_analyzed": self._total_logs_analyzed,
+            "last_analyzed_timestamp": self._last_analyzed_timestamp.isoformat() if self._last_analyzed_timestamp else None,
+            "tracked_log_hashes": len(self._analyzed_log_hashes),
+            "detected_issues_count": len(self._detected_issues),
+        }
+    
+    async def initial_scan(self, logs: List[ContainerLog]) -> List[DetectedIssue]:
+        """
+        Perform initial scan of all historical logs.
+        Should be called once when the application starts.
+        """
+        if self._initial_scan_done:
+            logger.info("Initial scan already done, skipping")
+            return []
+        
+        logger.info(f"Starting initial log scan with {len(logs)} logs")
+        
+        # Mark all logs as analyzed (we'll process them now)
+        self._mark_logs_as_analyzed(logs)
+        self._initial_scan_done = True
+        
+        # Run the actual issue detection
+        issues = await self._analyze_logs_for_issues(logs)
+        
+        logger.info(f"Initial scan complete: {len(issues)} issues found, {self._total_logs_analyzed} logs analyzed")
+        return issues
+    
     async def quick_issue_check(self, logs: List[ContainerLog]) -> List[DetectedIssue]:
-        """AI-powered issue detection from logs."""
+        """
+        AI-powered incremental issue detection from logs.
+        Only analyzes logs that haven't been processed before.
+        """
         if not logs:
             return []
         
+        # If initial scan hasn't been done, do it now
+        if not self._initial_scan_done:
+            return await self.initial_scan(logs)
+        
+        # Filter to only new logs
+        new_logs = self._filter_new_logs(logs)
+        
+        if not new_logs:
+            logger.debug("No new logs to analyze")
+            return []
+        
+        logger.info(f"Analyzing {len(new_logs)} new logs (out of {len(logs)} total)")
+        
+        # Mark these logs as analyzed
+        self._mark_logs_as_analyzed(new_logs)
+        
+        # Run the actual issue detection on new logs only
+        return await self._analyze_logs_for_issues(new_logs)
+    
+    async def _analyze_logs_for_issues(self, logs: List[ContainerLog]) -> List[DetectedIssue]:
+        """Internal method to analyze logs for issues."""
+        if not logs:
+            return []
+        
+        # Filter out logs that should be ignored (e.g., AI API calls)
+        filtered_logs = [log for log in logs if not self._should_ignore_log(log.message)]
+        
+        if not filtered_logs:
+            return []
+        
         # Format logs for AI analysis
-        log_text = self._format_logs_for_analysis(logs)
+        log_text = self._format_logs_for_analysis(filtered_logs)
         
         # Build prompt for AI issue detection
         prompt = self._build_issue_detection_prompt(log_text)
@@ -395,7 +500,10 @@ Provide a detailed, helpful response."""
         # Query the LLM
         try:
             response = await self._query_llm(prompt)
-            issues = self._parse_ai_issues(response, logs)
+            issues = self._parse_ai_issues(response, filtered_logs)
+            
+            # Filter out issues that reference ignored log patterns
+            issues = [i for i in issues if not self._should_ignore_log(i.log_excerpt)]
             
             # Track issues and count occurrences
             for issue in issues:
@@ -414,6 +522,8 @@ Provide a detailed, helpful response."""
 
 Analyze the following logs and identify any problems, errors, warnings, or anomalies.
 
+Log format: [TIMESTAMP] [CONTAINER_NAME] message
+
 LOGS:
 {log_text}
 
@@ -421,7 +531,7 @@ For each issue found, respond in this EXACT JSON format (array of issues):
 ```json
 [
   {{
-    "container": "container_name",
+    "container": "container_name_from_brackets",
     "severity": "critical|error|warning|info",
     "title": "Brief title describing the issue",
     "description": "Detailed explanation of what the issue is and why it matters",
@@ -432,6 +542,7 @@ For each issue found, respond in this EXACT JSON format (array of issues):
 ```
 
 Rules:
+- IMPORTANT: The "container" field must be the EXACT container name from the [CONTAINER_NAME] part of the log line, NOT a name extracted from the log message content
 - Only include REAL issues (not normal operation logs like HTTP 200 OK responses)
 - Severity levels: critical (service down, data loss risk), error (failures, exceptions), warning (potential problems), info (informational issues)
 - Be specific in descriptions - explain the actual problem
@@ -439,6 +550,8 @@ Rules:
 - If no issues found, return an empty array: []
 - Limit to maximum 10 most important issues
 - DO NOT include normal HTTP request logs or routine operations
+- IGNORE any logs related to API calls like "/api/ai/chat" - these contain user messages that may have error keywords but are not actual errors
+- IGNORE HTTP requests to ollama or AI services
 
 Respond ONLY with the JSON array, no other text."""
 
@@ -476,15 +589,46 @@ Respond ONLY with the JSON array, no other text."""
                 else:
                     return []
             
-            # Map container names to IDs
+            # Build maps for container lookup
             container_map = {log.container_name: log.container_id for log in logs}
+            # Get unique container names from actual logs
+            valid_container_names = set(container_map.keys())
             
             for item in parsed[:10]:  # Limit to 10 issues
                 if not isinstance(item, dict):
                     continue
                 
-                container_name = item.get("container", "unknown")
-                container_id = container_map.get(container_name, "unknown")
+                ai_container_name = item.get("container", "unknown")
+                log_excerpt = item.get("log_excerpt", "")
+                
+                # Try to find the actual container from the log excerpt
+                # The AI might return wrong container names (e.g., "mongosh" from log content)
+                actual_container_name = None
+                actual_container_id = None
+                
+                # First, check if AI's container name is valid
+                if ai_container_name in valid_container_names:
+                    actual_container_name = ai_container_name
+                    actual_container_id = container_map.get(ai_container_name, "unknown")
+                else:
+                    # Search for the log excerpt in actual logs to find the real container
+                    excerpt_search = log_excerpt[:50] if log_excerpt else ""
+                    for log in logs:
+                        if excerpt_search and excerpt_search in log.message:
+                            actual_container_name = log.container_name
+                            actual_container_id = log.container_id
+                            break
+                    
+                    # If still not found, use the first container or "unknown"
+                    if not actual_container_name and logs:
+                        actual_container_name = logs[0].container_name
+                        actual_container_id = logs[0].container_id
+                    elif not actual_container_name:
+                        actual_container_name = ai_container_name
+                        actual_container_id = "unknown"
+                
+                container_name = actual_container_name
+                container_id = actual_container_id
                 
                 # Map severity string to enum
                 severity_str = item.get("severity", "info").lower()
@@ -515,6 +659,22 @@ Respond ONLY with the JSON array, no other text."""
         
         return issues
     
+    def _should_ignore_log(self, message: str) -> bool:
+        """Check if a log message should be ignored for issue detection."""
+        # Ignore patterns - these are not real errors
+        ignore_patterns = [
+            "/api/ai/chat?message=",  # AI chat API calls contain user messages with error keywords
+            "POST /api/ai/",          # Any AI API calls
+            "GET /api/ai/",
+            "HTTP Request: POST http://ollama",  # Ollama HTTP requests
+        ]
+        
+        for pattern in ignore_patterns:
+            if pattern in message:
+                return True
+        
+        return False
+    
     def _fallback_issue_check(self, logs: List[ContainerLog]) -> List[DetectedIssue]:
         """Fallback pattern-based issue detection when AI fails."""
         issues = []
@@ -532,6 +692,10 @@ Respond ONLY with the JSON array, no other text."""
         ]
         
         for log in logs:
+            # Skip logs that should be ignored
+            if self._should_ignore_log(log.message):
+                continue
+                
             message_lower = log.message.lower()
             for pattern, severity in error_patterns:
                 if pattern in message_lower:

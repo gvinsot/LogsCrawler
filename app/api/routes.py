@@ -116,6 +116,245 @@ async def get_all_logs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/logs/{container_id}/search")
+async def search_logs_context(
+    container_id: str,
+    search: str = Query(..., description="Text to search for in logs"),
+    context_before: int = Query(50, ge=1, le=200, description="Lines before match"),
+    context_after: int = Query(50, ge=1, le=200, description="Lines after match"),
+    max_logs: int = Query(10000, ge=100, le=50000, description="Maximum logs to search through"),
+):
+    """
+    Search for a specific text in container logs and return context around it.
+    Loads up to max_logs lines and finds the matching line with context.
+    """
+    try:
+        # Load a large amount of logs to search through
+        logs = docker_service.get_logs(
+            container_id=container_id,
+            tail=max_logs,
+            timestamps=True,
+        )
+        
+        if not logs:
+            return {
+                "found": False,
+                "search": search,
+                "logs": [],
+                "match_index": -1,
+                "total_searched": 0
+            }
+        
+        # Search for the matching log line
+        # Try to match the beginning of the search string (first 50 chars)
+        search_text = search[:50] if len(search) > 50 else search
+        match_index = -1
+        
+        for i, log in enumerate(logs):
+            if search_text in log.message:
+                match_index = i
+                break
+        
+        if match_index == -1:
+            # Try a more flexible search with just the first 30 chars
+            search_text = search[:30] if len(search) > 30 else search
+            for i, log in enumerate(logs):
+                if search_text in log.message:
+                    match_index = i
+                    break
+        
+        if match_index == -1:
+            # Still not found, return last logs as fallback
+            return {
+                "found": False,
+                "search": search,
+                "logs": [log.model_dump() for log in logs[-100:]],
+                "match_index": -1,
+                "total_searched": len(logs)
+            }
+        
+        # Extract context around the match
+        start_index = max(0, match_index - context_before)
+        end_index = min(len(logs), match_index + context_after + 1)
+        context_logs = logs[start_index:end_index]
+        
+        # Calculate the relative match index in the returned logs
+        relative_match_index = match_index - start_index
+        
+        return {
+            "found": True,
+            "search": search,
+            "logs": [log.model_dump() for log in context_logs],
+            "match_index": relative_match_index,
+            "total_searched": len(logs),
+            "absolute_match_index": match_index
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/logs/{container_id}/by-time")
+async def get_logs_by_time(
+    container_id: str,
+    timestamp: str = Query(..., description="Target timestamp (ISO format) to search around"),
+    search: Optional[str] = Query(None, description="Optional text to search for in logs"),
+    context_before: int = Query(50, ge=1, le=200, description="Lines before target"),
+    context_after: int = Query(50, ge=1, le=200, description="Lines after target"),
+    max_logs: int = Query(20000, ge=100, le=50000, description="Maximum logs to search through"),
+):
+    """
+    Get logs around a specific timestamp.
+    Searches through logs to find entries closest to the target time.
+    """
+    from datetime import datetime, timedelta
+    
+    try:
+        # Parse target timestamp
+        try:
+            target_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        except:
+            # Try parsing without timezone
+            target_time = datetime.fromisoformat(timestamp.replace('Z', ''))
+        
+        # Load logs
+        logs = docker_service.get_logs(
+            container_id=container_id,
+            tail=max_logs,
+            timestamps=True,
+        )
+        
+        if not logs:
+            return {
+                "found": False,
+                "logs": [],
+                "match_index": -1,
+                "target_time": timestamp,
+                "total_searched": 0
+            }
+        
+        # PRIORITY 1: Text-based search (most reliable for finding the actual issue)
+        match_index = -1
+        
+        if search:
+            import re
+            # Clean up search text - extract meaningful content
+            search_text = search.strip()
+            
+            # Try multiple search strategies with decreasing specificity
+            search_attempts = []
+            
+            # HIGHEST PRIORITY: Extract UUIDs - these are unique identifiers
+            uuid_pattern = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+            uuids = re.findall(uuid_pattern, search_text, re.IGNORECASE)
+            search_attempts.extend(uuids)
+            
+            # Extract connection IDs (e.g., conn8520, connectionId:8520)
+            conn_ids = re.findall(r'conn(\d+)', search_text, re.IGNORECASE)
+            for conn_id in conn_ids:
+                search_attempts.append(f'conn{conn_id}')
+                search_attempts.append(f'"connectionId":{conn_id}')
+            
+            # Extract IP:port combinations
+            ip_ports = re.findall(r'(\d+\.\d+\.\d+\.\d+:\d+)', search_text)
+            search_attempts.extend(ip_ports)
+            
+            # Extract client IPs with quotes
+            client_ips = re.findall(r'"client":"([^"]+)"', search_text)
+            search_attempts.extend(client_ips)
+            
+            # Extract key error/warning messages from the excerpt
+            key_patterns = [
+                r'"msg":\s*"([^"]+)"',  # MongoDB JSON logs
+                r'ERROR[:\s]+([^\n]+)',  # Error messages
+                r'WARNING[:\s]+([^\n]+)',  # Warning messages
+                r'\[error\][:\s]*([^\n]+)',  # [error] prefix
+                r'\[warning\][:\s]*([^\n]+)',  # [warning] prefix
+                r'INFO\s*[-:]\s*(.{15,})',  # INFO messages
+                r'DEBUG\s*[-:]\s*(.{15,})',  # DEBUG messages
+                r'CRITICAL\s*[-:]\s*(.{15,})',  # CRITICAL messages
+            ]
+            for pattern in key_patterns:
+                match = re.search(pattern, search_text, re.IGNORECASE)
+                if match:
+                    extracted = match.group(1).strip()
+                    if extracted and len(extracted) > 3:
+                        search_attempts.append(extracted[:80])
+            
+            # Split by "..." and try each part (for truncated excerpts)
+            parts = search_text.split('...')
+            for part in parts:
+                part = part.strip()
+                # Skip parts that are mostly punctuation or very short
+                if len(part) > 15 and not part.startswith('['):
+                    search_attempts.append(part[:80])
+            
+            # Fallback: Try full excerpt without "..." placeholder (up to 100 chars)
+            clean_text = search_text.replace('...', '').strip()
+            if len(clean_text) > 20:
+                search_attempts.append(clean_text[:100])
+            
+            # Search through logs for any of our search attempts
+            for attempt in search_attempts:
+                if not attempt or len(attempt) < 3:
+                    continue
+                for i, log in enumerate(logs):
+                    if attempt in log.message:
+                        match_index = i
+                        break
+                if match_index >= 0:
+                    break
+        
+        # PRIORITY 2: Timestamp-based search (fallback)
+        if match_index == -1:
+            min_diff = timedelta(days=365)
+            for i, log in enumerate(logs):
+                if log.timestamp:
+                    log_time = log.timestamp
+                    # Make both timezone-naive for comparison
+                    if log_time.tzinfo:
+                        log_time = log_time.replace(tzinfo=None)
+                    if target_time.tzinfo:
+                        target_time_naive = target_time.replace(tzinfo=None)
+                    else:
+                        target_time_naive = target_time
+                        
+                    diff = abs(log_time - target_time_naive)
+                    if diff < min_diff:
+                        min_diff = diff
+                        match_index = i
+        
+        if match_index == -1:
+            # Fallback to last 100 logs
+            return {
+                "found": False,
+                "logs": [log.model_dump() for log in logs[-100:]],
+                "match_index": -1,
+                "target_time": timestamp,
+                "total_searched": len(logs)
+            }
+        
+        # Extract context around the match
+        start_index = max(0, match_index - context_before)
+        end_index = min(len(logs), match_index + context_after + 1)
+        context_logs = logs[start_index:end_index]
+        
+        # Calculate the relative match index in the returned logs
+        relative_match_index = match_index - start_index
+        
+        return {
+            "found": True,
+            "logs": [log.model_dump() for log in context_logs],
+            "match_index": relative_match_index,
+            "target_time": timestamp,
+            "total_searched": len(logs),
+            "absolute_match_index": match_index
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== AI Analysis ====================
 
 @router.post("/ai/analyze", response_model=AIAnalysisResponse)
@@ -206,12 +445,34 @@ async def get_issues(
     )
 
 
+@router.get("/issues/status")
+async def get_analysis_status():
+    """Get the current incremental analysis status."""
+    return ai_service.get_analysis_status()
+
+
+@router.post("/issues/reset")
+async def reset_analysis():
+    """Reset the incremental analysis state. Next scan will re-analyze all logs."""
+    ai_service._initial_scan_done = False
+    ai_service._analyzed_log_hashes.clear()
+    ai_service._last_analyzed_timestamp = None
+    ai_service._total_logs_analyzed = 0
+    return {
+        "status": "reset",
+        "message": "Analysis state reset. Next scan will analyze all logs."
+    }
+
+
 @router.post("/issues/scan")
 async def scan_for_issues(
     container_id: Optional[str] = None,
     log_lines: int = Query(100, ge=10, le=1000),
 ):
-    """Scan logs for issues using pattern detection."""
+    """
+    Scan logs for issues using incremental AI detection.
+    Only new logs (not previously analyzed) will be processed.
+    """
     try:
         if container_id:
             logs = docker_service.get_logs(container_id, tail=log_lines)
@@ -219,11 +480,13 @@ async def scan_for_issues(
             logs = docker_service.get_all_logs(tail=log_lines)
         
         issues = await ai_service.quick_issue_check(logs)
+        status = ai_service.get_analysis_status()
         
         return {
             "logs_scanned": len(logs),
             "issues_found": len(issues),
             "issues": issues,
+            "analysis_status": status,
         }
         
     except Exception as e:

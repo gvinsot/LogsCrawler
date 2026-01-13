@@ -14,6 +14,44 @@ class IssueSeverity(str, Enum):
     INFO = "info"
 
 
+class SystemStatus(str, Enum):
+    """Connection status for remote systems."""
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    ERROR = "error"
+    UNKNOWN = "unknown"
+
+
+class RemoteSystem(BaseModel):
+    """Remote system configuration for SSH-based Docker monitoring."""
+    id: str
+    name: str
+    hostname: str  # IP or hostname
+    username: str
+    port: int = Field(default=22, description="SSH port")
+    status: SystemStatus = SystemStatus.UNKNOWN
+    last_connected: Optional[datetime] = None
+    last_error: Optional[str] = None
+    container_count: int = 0
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class RemoteSystemCreate(BaseModel):
+    """Model for creating a new remote system."""
+    name: str
+    hostname: str
+    username: str
+    port: int = 22
+
+
+class RemoteSystemUpdate(BaseModel):
+    """Model for updating a remote system."""
+    name: Optional[str] = None
+    hostname: Optional[str] = None
+    username: Optional[str] = None
+    port: Optional[int] = None
+
+
 class ContainerInfo(BaseModel):
     """Container information model."""
     id: str
@@ -24,6 +62,8 @@ class ContainerInfo(BaseModel):
     created: str
     ports: List[str] = []
     labels: dict = {}
+    system_id: Optional[str] = Field(default="local", description="System ID (local or remote system ID)")
+    system_name: Optional[str] = Field(default="Local", description="System display name")
 
 
 class ContainerLog(BaseModel):
