@@ -78,7 +78,7 @@ cd LogsCrawler
 
 **For GPU support (RTX 5080, etc.):**
 ```bash
-docker-compose up -d
+docker-compose up -d --build
 ```
 
 **For CPU-only:**
