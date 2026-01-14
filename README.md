@@ -2,6 +2,18 @@
 
 A professional Docker log monitoring solution with AI-powered issue detection. Browse your Docker Compose or Swarm logs in real-time and automatically detect issues using a local LLM.
 
+## Screenshots
+
+### Dashboard
+Real-time overview with AI-powered issue detection and live log streaming:
+
+![Dashboard](docs/Home.png)
+
+### Containers View
+Browse all your containers grouped by Docker Compose projects:
+
+![Containers](docs/Containers.png)
+
 ## Features
 
 - 🎯 **Real-time Log Streaming**: Live log monitoring for all containers via WebSocket
@@ -11,6 +23,7 @@ A professional Docker log monitoring solution with AI-powered issue detection. B
 - 💬 **AI Chat Assistant**: Ask questions about your logs and get intelligent responses
 - 🚀 **No Database Required**: All data retrieved in real-time from Docker
 - 🎨 **Beautiful UI**: Dark theme with professional design
+- 🌐 **Remote Systems**: Monitor containers on remote servers via SSH
 
 ## Architecture
 
