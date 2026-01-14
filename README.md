@@ -1,6 +1,7 @@
 # LogsCrawler 🐳
 
 A professional Docker log monitoring solution with AI-powered issue detection. Browse your Docker Compose or Swarm logs in real-time and automatically detect issues using a local LLM.
+You can run it optionally without a GPU but many features wont work.
 
 ## Screenshots
 
@@ -117,7 +118,7 @@ docker-compose restart logscrawler
 
 Open your browser and navigate to:
 ```
-http://localhost:8000
+http://localhost:5000
 ```
 
 ## Configuration
@@ -226,24 +227,6 @@ The main `docker-compose.yml` includes GPU support. For systems without GPU, use
 
 ## Development
 
-### Running Locally (without Docker)
-
-1. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-2. Start Ollama locally:
-```bash
-# Download from https://ollama.ai
-ollama serve
-ollama pull llama3.2
-```
-
-3. Run the application:
-```bash
-python -m uvicorn app.main:app --reload
-```
 
 ### Project Structure
 
@@ -272,23 +255,6 @@ LogsCrawler/
 ```
 
 ## Troubleshooting
-
-### Ollama not connecting
-
-1. Check if Ollama container is running:
-```bash
-docker ps | grep ollama
-```
-
-2. Check Ollama logs:
-```bash
-docker logs logscrawler-ollama
-```
-
-3. Verify model is pulled:
-```bash
-docker exec -it logscrawler-ollama ollama list
-```
 
 ### Docker daemon not accessible
 
@@ -325,19 +291,6 @@ deploy:
           capabilities: [gpu]
 ```
 
-### No logs appearing
-
-1. Ensure containers are running:
-```bash
-docker ps
-```
-
-2. Check container logs directly:
-```bash
-docker logs <container-name>
-```
-
-3. Verify WebSocket connection in browser console
 
 ## Performance Tips
 

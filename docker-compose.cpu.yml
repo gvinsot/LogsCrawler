@@ -1,6 +1,4 @@
 # Docker Compose configuration for CPU-only environments (no GPU)
-version: "3.8"
-
 services:
   # Main LogsCrawler application
   logscrawler:
@@ -9,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: logscrawler
     ports:
-      - "8000:8000"
+      - "5000:8000"
     environment:
       - LOGSCRAWLER_HOST=0.0.0.0
       - LOGSCRAWLER_PORT=8000
