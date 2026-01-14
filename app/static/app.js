@@ -8,7 +8,10 @@ const state = {
     containers: [],
     issues: [],
     logs: [],
+    systems: [],  // Remote systems
     selectedContainer: 'all',
+    selectedSystem: 'all',  // System filter
+    aiSelectedSystemId: null,  // System for AI context (set by analyzeContainer)
     logsPaused: false,
     logsAutoScroll: true,
     wsLogs: null,
@@ -121,6 +124,9 @@ function switchView(viewId) {
         case 'dashboard':
             loadDashboard();
             break;
+        case 'systems':
+            loadSystems();
+            break;
         case 'containers':
             loadContainers();
             break;
@@ -215,7 +221,12 @@ function updateContainerSelects(containers) {
             const currentValue = select.value;
             select.innerHTML = '<option value="all">All Containers</option>';
             
-            containers.forEach(c => {
+            // For logs-container-select, only show local containers (WebSocket streaming only works locally)
+            const filteredContainers = selectId === 'logs-container-select'
+                ? containers.filter(c => !c.system_id || c.system_id === 'local')
+                : containers;
+            
+            filteredContainers.forEach(c => {
                 const option = document.createElement('option');
                 option.value = c.id;
                 option.textContent = c.name;
@@ -239,16 +250,59 @@ async function loadIssues() {
         document.getElementById('active-issues').textContent = activeIssues.length;
         document.getElementById('critical-issues').textContent = criticalIssues.length;
         
-        // Apply current filter
-        const filter = document.getElementById('issues-severity-filter')?.value || 'all';
-        if (filter === 'all') {
-            renderIssuesList(issues);
-        } else {
-            renderIssuesList(issues.filter(i => i.severity === filter));
+        // Restore saved filter from localStorage
+        const severityFilter = document.getElementById('issues-severity-filter');
+        const savedSeverity = localStorage.getItem('logscrawler_issues_severity') || 'all';
+        if (severityFilter && severityFilter.value !== savedSeverity) {
+            severityFilter.value = savedSeverity;
         }
+        
+        // Apply current filter using severity hierarchy
+        applyIssuesSeverityFilter();
         
     } catch (error) {
         console.error('Failed to load issues:', error);
+    }
+}
+
+function applyIssuesSeverityFilter() {
+    const filter = document.getElementById('issues-severity-filter')?.value || 'all';
+    
+    // Severity hierarchy: info < warning < error < critical
+    // Show selected level and all higher levels
+    const severityLevels = {
+        'info': 0,
+        'warning': 1,
+        'error': 2,
+        'critical': 3
+    };
+    
+    let filteredIssues;
+    if (filter === 'all') {
+        filteredIssues = state.issues;
+    } else {
+        const minLevel = severityLevels[filter] || 0;
+        filteredIssues = state.issues.filter(i => (severityLevels[i.severity] || 0) >= minLevel);
+    }
+    
+    renderIssuesList(filteredIssues);
+    
+    // Also restore and apply system filter
+    const systemFilter = document.getElementById('issues-system-filter');
+    const savedSystem = localStorage.getItem('logscrawler_issues_system') || 'all';
+    if (systemFilter && systemFilter.value !== savedSystem) {
+        systemFilter.value = savedSystem;
+    }
+    
+    // Apply system filter to rendered issues
+    if (savedSystem !== 'all') {
+        const issueCards = document.querySelectorAll('#issues-list .issue-card');
+        issueCards.forEach(card => {
+            const issueSystem = card.dataset.systemId || 'local';
+            if (issueSystem !== savedSystem) {
+                card.style.display = 'none';
+            }
+        });
     }
 }
 
@@ -270,12 +324,13 @@ function renderIssuesList(issues) {
     }
     
     container.innerHTML = issues.map(issue => `
-        <div class="issue-card ${issue.severity}" data-issue-id="${issue.id}">
+        <div class="issue-card ${issue.severity}" data-issue-id="${issue.id}" data-system-id="${issue.system_id || 'local'}">
             <div class="issue-header">
                 <span class="issue-title">${escapeHtml(issue.title)}</span>
                 <div class="issue-badges">
                     <span class="issue-badge occurrence" title="Occurred ${issue.occurrence_count} times">×${issue.occurrence_count}</span>
                     <span class="issue-badge ${issue.severity}">${issue.severity}</span>
+                    <span class="issue-badge system" title="System">${escapeHtml(issue.system_name || 'Local')}</span>
                 </div>
             </div>
             <div class="issue-container">Container: ${escapeHtml(issue.container_name)}</div>
@@ -388,21 +443,11 @@ async function clearAllIssues() {
 function filterIssuesBySeverity() {
     const filter = document.getElementById('issues-severity-filter').value;
     
-    if (filter === 'all') {
-        renderIssuesList(state.issues);
-    } else {
-        // Severity hierarchy: info < warning < error < critical
-        // Show selected level and all higher levels
-        const severityLevels = {
-            'info': 0,
-            'warning': 1,
-            'error': 2,
-            'critical': 3
-        };
-        const minLevel = severityLevels[filter] || 0;
-        const filtered = state.issues.filter(i => (severityLevels[i.severity] || 0) >= minLevel);
-        renderIssuesList(filtered);
-    }
+    // Save to localStorage for persistence
+    localStorage.setItem('logscrawler_issues_severity', filter);
+    
+    // Apply filter using shared function
+    applyIssuesSeverityFilter();
 }
 
 async function viewIssueLogs(issueId) {
@@ -778,10 +823,26 @@ Please provide detailed recommendations.`;
 // ==================== Containers View ====================
 async function loadContainers() {
     try {
-        const containers = await api('/containers?all=true');
-        state.containers = containers;
-        renderContainersGrid(containers);
-        updateContainersCount();
+        // First load remote systems to populate filters
+        if (state.systems.length === 0) {
+            try {
+                const systems = await api('/systems');
+                state.systems = systems;
+                updateSystemFilters();
+            } catch (e) {
+                // Ignore errors - remote systems may not be available
+            }
+        }
+        
+        // Default to 'local' system if not already set to a specific value
+        if (state.selectedSystem === 'all') {
+            state.selectedSystem = 'local';
+            const systemFilter = document.getElementById('containers-system-filter');
+            if (systemFilter) systemFilter.value = 'local';
+        }
+        
+        // Load containers based on selected system filter
+        await loadAllContainers();
         
         // Initialize search and filter if not already done
         initContainersSearch();
@@ -932,7 +993,7 @@ function renderContainersGrid(containers) {
             const serviceName = c.labels?.['com.docker.compose.service'] || c.name;
             
             html += `
-                <div class="container-card" data-container-id="${c.id}" data-container-name="${escapeHtml(c.name)}" onclick="viewContainerLogs('${c.id}')">
+                <div class="container-card" data-container-id="${c.id}" data-container-name="${escapeHtml(c.name)}" data-system-id="${c.system_id || 'local'}" onclick="viewContainerLogs('${c.id}', '${c.system_id || 'local'}')">
                     <div class="container-card-header">
                         <span class="container-name" title="${escapeHtml(c.name)}">
                             <span class="container-status-dot ${statusClass}"></span>
@@ -941,6 +1002,15 @@ function renderContainersGrid(containers) {
                         <span class="container-status-badge ${statusClass}">${c.status}</span>
                     </div>
                     <div class="container-image" title="${escapeHtml(c.image)}">${escapeHtml(c.image)}</div>
+                    ${c.system_id && c.system_id !== 'local' ? `
+                        <div class="container-system">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                                <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                                <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                            </svg>
+                            ${escapeHtml(c.system_name || 'Remote')}
+                        </div>
+                    ` : ''}
                     <div class="container-meta">
                         <span class="container-meta-item" title="ID: ${c.id}">
                             ID: ${c.id}
@@ -952,14 +1022,14 @@ function renderContainersGrid(containers) {
                         ` : ''}
                     </div>
                     <div class="container-actions">
-                        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); viewContainerLogs('${c.id}')" title="View Logs">
+                        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); viewContainerLogs('${c.id}', '${c.system_id || 'local'}')" title="View Logs">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                                 <polyline points="14 2 14 8 20 8"></polyline>
                             </svg>
                             Logs
                         </button>
-                        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); analyzeContainer('${c.id}')" title="Analyze with AI">
+                        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); analyzeContainer('${c.id}', '${c.system_id || 'local'}')" title="Analyze with AI">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <circle cx="12" cy="12" r="3"></circle>
                                 <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
@@ -980,8 +1050,15 @@ function renderContainersGrid(containers) {
     grid.innerHTML = html;
 }
 
-function viewContainerLogs(containerId) {
+function viewContainerLogs(containerId, systemId = 'local') {
     state.selectedContainer = containerId;
+    state.selectedSystem = systemId;
+    
+    // For remote systems, show logs in a different way (static fetch instead of WebSocket)
+    if (systemId && systemId !== 'local') {
+        showRemoteContainerLogs(containerId, systemId);
+        return;
+    }
     
     // Update select
     const select = document.getElementById('logs-container-select');
@@ -995,9 +1072,111 @@ function viewContainerLogs(containerId) {
     reconnectLogsWebSocket();
 }
 
-async function analyzeContainer(containerId) {
+async function showRemoteContainerLogs(containerId, systemId) {
+    const system = state.systems.find(s => s.id === systemId);
+    const systemName = system ? system.name : 'Remote';
+    
+    showToast(`Loading logs from ${systemName}...`, 'info');
+    
+    try {
+        const logs = await api(`/systems/${systemId}/logs/${containerId}?tail=200&timestamps=true`);
+        
+        // Show logs in a modal similar to issue logs
+        const container = state.containers.find(c => c.id === containerId);
+        const containerName = container ? container.name : containerId;
+        
+        showRemoteLogsModal(containerName, systemName, logs);
+        
+    } catch (error) {
+        console.error('Failed to load remote logs:', error);
+        showToast('Failed to load remote logs', 'error');
+    }
+}
+
+function showRemoteLogsModal(containerName, systemName, logs) {
+    let modal = document.getElementById('remote-logs-modal');
+    
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'remote-logs-modal';
+        modal.className = 'modal-overlay';
+        document.body.appendChild(modal);
+    }
+    
+    const logsHtml = logs.map(log => {
+        const time = log.timestamp ? formatTime(log.timestamp) : '';
+        const logLevel = detectRemoteLogLevel(log.message);
+        const colorizedMessage = colorizeRemoteLogMessage(log.message);
+        return `<div class="modal-log-entry ${logLevel}">
+            <span class="log-time">${time}</span>
+            <span class="log-message">${colorizedMessage}</span>
+        </div>`;
+    }).join('');
+    
+    modal.innerHTML = `
+        <div class="logs-modal-content">
+            <div class="modal-header">
+                <div class="modal-title-section">
+                    <h2>Container Logs: ${escapeHtml(containerName)}</h2>
+                    <span class="modal-subtitle">System: ${escapeHtml(systemName)}</span>
+                </div>
+                <button class="btn btn-ghost btn-close" onclick="closeRemoteLogsModal()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-logs-viewer">
+                    ${logsHtml || '<div class="empty-state"><p>No logs available</p></div>'}
+                </div>
+            </div>
+        </div>
+    `;
+    
+    modal.style.display = 'flex';
+    modal.onclick = (e) => {
+        if (e.target === modal) closeRemoteLogsModal();
+    };
+}
+
+function closeRemoteLogsModal() {
+    const modal = document.getElementById('remote-logs-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function detectRemoteLogLevel(message) {
+    if (!message) return '';
+    const lower = message.toLowerCase();
+    
+    // Error patterns - red highlighting
+    if (/\b(error|exception|fatal|panic|failed|failure|critical)\b/i.test(message)) {
+        return 'level-error';
+    }
+    // Warning patterns - orange highlighting
+    if (/\b(warn|warning)\b/i.test(message)) {
+        return 'level-warning';
+    }
+    return '';
+}
+
+function colorizeRemoteLogMessage(message) {
+    // Escape HTML first
+    let html = escapeHtml(message);
+    
+    // Highlight error keywords in red
+    html = html.replace(/\b(ERROR|FATAL|PANIC|EXCEPTION|FAILED|FAILURE|CRITICAL)\b/gi, '<span class="log-error">$1</span>');
+    // Highlight warning keywords in orange
+    html = html.replace(/\b(WARN|WARNING)\b/gi, '<span class="log-warn">$1</span>');
+    
+    return html;
+}
+
+async function analyzeContainer(containerId, systemId = 'local') {
     const container = state.containers.find(c => c.id === containerId);
     const name = container ? container.name : containerId;
+    const effectiveSystemId = systemId || (container ? container.system_id : 'local') || 'local';
     
     // Switch to AI view
     switchView('ai');
@@ -1007,6 +1186,9 @@ async function analyzeContainer(containerId) {
     // Set container context
     const aiSelect = document.getElementById('ai-container-select');
     if (aiSelect) aiSelect.value = containerId;
+    
+    // Store the system_id for AI context
+    state.aiSelectedSystemId = effectiveSystemId;
     
     // Send analysis prompt
     sendQuickPrompt(`Analyze the logs from container "${name}" and tell me if there are any issues or problems.`);
@@ -1199,6 +1381,15 @@ async function sendChatMessage() {
     const includeLogs = document.getElementById('include-logs-context').checked;
     const containerId = document.getElementById('ai-container-select').value;
     
+    // Determine system_id from the selected container or from analyzeContainer call
+    let systemId = state.aiSelectedSystemId || 'local';
+    if (containerId && containerId !== 'all') {
+        const container = state.containers.find(c => c.id === containerId);
+        if (container && container.system_id) {
+            systemId = container.system_id;
+        }
+    }
+    
     try {
         // Add loading indicator
         const loadingId = addChatMessage('assistant', '<div class="loading"><div class="spinner"></div></div>', true);
@@ -1213,10 +1404,18 @@ async function sendChatMessage() {
             params.append('container_id', containerId);
         }
         
+        // Include system_id for remote containers
+        if (systemId && systemId !== 'local') {
+            params.append('system_id', systemId);
+        }
+        
         const response = await api(`/ai/chat?${params.toString()}`, { method: 'POST' });
         
         // Update message
         updateChatMessage(loadingId, response.response);
+        
+        // Clear the AI system context after use
+        state.aiSelectedSystemId = null;
         
     } catch (error) {
         showToast('Failed to get AI response', 'error');
@@ -1343,4 +1542,486 @@ function showToast(message, type = 'info') {
         toast.style.animation = 'slideIn 0.3s ease reverse';
         setTimeout(() => toast.remove(), 300);
     }, 4000);
+}
+
+// ==================== Remote Systems ====================
+
+async function loadSystems() {
+    try {
+        const systems = await api('/systems');
+        state.systems = systems;
+        
+        renderSystemsList();
+        updateSystemFilters();
+        updateLocalSystemStats();
+        
+    } catch (error) {
+        console.error('Failed to load systems:', error);
+        showToast('Failed to load remote systems', 'error');
+    }
+}
+
+function updateLocalSystemStats() {
+    const localContainers = state.containers.filter(c => c.system_id === 'local' || !c.system_id);
+    const localCount = document.getElementById('local-container-count');
+    const localRunning = document.getElementById('local-running-count');
+    
+    if (localCount) {
+        localCount.textContent = localContainers.length;
+    }
+    if (localRunning) {
+        localRunning.textContent = localContainers.filter(c => c.status === 'running').length;
+    }
+}
+
+function renderSystemsList() {
+    const container = document.getElementById('systems-list');
+    if (!container) return;
+    
+    if (state.systems.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state systems-empty">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                </svg>
+                <p>No remote systems configured</p>
+                <span>Click "Add System" to monitor a remote Docker host via SSH</span>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = state.systems.map(system => `
+        <div class="system-card remote" data-system-id="${system.id}">
+            <div class="system-header">
+                <div class="system-icon remote">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                        <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                        <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                        <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                    </svg>
+                </div>
+                <div class="system-info">
+                    <h3>${escapeHtml(system.name)}</h3>
+                    <span class="system-host">${escapeHtml(system.username)}@${escapeHtml(system.hostname)}:${system.port}</span>
+                </div>
+                <span class="system-status ${system.status}">${system.status}</span>
+            </div>
+            <div class="system-stats">
+                <div class="system-stat">
+                    <span class="stat-value">${system.container_count}</span>
+                    <span class="stat-label">Containers</span>
+                </div>
+                <div class="system-stat">
+                    <span class="stat-value">${system.last_connected ? formatTime(system.last_connected) : 'Never'}</span>
+                    <span class="stat-label">Last Connected</span>
+                </div>
+            </div>
+            ${system.last_error ? `<div class="system-error">${escapeHtml(system.last_error)}</div>` : ''}
+            <div class="system-actions">
+                <button class="btn btn-sm btn-secondary" onclick="testSystemConnection('${system.id}')">
+                    Test Connection
+                </button>
+                <button class="btn btn-sm btn-secondary" onclick="loadRemoteContainers('${system.id}')">
+                    View Containers
+                </button>
+                <button class="btn btn-sm btn-ghost" onclick="editSystem('${system.id}')">
+                    Edit
+                </button>
+                <button class="btn btn-sm btn-ghost btn-danger" onclick="deleteSystem('${system.id}')">
+                    Delete
+                </button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function updateSystemFilters() {
+    // Update system filters in Containers and Issues views
+    const containersFilter = document.getElementById('containers-system-filter');
+    const issuesFilter = document.getElementById('issues-system-filter');
+    
+    const options = `
+        <option value="all">All Systems</option>
+        <option value="local">Local</option>
+        ${state.systems.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}
+    `;
+    
+    if (containersFilter) containersFilter.innerHTML = options;
+    if (issuesFilter) issuesFilter.innerHTML = options;
+}
+
+function showAddSystemModal() {
+    let modal = document.getElementById('system-modal');
+    
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'system-modal';
+        modal.className = 'modal-overlay';
+        document.body.appendChild(modal);
+    }
+    
+    modal.innerHTML = `
+        <div class="system-modal-content">
+            <div class="modal-header">
+                <h2>Add Remote System</h2>
+                <button class="btn btn-ghost btn-close" onclick="closeSystemModal()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <form onsubmit="createSystem(event)">
+                <div class="form-group">
+                    <label for="system-name">Name</label>
+                    <input type="text" id="system-name" required placeholder="Production Server">
+                </div>
+                <div class="form-group">
+                    <label for="system-hostname">Hostname / IP</label>
+                    <input type="text" id="system-hostname" required placeholder="192.168.1.50">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="system-username">Username</label>
+                        <input type="text" id="system-username" required placeholder="gildas">
+                    </div>
+                    <div class="form-group form-group-small">
+                        <label for="system-port">SSH Port</label>
+                        <input type="number" id="system-port" value="22" min="1" max="65535">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="system-ssh-key">SSH Private Key <span class="optional">(optional)</span></label>
+                    <textarea id="system-ssh-key" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----
+...
+-----END OPENSSH PRIVATE KEY-----"></textarea>
+                    <span class="form-hint">Paste your private SSH key here. If not provided, the system will use the default SSH agent keys.</span>
+                </div>
+                <div class="form-note">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                    <span>SSH keys are stored securely and used only for Docker daemon connections.</span>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeSystemModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add System</button>
+                </div>
+            </form>
+        </div>
+    `;
+    
+    modal.style.display = 'flex';
+}
+
+function closeSystemModal() {
+    const modal = document.getElementById('system-modal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
+
+async function createSystem(event) {
+    event.preventDefault();
+    
+    const sshKey = document.getElementById('system-ssh-key').value.trim();
+    
+    const data = {
+        name: document.getElementById('system-name').value,
+        hostname: document.getElementById('system-hostname').value,
+        username: document.getElementById('system-username').value,
+        port: parseInt(document.getElementById('system-port').value) || 22,
+    };
+    
+    // Only include ssh_key if provided
+    if (sshKey) {
+        data.ssh_key = sshKey;
+    }
+    
+    try {
+        const system = await api('/systems', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        });
+        
+        state.systems.push(system);
+        renderSystemsList();
+        updateSystemFilters();
+        closeSystemModal();
+        
+        showToast(`System "${system.name}" added successfully`, 'success');
+        
+        // Test connection automatically
+        testSystemConnection(system.id);
+        
+    } catch (error) {
+        console.error('Failed to create system:', error);
+        showToast('Failed to add system', 'error');
+    }
+}
+
+async function testSystemConnection(systemId) {
+    showToast('Testing connection...', 'info');
+    
+    try {
+        const result = await api(`/systems/${systemId}/test`, {
+            method: 'POST',
+        });
+        
+        if (result.success) {
+            showToast(result.message, 'success');
+        } else {
+            showToast(`Connection failed: ${result.error}`, 'error');
+        }
+        
+        // Reload systems to update status
+        await loadSystems();
+        
+    } catch (error) {
+        console.error('Failed to test connection:', error);
+        showToast('Connection test failed', 'error');
+    }
+}
+
+async function deleteSystem(systemId) {
+    const system = state.systems.find(s => s.id === systemId);
+    if (!system) return;
+    
+    if (!confirm(`Are you sure you want to delete "${system.name}"?`)) {
+        return;
+    }
+    
+    try {
+        await api(`/systems/${systemId}`, {
+            method: 'DELETE',
+        });
+        
+        state.systems = state.systems.filter(s => s.id !== systemId);
+        renderSystemsList();
+        updateSystemFilters();
+        
+        showToast(`System "${system.name}" deleted`, 'success');
+        
+    } catch (error) {
+        console.error('Failed to delete system:', error);
+        showToast('Failed to delete system', 'error');
+    }
+}
+
+function editSystem(systemId) {
+    const system = state.systems.find(s => s.id === systemId);
+    if (!system) return;
+    
+    let modal = document.getElementById('system-modal');
+    
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'system-modal';
+        modal.className = 'modal-overlay';
+        document.body.appendChild(modal);
+    }
+    
+    const hasExistingKey = system.ssh_key ? true : false;
+    const keyPlaceholder = hasExistingKey 
+        ? '(SSH key is configured - leave empty to keep current key, or paste a new one to replace)'
+        : '-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----';
+    
+    modal.innerHTML = `
+        <div class="system-modal-content">
+            <div class="modal-header">
+                <h2>Edit System</h2>
+                <button class="btn btn-ghost btn-close" onclick="closeSystemModal()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <form onsubmit="updateSystem(event, '${systemId}')">
+                <div class="form-group">
+                    <label for="system-name">Name</label>
+                    <input type="text" id="system-name" required value="${escapeHtml(system.name)}">
+                </div>
+                <div class="form-group">
+                    <label for="system-hostname">Hostname / IP</label>
+                    <input type="text" id="system-hostname" required value="${escapeHtml(system.hostname)}">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="system-username">Username</label>
+                        <input type="text" id="system-username" required value="${escapeHtml(system.username)}">
+                    </div>
+                    <div class="form-group form-group-small">
+                        <label for="system-port">SSH Port</label>
+                        <input type="number" id="system-port" value="${system.port}" min="1" max="65535">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="system-ssh-key">
+                        SSH Private Key <span class="optional">(optional)</span>
+                        ${hasExistingKey ? '<span class="key-status configured">✓ Key configured</span>' : ''}
+                    </label>
+                    <textarea id="system-ssh-key" rows="6" placeholder="${keyPlaceholder}"></textarea>
+                    <span class="form-hint">${hasExistingKey ? 'Leave empty to keep current key, or paste a new key to replace it.' : 'Paste your private SSH key here.'}</span>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeSystemModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    `;
+    
+    modal.style.display = 'flex';
+}
+
+async function updateSystem(event, systemId) {
+    event.preventDefault();
+    
+    const sshKey = document.getElementById('system-ssh-key').value.trim();
+    
+    const data = {
+        name: document.getElementById('system-name').value,
+        hostname: document.getElementById('system-hostname').value,
+        username: document.getElementById('system-username').value,
+        port: parseInt(document.getElementById('system-port').value) || 22,
+    };
+    
+    // Only include ssh_key if a new one is provided
+    if (sshKey) {
+        data.ssh_key = sshKey;
+    }
+    
+    try {
+        const updated = await api(`/systems/${systemId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        });
+        
+        const index = state.systems.findIndex(s => s.id === systemId);
+        if (index >= 0) {
+            state.systems[index] = updated;
+        }
+        
+        renderSystemsList();
+        updateSystemFilters();
+        closeSystemModal();
+        
+        showToast('System updated successfully', 'success');
+        
+    } catch (error) {
+        console.error('Failed to update system:', error);
+        showToast('Failed to update system', 'error');
+    }
+}
+
+async function loadRemoteContainers(systemId) {
+    // Switch to containers view with system filter
+    switchView('containers');
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelector('[data-view="containers"]').classList.add('active');
+    
+    // Set the system filter
+    const systemFilter = document.getElementById('containers-system-filter');
+    if (systemFilter) {
+        systemFilter.value = systemId;
+        filterContainersBySystem();
+    }
+}
+
+async function filterContainersBySystem() {
+    const systemFilter = document.getElementById('containers-system-filter');
+    if (!systemFilter) return;
+    
+    state.selectedSystem = systemFilter.value;
+    
+    // Load containers from the selected system(s)
+    await loadAllContainers();
+}
+
+async function loadAllContainers() {
+    try {
+        let allContainers = [];
+        
+        // Load containers based on selected system filter
+        if (state.selectedSystem === 'all') {
+            // Load from local system
+            const localContainers = await api('/containers?all=true');
+            localContainers.forEach(c => {
+                c.system_id = c.system_id || 'local';
+                c.system_name = c.system_name || 'Local';
+            });
+            allContainers = [...localContainers];
+            
+            // Load from all remote systems
+            for (const system of state.systems) {
+                try {
+                    const remoteContainers = await api(`/systems/${system.id}/containers?all=true`);
+                    allContainers = allContainers.concat(remoteContainers);
+                } catch (e) {
+                    console.warn(`Failed to load containers from ${system.name}:`, e);
+                }
+            }
+        } else if (state.selectedSystem === 'local') {
+            // Load only from local system
+            const localContainers = await api('/containers?all=true');
+            localContainers.forEach(c => {
+                c.system_id = c.system_id || 'local';
+                c.system_name = c.system_name || 'Local';
+            });
+            allContainers = localContainers;
+        } else {
+            // Load only from specific remote system
+            try {
+                const remoteContainers = await api(`/systems/${state.selectedSystem}/containers?all=true`);
+                allContainers = remoteContainers;
+            } catch (e) {
+                console.warn(`Failed to load containers from remote system:`, e);
+                showToast('Failed to load containers from remote system', 'error');
+            }
+        }
+        
+        state.containers = allContainers;
+        renderContainersGrid(allContainers);
+        updateContainerSelects(allContainers);
+        updateContainersCount();
+        updateLocalSystemStats();
+        
+    } catch (error) {
+        console.error('Failed to load containers:', error);
+        showToast('Failed to load containers', 'error');
+    }
+}
+
+function filterIssuesBySystem() {
+    const systemFilter = document.getElementById('issues-system-filter');
+    if (!systemFilter) return;
+    
+    const selectedSystem = systemFilter.value;
+    
+    // Save to localStorage for persistence
+    localStorage.setItem('logscrawler_issues_system', selectedSystem);
+    
+    // Filter displayed issues by system
+    const issuesList = document.getElementById('issues-list');
+    if (!issuesList) return;
+    
+    const issueCards = issuesList.querySelectorAll('.issue-card');
+    issueCards.forEach(card => {
+        const issue = state.issues.find(i => i.id === card.dataset.issueId);
+        if (!issue) return;
+        
+        const issueSystem = issue.system_id || 'local';
+        
+        if (selectedSystem === 'all' || issueSystem === selectedSystem) {
+            card.style.display = '';
+        } else {
+            card.style.display = 'none';
+        }
+    });
 }

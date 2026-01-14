@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile
     container_name: logscrawler
     ports:
-      - "8000:8000"
+      - "5000:8000"
     environment:
       - LOGSCRAWLER_HOST=0.0.0.0
       - LOGSCRAWLER_PORT=8000

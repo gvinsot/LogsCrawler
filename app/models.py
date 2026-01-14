@@ -29,6 +29,7 @@ class RemoteSystem(BaseModel):
     hostname: str  # IP or hostname
     username: str
     port: int = Field(default=22, description="SSH port")
+    ssh_key: Optional[str] = Field(default=None, description="Private SSH key for authentication")
     status: SystemStatus = SystemStatus.UNKNOWN
     last_connected: Optional[datetime] = None
     last_error: Optional[str] = None
@@ -42,6 +43,7 @@ class RemoteSystemCreate(BaseModel):
     hostname: str
     username: str
     port: int = 22
+    ssh_key: Optional[str] = None
 
 
 class RemoteSystemUpdate(BaseModel):
@@ -50,6 +52,7 @@ class RemoteSystemUpdate(BaseModel):
     hostname: Optional[str] = None
     username: Optional[str] = None
     port: Optional[int] = None
+    ssh_key: Optional[str] = None
 
 
 class ContainerInfo(BaseModel):
@@ -73,6 +76,8 @@ class ContainerLog(BaseModel):
     timestamp: Optional[datetime] = None
     message: str
     stream: str = "stdout"  # stdout or stderr
+    system_id: str = Field(default="local", description="System ID (local or remote system ID)")
+    system_name: str = Field(default="Local", description="System display name")
 
 
 class DetectedIssue(BaseModel):
@@ -88,6 +93,8 @@ class DetectedIssue(BaseModel):
     resolved: bool = False
     suggestion: Optional[str] = None
     occurrence_count: int = Field(default=1, description="Number of times this issue has been detected")
+    system_id: str = Field(default="local", description="System ID (local or remote system ID)")
+    system_name: str = Field(default="Local", description="System display name")
 
 
 class AIAnalysisRequest(BaseModel):

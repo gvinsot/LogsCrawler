@@ -396,7 +396,9 @@ class DockerService:
             state=container.attrs.get("State", {}).get("Status", "unknown"),
             created=container.attrs.get("Created", ""),
             ports=ports,
-            labels=container.labels
+            labels=container.labels,
+            system_id="local",
+            system_name="Local",
         )
     
     def _parse_log_line(
@@ -436,7 +438,9 @@ class DockerService:
             container_name=container_name,
             timestamp=timestamp,
             message=message,
-            stream=stream
+            stream=stream,
+            system_id="local",
+            system_name="Local",
         )
 
 

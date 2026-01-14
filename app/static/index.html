@@ -64,6 +64,15 @@
             </nav>
             
             <div class="sidebar-footer">
+                <button class="nav-item" data-view="systems" style="margin-bottom: 10px;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                        <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                        <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                        <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                    </svg>
+                    Systems
+                </button>
                 <div class="status-indicators">
                     <div class="status-item" id="docker-status">
                         <span class="status-dot"></span>
@@ -159,6 +168,10 @@
                         <div class="panel-header">
                             <h2>Detected Issues</h2>
                             <div class="panel-header-actions">
+                                <select id="issues-system-filter" class="select-minimal" onchange="filterIssuesBySystem()">
+                                    <option value="all">All Systems</option>
+                                    <option value="local">Local</option>
+                                </select>
                                 <select id="issues-severity-filter" class="select-minimal" onchange="filterIssuesBySeverity()">
                                     <option value="all">All Severities</option>
                                     <option value="critical">Critical</option>
@@ -226,6 +239,10 @@
                         <input type="text" id="containers-search" class="search-input" placeholder="Search containers...">
                     </div>
                     <div class="filter-group">
+                        <select id="containers-system-filter" class="select-minimal" onchange="filterContainersBySystem()">
+                            <option value="all">All Systems</option>
+                            <option value="local">Local</option>
+                        </select>
                         <select id="containers-status-filter" class="select-minimal">
                             <option value="all">All Status</option>
                             <option value="running">Running</option>
@@ -275,6 +292,65 @@
                     </div>
                     <div class="log-viewer" id="log-viewer">
                         <!-- Logs will be streamed here -->
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Systems View -->
+            <div class="view" id="systems-view">
+                <header class="view-header">
+                    <h1>Remote Systems</h1>
+                    <div class="header-actions">
+                        <button class="btn btn-secondary" onclick="loadSystems()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"></polyline>
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                        <button class="btn btn-primary" onclick="showAddSystemModal()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"></line>
+                                <line x1="5" y1="12" x2="19" y2="12"></line>
+                            </svg>
+                            Add System
+                        </button>
+                    </div>
+                </header>
+                
+                <div class="systems-container">
+                    <!-- Local System Card -->
+                    <div class="system-card local">
+                        <div class="system-header">
+                            <div class="system-icon local">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                                </svg>
+                            </div>
+                            <div class="system-info">
+                                <h3>Local System</h3>
+                                <span class="system-host">Docker Socket</span>
+                            </div>
+                            <span class="system-status connected">Connected</span>
+                        </div>
+                        <div class="system-stats">
+                            <div class="system-stat">
+                                <span class="stat-value" id="local-container-count">0</span>
+                                <span class="stat-label">Containers</span>
+                            </div>
+                            <div class="system-stat">
+                                <span class="stat-value" id="local-running-count">0</span>
+                                <span class="stat-label">Running</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Remote Systems List -->
+                    <div class="systems-list" id="systems-list">
+                        <!-- Remote system cards will be inserted here -->
                     </div>
                 </div>
             </div>

@@ -391,17 +391,27 @@ async def analyze_logs(request: AIAnalysisRequest):
 async def chat_with_ai(
     message: str = Query(..., description="Message to send to AI"),
     container_id: Optional[str] = Query(None, description="Container to include logs from"),
+    system_id: Optional[str] = Query(None, description="System ID for remote containers (None = local)"),
     include_logs: bool = Query(True, description="Include recent logs in context"),
     log_lines: int = Query(50, ge=1, le=500, description="Number of log lines to include"),
 ):
-    """Chat with AI about container logs."""
+    """Chat with AI about container logs. Supports both local and remote containers."""
     try:
         logs = None
         if include_logs:
-            if container_id:
-                logs = docker_service.get_logs(container_id, tail=log_lines)
+            if system_id and system_id != 'local':
+                # Fetch logs from remote system
+                from app.services.remote_docker_service import remote_docker_service
+                if container_id:
+                    logs = await remote_docker_service.get_logs(system_id, container_id, tail=log_lines)
+                else:
+                    logs = await remote_docker_service.get_all_logs(system_id, tail=log_lines)
             else:
-                logs = docker_service.get_all_logs(tail=log_lines)
+                # Fetch logs from local Docker
+                if container_id:
+                    logs = docker_service.get_logs(container_id, tail=log_lines)
+                else:
+                    logs = docker_service.get_all_logs(tail=log_lines)
         
         response = await ai_service.chat(message=message, logs=logs, stream=False)
         

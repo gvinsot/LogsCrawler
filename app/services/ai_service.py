@@ -667,6 +667,16 @@ Respond ONLY with the JSON array, no other text."""
             "POST /api/ai/",          # Any AI API calls
             "GET /api/ai/",
             "HTTP Request: POST http://ollama",  # Ollama HTTP requests
+            # MongoDB connection lifecycle - normal operational logs
+            '"msg":"Connection ended"',
+            '"msg":"Connection accepted"',
+            '"msg":"client metadata"',
+            '"msg":"Connection not authenticating"',
+            '"msg":"Received first command on ingress connection"',
+            '"msg":"Interrupted operation as its client disconnected"',
+            # MongoDB periodic operations
+            '"msg":"WiredTiger message"',
+            '"category":"WT_VERB_CHECKPOINT_PROGRESS"',
         ]
         
         for pattern in ignore_patterns:

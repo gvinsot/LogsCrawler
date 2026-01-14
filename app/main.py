@@ -12,8 +12,10 @@ from pathlib import Path
 from app.config import settings
 from app.api.routes import router as api_router
 from app.api.websocket import router as ws_router
+from app.api.remote_routes import router as remote_router
 from app.services.docker_service import docker_service
 from app.services.ai_service import ai_service
+from app.services.remote_systems_service import remote_systems_service
 
 # Configure logging
 logging.basicConfig(
@@ -146,9 +148,16 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"⚠️  Could not pull embedding model: {e}")
         
+        # Initialize remote systems service with MongoDB
+        await remote_systems_service.initialize(storage_service._db)
+        print(f"✅ Remote systems service initialized ({len(remote_systems_service.get_all_systems())} systems)")
+        
         # Start background log ingestion
         ingestion_task = asyncio.create_task(periodic_log_ingestion())
         print("✅ Background log ingestion started")
+    else:
+        # Initialize remote systems without persistence
+        await remote_systems_service.initialize(None)
     
     # Start background task for issue scanning
     scan_task = asyncio.create_task(periodic_log_scan())
@@ -176,6 +185,9 @@ async def lifespan(app: FastAPI):
         from app.services.storage_service import storage_service
         await storage_service.close()
     
+    # Close remote SSH connections
+    await remote_systems_service.close_all_connections()
+    
     print("👋 Shutting down LogsCrawler")
 
 
@@ -199,6 +211,7 @@ app.add_middleware(
 # Include routers
 app.include_router(api_router)
 app.include_router(ws_router)
+app.include_router(remote_router)
 
 # Static files
 static_path = Path(__file__).parent / "static"

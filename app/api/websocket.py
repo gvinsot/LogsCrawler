@@ -116,8 +116,11 @@ async def stream_container_logs(websocket: WebSocket, container_id: str):
 
 @router.websocket("/ws/logs")
 async def stream_all_logs(websocket: WebSocket):
-    """Stream logs from all running containers."""
+    """Stream logs from all running containers (local and remote)."""
     import logging
+    from app.services.remote_docker_service import remote_docker_service
+    from app.services.remote_systems_service import remote_systems_service
+    
     logger = logging.getLogger(__name__)
     
     await manager.connect(websocket, "all")
@@ -126,10 +129,10 @@ async def stream_all_logs(websocket: WebSocket):
     tasks = []
     
     try:
-        # Send initial logs
+        # Send initial logs from local containers
         try:
             logs = docker_service.get_all_logs(tail=30)
-            logger.info(f"Sending {len(logs)} initial logs")
+            logger.info(f"Sending {len(logs)} initial local logs")
             for log in logs:
                 await websocket.send_json({
                     "type": "log",
@@ -139,30 +142,53 @@ async def stream_all_logs(websocket: WebSocket):
                         "message": log.message,
                         "timestamp": log.timestamp.isoformat() if log.timestamp else None,
                         "stream": log.stream,
+                        "system_id": log.system_id or "local",
+                        "system_name": log.system_name or "Local",
                     }
                 })
         except Exception as e:
-            logger.error(f"Error sending initial logs: {e}")
-            await websocket.send_json({"type": "error", "message": f"Failed to get initial logs: {e}"})
+            logger.error(f"Error sending initial local logs: {e}")
+        
+        # Send initial logs from remote systems
+        try:
+            remote_systems = remote_systems_service.get_all_systems()
+            for system in remote_systems:
+                try:
+                    remote_logs = await remote_docker_service.get_all_logs(system.id, tail=20)
+                    logger.info(f"Sending {len(remote_logs)} initial logs from {system.name}")
+                    for log in remote_logs:
+                        await websocket.send_json({
+                            "type": "log",
+                            "data": {
+                                "container_id": log.container_id,
+                                "container_name": log.container_name,
+                                "message": log.message,
+                                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                                "stream": log.stream,
+                                "system_id": log.system_id,
+                                "system_name": log.system_name,
+                            }
+                        })
+                except Exception as e:
+                    logger.warning(f"Failed to get initial logs from {system.name}: {e}")
+        except Exception as e:
+            logger.error(f"Error sending initial remote logs: {e}")
         
         # Get running containers and stream their logs
         try:
             containers = docker_service.get_containers(all_containers=False)
-            logger.info(f"Starting log streaming for {len(containers)} containers")
+            logger.info(f"Starting log streaming for {len(containers)} local containers")
         except Exception as e:
             logger.error(f"Error getting containers: {e}")
-            await websocket.send_json({"type": "error", "message": f"Failed to get containers: {e}"})
             containers = []
         
-        async def stream_container(container):
-            """Stream logs from a single container."""
+        async def stream_local_container(container):
+            """Stream logs from a single local container."""
             try:
-                logger.info(f"Starting stream for container {container.id} ({container.name})")
+                logger.info(f"Starting stream for local container {container.id} ({container.name})")
                 log_count = 0
                 async for log in docker_service.stream_logs(container.id, tail=0):
                     log_count += 1
-                    if log_count % 10 == 0:
-                        logger.debug(f"Streamed {log_count} logs from {container.name}")
                     await manager.send_to_container_subscribers("all", {
                         "type": "log",
                         "data": {
@@ -171,15 +197,55 @@ async def stream_all_logs(websocket: WebSocket):
                             "message": log.message,
                             "timestamp": log.timestamp.isoformat() if log.timestamp else None,
                             "stream": log.stream,
+                            "system_id": "local",
+                            "system_name": "Local",
                         }
                     })
                 logger.info(f"Finished streaming from {container.name} (total: {log_count} logs)")
             except Exception as e:
-                logger.error(f"Error streaming logs from container {container.id} ({container.name}): {e}", exc_info=True)
+                logger.error(f"Error streaming logs from local container {container.id}: {e}")
         
-        # Start streaming tasks for all containers
-        tasks = [asyncio.create_task(stream_container(c)) for c in containers]
-        logger.info(f"Started {len(tasks)} streaming tasks")
+        async def stream_remote_container(system, container):
+            """Stream logs from a single remote container."""
+            try:
+                logger.info(f"Starting stream for remote container {container.id} ({container.name}) on {system.name}")
+                log_count = 0
+                async for log in remote_docker_service.stream_logs(system.id, container.id, tail=0):
+                    log_count += 1
+                    await manager.send_to_container_subscribers("all", {
+                        "type": "log",
+                        "data": {
+                            "container_id": log.container_id,
+                            "container_name": log.container_name,
+                            "message": log.message,
+                            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                            "stream": log.stream,
+                            "system_id": log.system_id,
+                            "system_name": log.system_name,
+                        }
+                    })
+                logger.info(f"Finished streaming from {system.name}/{container.name} (total: {log_count} logs)")
+            except Exception as e:
+                logger.error(f"Error streaming logs from remote container {container.id} on {system.name}: {e}")
+        
+        # Start streaming tasks for local containers
+        tasks = [asyncio.create_task(stream_local_container(c)) for c in containers]
+        logger.info(f"Started {len(tasks)} local streaming tasks")
+        
+        # Start streaming tasks for remote containers
+        try:
+            remote_systems = remote_systems_service.get_all_systems()
+            for system in remote_systems:
+                try:
+                    remote_containers = await remote_docker_service.get_containers(system.id, all_containers=False)
+                    for container in remote_containers:
+                        task = asyncio.create_task(stream_remote_container(system, container))
+                        tasks.append(task)
+                    logger.info(f"Started {len(remote_containers)} streaming tasks for {system.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to start streaming for {system.name}: {e}")
+        except Exception as e:
+            logger.error(f"Error starting remote streaming: {e}")
         
         # Keep connection alive and handle incoming messages
         while True:
@@ -224,7 +290,9 @@ async def stream_all_logs(websocket: WebSocket):
 
 @router.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
-    """WebSocket endpoint for streaming chat responses."""
+    """WebSocket endpoint for streaming chat responses. Supports both local and remote containers."""
+    from app.services.remote_docker_service import remote_docker_service
+    
     await websocket.accept()
     
     try:
@@ -237,14 +305,23 @@ async def chat_websocket(websocket: WebSocket):
                 user_message = msg.get("message", "")
                 include_logs = msg.get("include_logs", True)
                 container_id = msg.get("container_id")
+                system_id = msg.get("system_id")  # Support remote systems
                 
                 # Get logs if requested
                 logs = None
                 if include_logs:
-                    if container_id:
-                        logs = docker_service.get_logs(container_id, tail=50)
+                    if system_id and system_id != 'local':
+                        # Fetch logs from remote system
+                        if container_id:
+                            logs = await remote_docker_service.get_logs(system_id, container_id, tail=50)
+                        else:
+                            logs = await remote_docker_service.get_all_logs(system_id, tail=50)
                     else:
-                        logs = docker_service.get_all_logs(tail=50)
+                        # Fetch logs from local Docker
+                        if container_id:
+                            logs = docker_service.get_logs(container_id, tail=50)
+                        else:
+                            logs = docker_service.get_all_logs(tail=50)
                 
                 # Stream response
                 await websocket.send_json({
