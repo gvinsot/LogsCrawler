@@ -22,7 +22,6 @@ Browse all your containers grouped by Docker Compose projects:
 - 📊 **Professional Dashboard**: Modern, responsive web interface with multiple views
 - 🔍 **Automatic Issue Detection**: Pattern-based and AI-driven issue identification
 - 💬 **AI Chat Assistant**: Ask questions about your logs and get intelligent responses
-- 🚀 **No Database Required**: All data retrieved in real-time from Docker
 - 🎨 **Beautiful UI**: Dark theme with professional design
 - 🌐 **Remote Systems**: Monitor containers on remote servers via SSH
 
