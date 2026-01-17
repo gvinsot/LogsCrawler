@@ -1,0 +1,634 @@
+"""OpenSearch client for log storage and querying."""
+
+import hashlib
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+import structlog
+from opensearchpy import AsyncOpenSearch, helpers
+
+from .config import OpenSearchConfig
+from .models import (
+    ContainerStats, DashboardStats, HostMetrics, LogEntry,
+    LogSearchQuery, LogSearchResult, TimeSeriesPoint
+)
+
+logger = structlog.get_logger()
+
+
+class OpenSearchClient:
+    """Async OpenSearch client for log operations."""
+    
+    def __init__(self, config: OpenSearchConfig):
+        self.config = config
+        self.logs_index = f"{config.index_prefix}-logs"
+        self.metrics_index = f"{config.index_prefix}-metrics"
+        self.host_metrics_index = f"{config.index_prefix}-host-metrics"
+        
+        # Parse hosts
+        hosts = []
+        for host_url in config.hosts:
+            hosts.append(host_url)
+        
+        auth = None
+        if config.username and config.password:
+            auth = (config.username, config.password)
+        
+        self._client = AsyncOpenSearch(
+            hosts=hosts,
+            http_auth=auth,
+            use_ssl="https" in config.hosts[0] if config.hosts else False,
+            verify_certs=False,
+            ssl_show_warn=False,
+        )
+    
+    async def initialize(self):
+        """Create indices and mappings."""
+        await self._create_logs_index()
+        await self._create_metrics_index()
+        await self._create_host_metrics_index()
+        logger.info("OpenSearch indices initialized")
+    
+    async def _create_logs_index(self):
+        """Create logs index with mapping."""
+        mapping = {
+            "mappings": {
+                "properties": {
+                    "timestamp": {"type": "date"},
+                    "host": {"type": "keyword"},
+                    "container_id": {"type": "keyword"},
+                    "container_name": {"type": "keyword"},
+                    "compose_project": {"type": "keyword"},
+                    "compose_service": {"type": "keyword"},
+                    "stream": {"type": "keyword"},
+                    "message": {"type": "text", "analyzer": "standard"},
+                    "level": {"type": "keyword"},
+                    "http_status": {"type": "integer"},
+                    "parsed_fields": {"type": "object", "enabled": False},
+                }
+            },
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+                "index.refresh_interval": "5s",
+            }
+        }
+        
+        if not await self._client.indices.exists(index=self.logs_index):
+            await self._client.indices.create(index=self.logs_index, body=mapping)
+            logger.info("Created logs index", index=self.logs_index)
+    
+    async def _create_metrics_index(self):
+        """Create container metrics index."""
+        mapping = {
+            "mappings": {
+                "properties": {
+                    "timestamp": {"type": "date"},
+                    "host": {"type": "keyword"},
+                    "container_id": {"type": "keyword"},
+                    "container_name": {"type": "keyword"},
+                    "cpu_percent": {"type": "float"},
+                    "memory_usage_mb": {"type": "float"},
+                    "memory_limit_mb": {"type": "float"},
+                    "memory_percent": {"type": "float"},
+                    "network_rx_bytes": {"type": "long"},
+                    "network_tx_bytes": {"type": "long"},
+                    "block_read_bytes": {"type": "long"},
+                    "block_write_bytes": {"type": "long"},
+                }
+            },
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+            }
+        }
+        
+        if not await self._client.indices.exists(index=self.metrics_index):
+            await self._client.indices.create(index=self.metrics_index, body=mapping)
+            logger.info("Created metrics index", index=self.metrics_index)
+    
+    async def _create_host_metrics_index(self):
+        """Create host metrics index."""
+        mapping = {
+            "mappings": {
+                "properties": {
+                    "timestamp": {"type": "date"},
+                    "host": {"type": "keyword"},
+                    "cpu_percent": {"type": "float"},
+                    "memory_total_mb": {"type": "float"},
+                    "memory_used_mb": {"type": "float"},
+                    "memory_percent": {"type": "float"},
+                    "disk_total_gb": {"type": "float"},
+                    "disk_used_gb": {"type": "float"},
+                    "disk_percent": {"type": "float"},
+                    "gpu_percent": {"type": "float"},
+                    "gpu_memory_used_mb": {"type": "float"},
+                    "gpu_memory_total_mb": {"type": "float"},
+                }
+            },
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+            }
+        }
+        
+        if not await self._client.indices.exists(index=self.host_metrics_index):
+            await self._client.indices.create(index=self.host_metrics_index, body=mapping)
+            logger.info("Created host metrics index", index=self.host_metrics_index)
+    
+    async def close(self):
+        """Close the client."""
+        await self._client.close()
+    
+    def _generate_log_id(self, entry: LogEntry) -> str:
+        """Generate unique ID for log entry."""
+        unique_str = f"{entry.host}:{entry.container_id}:{entry.timestamp.isoformat()}:{entry.message[:100]}"
+        return hashlib.md5(unique_str.encode()).hexdigest()
+    
+    async def index_logs(self, entries: List[LogEntry]):
+        """Bulk index log entries."""
+        if not entries:
+            return
+        
+        actions = []
+        for entry in entries:
+            doc_id = self._generate_log_id(entry)
+            doc = entry.model_dump()
+            doc["timestamp"] = entry.timestamp.isoformat()
+            
+            actions.append({
+                "_index": self.logs_index,
+                "_id": doc_id,
+                "_source": doc,
+            })
+        
+        try:
+            success, failed = await helpers.async_bulk(
+                self._client, actions, raise_on_error=False
+            )
+            if failed:
+                logger.warning("Some logs failed to index", failed=len(failed))
+            logger.debug("Indexed logs", count=success)
+        except Exception as e:
+            logger.error("Failed to index logs", error=str(e))
+    
+    async def index_container_stats(self, stats: ContainerStats):
+        """Index container statistics."""
+        doc = stats.model_dump()
+        doc["timestamp"] = stats.timestamp.isoformat()
+        doc_id = f"{stats.host}:{stats.container_id}:{stats.timestamp.isoformat()}"
+        
+        try:
+            await self._client.index(
+                index=self.metrics_index,
+                id=hashlib.md5(doc_id.encode()).hexdigest(),
+                body=doc,
+            )
+        except Exception as e:
+            logger.error("Failed to index container stats", error=str(e))
+    
+    async def index_host_metrics(self, metrics: HostMetrics):
+        """Index host metrics."""
+        doc = metrics.model_dump()
+        doc["timestamp"] = metrics.timestamp.isoformat()
+        doc_id = f"{metrics.host}:{metrics.timestamp.isoformat()}"
+        
+        try:
+            await self._client.index(
+                index=self.host_metrics_index,
+                id=hashlib.md5(doc_id.encode()).hexdigest(),
+                body=doc,
+            )
+        except Exception as e:
+            logger.error("Failed to index host metrics", error=str(e))
+    
+    async def get_latest_container_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Get the latest stats for all containers (single aggregation query).
+        
+        Returns a dict: {container_id: {cpu_percent, memory_percent, memory_usage_mb}}
+        """
+        # Use top_hits aggregation to get the latest metric per container
+        body = {
+            "size": 0,
+            "query": {
+                "range": {
+                    "timestamp": {
+                        "gte": "now-5m"  # Only consider recent metrics
+                    }
+                }
+            },
+            "aggs": {
+                "by_container": {
+                    "terms": {
+                        "field": "container_id",
+                        "size": 1000  # Max containers to return
+                    },
+                    "aggs": {
+                        "latest": {
+                            "top_hits": {
+                                "size": 1,
+                                "sort": [{"timestamp": "desc"}],
+                                "_source": ["cpu_percent", "memory_percent", "memory_usage_mb", "container_id"]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.metrics_index, body=body)
+            buckets = response.get("aggregations", {}).get("by_container", {}).get("buckets", [])
+            
+            result = {}
+            for bucket in buckets:
+                container_id = bucket["key"]
+                hits = bucket.get("latest", {}).get("hits", {}).get("hits", [])
+                if hits:
+                    source = hits[0]["_source"]
+                    result[container_id] = {
+                        "cpu_percent": round(source.get("cpu_percent", 0) or 0, 1),
+                        "memory_percent": round(source.get("memory_percent", 0) or 0, 1),
+                        "memory_usage_mb": round(source.get("memory_usage_mb", 0) or 0, 1),
+                    }
+            
+            return result
+        except Exception as e:
+            logger.error("Failed to get latest container stats", error=str(e))
+            return {}
+    
+    async def search_logs(self, query: LogSearchQuery) -> LogSearchResult:
+        """Search logs with filters."""
+        must = []
+        filter_clauses = []
+        
+        # Full-text search
+        if query.query:
+            must.append({
+                "query_string": {
+                    "query": query.query,
+                    "default_field": "message",
+                }
+            })
+        
+        # Host filter
+        if query.hosts:
+            filter_clauses.append({"terms": {"host": query.hosts}})
+        
+        # Container filter
+        if query.containers:
+            filter_clauses.append({"terms": {"container_name": query.containers}})
+        
+        # Compose project filter
+        if query.compose_projects:
+            filter_clauses.append({"terms": {"compose_project": query.compose_projects}})
+        
+        # Level filter
+        if query.levels:
+            filter_clauses.append({"terms": {"level": query.levels}})
+        
+        # HTTP status range
+        if query.http_status_min is not None or query.http_status_max is not None:
+            range_query = {}
+            if query.http_status_min is not None:
+                range_query["gte"] = query.http_status_min
+            if query.http_status_max is not None:
+                range_query["lte"] = query.http_status_max
+            filter_clauses.append({"range": {"http_status": range_query}})
+        
+        # Time range
+        time_range = {}
+        if query.start_time:
+            time_range["gte"] = query.start_time.isoformat()
+        if query.end_time:
+            time_range["lte"] = query.end_time.isoformat()
+        if time_range:
+            filter_clauses.append({"range": {"timestamp": time_range}})
+        
+        # Build query
+        es_query = {
+            "bool": {
+                "must": must if must else [{"match_all": {}}],
+                "filter": filter_clauses,
+            }
+        }
+        
+        body = {
+            "query": es_query,
+            "sort": [{"timestamp": {"order": query.sort_order}}],
+            "from": query.from_,
+            "size": query.size,
+            "aggs": {
+                "levels": {"terms": {"field": "level", "size": 10}},
+                "hosts": {"terms": {"field": "host", "size": 50}},
+                "containers": {"terms": {"field": "container_name", "size": 100}},
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.logs_index, body=body)
+            
+            hits = []
+            for hit in response["hits"]["hits"]:
+                source = hit["_source"]
+                source["id"] = hit["_id"]
+                if isinstance(source.get("timestamp"), str):
+                    source["timestamp"] = datetime.fromisoformat(source["timestamp"].replace("Z", "+00:00"))
+                hits.append(LogEntry(**source))
+            
+            aggregations = {}
+            if "aggregations" in response:
+                for key, agg in response["aggregations"].items():
+                    aggregations[key] = [
+                        {"key": bucket["key"], "count": bucket["doc_count"]}
+                        for bucket in agg.get("buckets", [])
+                    ]
+            
+            total = response["hits"]["total"]
+            total_count = total["value"] if isinstance(total, dict) else total
+            
+            return LogSearchResult(
+                total=total_count,
+                hits=hits,
+                aggregations=aggregations,
+            )
+        except Exception as e:
+            logger.error("Log search failed", error=str(e))
+            return LogSearchResult(total=0, hits=[], aggregations={})
+    
+    async def get_dashboard_stats(self) -> DashboardStats:
+        """Get dashboard statistics."""
+        now = datetime.utcnow()
+        yesterday = now - timedelta(days=1)
+        
+        # Count errors and HTTP status codes in last 24h
+        body = {
+            "query": {
+                "range": {
+                    "timestamp": {"gte": yesterday.isoformat()}
+                }
+            },
+            "size": 0,
+            "aggs": {
+                "errors": {
+                    "filter": {"terms": {"level": ["ERROR", "FATAL", "CRITICAL"]}}
+                },
+                "warnings": {
+                    "filter": {"term": {"level": "WARN"}}
+                },
+                "http_4xx": {
+                    "filter": {"range": {"http_status": {"gte": 400, "lt": 500}}}
+                },
+                "http_5xx": {
+                    "filter": {"range": {"http_status": {"gte": 500, "lt": 600}}}
+                },
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.logs_index, body=body)
+            aggs = response.get("aggregations", {})
+            
+            errors_24h = aggs.get("errors", {}).get("doc_count", 0)
+            warnings_24h = aggs.get("warnings", {}).get("doc_count", 0)
+            http_4xx = aggs.get("http_4xx", {}).get("doc_count", 0)
+            http_5xx = aggs.get("http_5xx", {}).get("doc_count", 0)
+        except:
+            errors_24h = warnings_24h = http_4xx = http_5xx = 0
+        
+        # Get average metrics from last hour
+        one_hour_ago = now - timedelta(hours=1)
+        metrics_body = {
+            "query": {
+                "range": {"timestamp": {"gte": one_hour_ago.isoformat()}}
+            },
+            "size": 0,
+            "aggs": {
+                "avg_cpu": {"avg": {"field": "cpu_percent"}},
+                "avg_memory": {"avg": {"field": "memory_percent"}},
+            }
+        }
+        
+        try:
+            metrics_response = await self._client.search(index=self.host_metrics_index, body=metrics_body)
+            metrics_aggs = metrics_response.get("aggregations", {})
+            avg_cpu = metrics_aggs.get("avg_cpu", {}).get("value", 0) or 0
+            avg_memory = metrics_aggs.get("avg_memory", {}).get("value", 0) or 0
+        except:
+            avg_cpu = avg_memory = 0
+        
+        return DashboardStats(
+            total_containers=0,  # Will be filled by API
+            running_containers=0,
+            total_hosts=0,
+            healthy_hosts=0,
+            errors_24h=errors_24h,
+            warnings_24h=warnings_24h,
+            http_4xx_24h=http_4xx,
+            http_5xx_24h=http_5xx,
+            avg_cpu_percent=round(avg_cpu, 2),
+            avg_memory_percent=round(avg_memory, 2),
+        )
+    
+    async def get_error_timeseries(self, hours: int = 24, interval: str = "1h") -> List[TimeSeriesPoint]:
+        """Get error count time series."""
+        now = datetime.utcnow()
+        start = now - timedelta(hours=hours)
+        
+        body = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"range": {"timestamp": {"gte": start.isoformat()}}},
+                        {"terms": {"level": ["ERROR", "FATAL", "CRITICAL"]}}
+                    ]
+                }
+            },
+            "size": 0,
+            "aggs": {
+                "over_time": {
+                    "date_histogram": {
+                        "field": "timestamp",
+                        "fixed_interval": interval,
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.logs_index, body=body)
+            buckets = response.get("aggregations", {}).get("over_time", {}).get("buckets", [])
+            
+            return [
+                TimeSeriesPoint(
+                    timestamp=datetime.fromisoformat(bucket["key_as_string"].replace("Z", "+00:00")),
+                    value=bucket["doc_count"]
+                )
+                for bucket in buckets
+            ]
+        except Exception as e:
+            logger.error("Failed to get error timeseries", error=str(e))
+            return []
+    
+    async def get_http_status_timeseries(self, status_min: int, status_max: int, hours: int = 24, interval: str = "1h") -> List[TimeSeriesPoint]:
+        """Get HTTP status count time series."""
+        now = datetime.utcnow()
+        start = now - timedelta(hours=hours)
+        
+        body = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"range": {"timestamp": {"gte": start.isoformat()}}},
+                        {"range": {"http_status": {"gte": status_min, "lt": status_max}}}
+                    ]
+                }
+            },
+            "size": 0,
+            "aggs": {
+                "over_time": {
+                    "date_histogram": {
+                        "field": "timestamp",
+                        "fixed_interval": interval,
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.logs_index, body=body)
+            buckets = response.get("aggregations", {}).get("over_time", {}).get("buckets", [])
+            
+            return [
+                TimeSeriesPoint(
+                    timestamp=datetime.fromisoformat(bucket["key_as_string"].replace("Z", "+00:00")),
+                    value=bucket["doc_count"]
+                )
+                for bucket in buckets
+            ]
+        except Exception as e:
+            logger.error("Failed to get HTTP status timeseries", error=str(e))
+            return []
+    
+    async def get_resource_timeseries(self, metric: str, hours: int = 24, interval: str = "15m") -> List[TimeSeriesPoint]:
+        """Get resource usage time series (cpu_percent or memory_percent)."""
+        now = datetime.utcnow()
+        start = now - timedelta(hours=hours)
+        
+        body = {
+            "query": {
+                "range": {"timestamp": {"gte": start.isoformat()}}
+            },
+            "size": 0,
+            "aggs": {
+                "over_time": {
+                    "date_histogram": {
+                        "field": "timestamp",
+                        "fixed_interval": interval,
+                    },
+                    "aggs": {
+                        "avg_value": {"avg": {"field": metric}}
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.host_metrics_index, body=body)
+            buckets = response.get("aggregations", {}).get("over_time", {}).get("buckets", [])
+            
+            return [
+                TimeSeriesPoint(
+                    timestamp=datetime.fromisoformat(bucket["key_as_string"].replace("Z", "+00:00")),
+                    value=round(bucket["avg_value"]["value"] or 0, 2)
+                )
+                for bucket in buckets
+            ]
+        except Exception as e:
+            logger.error("Failed to get resource timeseries", error=str(e))
+            return []
+    
+    async def count_similar_logs(self, message: str, container_name: str = "", hours: int = 24) -> int:
+        """Count similar log messages in the last N hours.
+        
+        Uses a simplified similarity approach by extracting key terms from the message.
+        """
+        # Extract key terms (remove common patterns like timestamps, IDs, etc.)
+        import re
+        
+        # Simplify the message: remove timestamps, UUIDs, numbers, etc.
+        simplified = message
+        # Remove ISO timestamps
+        simplified = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[.\d]*Z?', '', simplified)
+        # Remove UUIDs
+        simplified = re.sub(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '', simplified, flags=re.I)
+        # Remove hex strings (like container IDs)
+        simplified = re.sub(r'[0-9a-f]{12,}', '', simplified, flags=re.I)
+        # Remove numbers (but keep words)
+        simplified = re.sub(r'\b\d+\b', '', simplified)
+        # Remove IPs
+        simplified = re.sub(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', '', simplified)
+        # Clean up extra spaces
+        simplified = ' '.join(simplified.split())
+        
+        # Extract key words (at least 4 chars, not too common)
+        words = [w for w in simplified.split() if len(w) >= 4]
+        
+        # Build query - match messages containing key words
+        if not words:
+            # If no key words, use exact message search (escaped)
+            query_str = f'"{message[:100]}"'
+        else:
+            # Use key words for similarity
+            key_words = words[:5]  # Limit to first 5 key words
+            query_str = ' AND '.join([f'message:*{word}*' for word in key_words])
+        
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        
+        body = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {
+                            "query_string": {
+                                "query": ' '.join(words[:5]) if words else message[:50],
+                                "default_field": "message",
+                                "default_operator": "AND"
+                            }
+                        }
+                    ],
+                    "filter": [
+                        {"range": {"timestamp": {"gte": cutoff.isoformat()}}}
+                    ]
+                }
+            }
+        }
+        
+        # Add container filter if provided
+        if container_name:
+            body["query"]["bool"]["filter"].append({"term": {"container_name": container_name}})
+        
+        try:
+            response = await self._client.count(index=self.logs_index, body=body)
+            return response.get("count", 0)
+        except Exception as e:
+            logger.error("Failed to count similar logs", error=str(e))
+            return 0
+    
+    async def cleanup_old_data(self, retention_days: int):
+        """Delete data older than retention period."""
+        cutoff = datetime.utcnow() - timedelta(days=retention_days)
+        
+        for index in [self.logs_index, self.metrics_index, self.host_metrics_index]:
+            try:
+                await self._client.delete_by_query(
+                    index=index,
+                    body={
+                        "query": {
+                            "range": {"timestamp": {"lt": cutoff.isoformat()}}
+                        }
+                    }
+                )
+                logger.info("Cleaned up old data", index=index, cutoff=cutoff.isoformat())
+            except Exception as e:
+                logger.error("Cleanup failed", index=index, error=str(e))

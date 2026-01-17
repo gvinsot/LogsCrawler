@@ -1,0 +1,49 @@
+# Development configuration with hot reload
+version: '3.8'
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    container_name: logscrawler-opensearch-dev
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms256m -Xmx256m"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    networks:
+      - logscrawler-dev-net
+
+  logscrawler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logscrawler-app-dev
+    user: root
+    ports:
+      - "5000:8000"
+    volumes:
+      - ~/.ssh:/root/.ssh:ro
+      - ./config.yaml:/app/config.yaml:ro
+      - ./backend:/app/backend:ro
+      - ./frontend:/app/frontend:ro
+      # Mount Docker socket for direct Docker API access
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - LOGSCRAWLER_DEBUG=true
+      - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://opensearch:9200"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - opensearch
+    networks:
+      - logscrawler-dev-net
+
+networks:
+  logscrawler-dev-net:
+    driver: bridge

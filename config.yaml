@@ -1,0 +1,60 @@
+# LogsCrawler Configuration
+# =========================
+
+# List of hosts to monitor
+# Connection modes:
+#   - "ssh": Connect via SSH (requires key-based auth)
+#   - "docker": Connect via Docker API (socket or TCP)
+#   - "local": Run commands locally (development only)
+
+hosts:
+  # === Docker API mode (RECOMMENDED for local monitoring) ===
+  # Uses the Docker socket mounted in docker-compose.yml
+  - name: "local-docker"
+    mode: "docker"
+    # docker_url: "unix:///var/run/docker.sock"  # Default, can be omitted
+    
+  # === SSH mode for remote servers ===
+  - name: "server-z"
+    mode: "ssh"
+    hostname: "192.168.1.91"
+    port: 22
+    username: "gildas"
+    # ssh_key_path: "~/.ssh/id_rsa"  # Optional
+    
+  # === Docker TCP mode for remote Docker hosts ===
+  # - name: "remote-docker"
+  #   mode: "docker"
+  #   docker_url: "tcp://192.168.1.50:2375"
+
+  # - name: "server-2"
+  #   hostname: "192.168.1.11"
+  #   port: 22
+  #   username: "deploy"
+  #   ssh_key_path: "~/.ssh/server2_key"
+
+# OpenSearch configuration
+# When running in Docker Compose, the LOGSCRAWLER_OPENSEARCH__HOSTS env var
+# will override this to use the "opensearch" service name
+opensearch:
+  hosts:
+    - "http://localhost:9200"
+  index_prefix: "logscrawler"
+  # username: "admin"
+  # password: "admin"
+
+# Collector settings
+collector:
+  # How often to fetch new logs (in seconds)
+  log_interval_seconds: 30
+  
+  # How often to collect metrics (in seconds)
+  metrics_interval_seconds: 15
+  
+  # Number of log lines to fetch on FIRST collection per container
+  # After first fetch, ALL new logs since last timestamp are collected
+  # (no lines will be missed between collections)
+  log_lines_per_fetch: 500
+  
+  # Data retention period (days)
+  retention_days: 7

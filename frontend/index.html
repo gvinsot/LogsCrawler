@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LogsCrawler - Docker Log Analytics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                    </svg>
+                </div>
+                <span class="logo-text">LogsCrawler</span>
+            </div>
+            
+            <nav class="nav">
+                <a href="#" class="nav-item active" data-view="dashboard">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7"/>
+                        <rect x="14" y="3" width="7" height="7"/>
+                        <rect x="14" y="14" width="7" height="7"/>
+                        <rect x="3" y="14" width="7" height="7"/>
+                    </svg>
+                    <span>Dashboard</span>
+                </a>
+                <a href="#" class="nav-item" data-view="containers">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                    </svg>
+                    <span>Containers</span>
+                </a>
+                <a href="#" class="nav-item" data-view="logs">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                    </svg>
+                    <span>Logs Search</span>
+                </a>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="connection-status">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Connected</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard View -->
+            <section id="dashboard-view" class="view active">
+                <header class="view-header">
+                    <h1>Dashboard</h1>
+                    <button class="btn btn-secondary" onclick="refreshDashboard()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <polyline points="23 4 23 10 17 10"/>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                        </svg>
+                        Refresh
+                    </button>
+                </header>
+                
+                <!-- Stats Cards -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon running">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polygon points="5 3 19 12 5 21 5 3"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <span class="stat-value" id="running-containers">-</span>
+                            <span class="stat-label">Running Containers</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card">
+                        <div class="stat-icon hosts">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+                                <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <span class="stat-value" id="total-hosts">-</span>
+                            <span class="stat-label">Hosts</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card warning">
+                        <div class="stat-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                                <line x1="12" y1="9" x2="12" y2="13"/>
+                                <line x1="12" y1="17" x2="12.01" y2="17"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <span class="stat-value" id="http-4xx">-</span>
+                            <span class="stat-label">HTTP 4xx (24h)</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card error">
+                        <div class="stat-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <line x1="15" y1="9" x2="9" y2="15"/>
+                                <line x1="9" y1="9" x2="15" y2="15"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <span class="stat-value" id="http-5xx">-</span>
+                            <span class="stat-label">HTTP 5xx (24h)</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card">
+                        <div class="stat-icon cpu">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="4" y="4" width="16" height="16" rx="2" ry="2"/>
+                                <rect x="9" y="9" width="6" height="6"/>
+                                <line x1="9" y1="1" x2="9" y2="4"/>
+                                <line x1="15" y1="1" x2="15" y2="4"/>
+                                <line x1="9" y1="20" x2="9" y2="23"/>
+                                <line x1="15" y1="20" x2="15" y2="23"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <span class="stat-value" id="avg-cpu">-</span>
+                            <span class="stat-label">Avg CPU</span>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card">
+                        <div class="stat-icon memory">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M6 19v-3M10 19v-3M14 19v-3M18 19v-3M6 8V5M10 8V5M14 8V5M18 8V5M4 8h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <span class="stat-value" id="avg-memory">-</span>
+                            <span class="stat-label">Avg Memory</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Charts -->
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h3>Errors Over Time (24h)</h3>
+                        <canvas id="errors-chart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>HTTP Status Codes (24h)</h3>
+                        <canvas id="http-chart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>CPU Usage (24h)</h3>
+                        <canvas id="cpu-chart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>Memory Usage (24h)</h3>
+                        <canvas id="memory-chart"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Containers View -->
+            <section id="containers-view" class="view">
+                <header class="view-header">
+                    <h1>Containers</h1>
+                    <div class="header-actions">
+                        <div class="filter-group">
+                            <label>Status:</label>
+                            <select id="status-filter" onchange="filterContainers()">
+                                <option value="">All</option>
+                                <option value="running">Running</option>
+                                <option value="exited">Exited</option>
+                                <option value="paused">Paused</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-secondary" onclick="refreshContainers()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                <polyline points="23 4 23 10 17 10"/>
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                </header>
+                
+                <div id="containers-list" class="containers-grouped">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </section>
+
+            <!-- Logs Search View -->
+            <section id="logs-view" class="view">
+                <header class="view-header">
+                    <h1>Logs Search</h1>
+                    <div class="ai-status-wrapper">
+                        <span class="ai-badge">🤖 AI Powered</span>
+                        <span id="ai-status-indicator" class="ai-indicator" title="AI Status"></span>
+                    </div>
+                </header>
+                
+                <!-- AI Search Panel -->
+                <div id="ai-search-panel" class="search-panel ai-panel">
+                    <div class="search-row">
+                        <div class="search-input-wrapper">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+                                <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/>
+                            </svg>
+                            <input type="text" id="ai-query" placeholder="Ex: Find errors from the last 10 minutes, Show 500 errors in nginx..." class="search-input ai-input">
+                        </div>
+                        <button class="btn btn-primary" onclick="aiSearchLogs()" id="ai-search-btn">
+                            <span class="btn-text">Ask AI</span>
+                            <span class="btn-loading" style="display:none;">⏳</span>
+                        </button>
+                    </div>
+                    
+                    <!-- Generated Query Panel (shown after AI search) -->
+                    <div id="ai-generated-query" class="generated-query-panel" style="display: none;">
+                        <div class="generated-query-header">
+                            <span class="interpretation-label">📝 OpenSearch Query (editable JSON):</span>
+                            <button class="btn btn-sm btn-secondary" onclick="executeGeneratedQuery()">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                    <polygon points="5 3 19 12 5 21 5 3"/>
+                                </svg>
+                                Run
+                            </button>
+                        </div>
+                        <textarea id="gen-query-json" class="query-json-editor" rows="3" spellcheck="false"></textarea>
+                    </div>
+                </div>
+                
+                <div class="logs-results">
+                    <div class="results-header">
+                        <span id="results-count">0 results</span>
+                        <div class="results-actions">
+                            <button class="btn btn-sm" onclick="exportLogs()">Export</button>
+                        </div>
+                    </div>
+                    <div id="logs-table-container" class="logs-table-container">
+                        <table class="logs-table">
+                            <thead>
+                                <tr>
+                                    <th class="col-time">Time</th>
+                                    <th class="col-source">Host / Container</th>
+                                    <th class="col-level">Level</th>
+                                    <th class="col-message">Message</th>
+                                </tr>
+                            </thead>
+                            <tbody id="logs-table-body">
+                                <!-- Populated by JavaScript -->
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="pagination">
+                        <button class="btn btn-sm" id="prev-page" onclick="prevPage()" disabled>Previous</button>
+                        <span id="page-info">Page 1</span>
+                        <button class="btn btn-sm" id="next-page" onclick="nextPage()">Next</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Container Detail Modal -->
+            <div id="container-modal" class="modal">
+                <div class="modal-content modal-fullscreen">
+                    <div class="modal-header">
+                        <div class="modal-title-section">
+                            <h2 id="modal-container-name">Container Details</h2>
+                            <span id="modal-container-status" class="status-badge">running</span>
+                        </div>
+                        <div class="modal-header-actions">
+                            <button class="btn btn-sm btn-success" onclick="containerAction('start')" title="Start">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                    <polygon points="5 3 19 12 5 21 5 3"/>
+                                </svg>
+                                Start
+                            </button>
+                            <button class="btn btn-sm btn-warning" onclick="containerAction('stop')" title="Stop">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                    <rect x="6" y="6" width="12" height="12"/>
+                                </svg>
+                                Stop
+                            </button>
+                            <button class="btn btn-sm btn-secondary" onclick="containerAction('restart')" title="Restart">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                    <polyline points="23 4 23 10 17 10"/>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                </svg>
+                                Restart
+                            </button>
+                            <button class="modal-close" onclick="closeModal()">&times;</button>
+                        </div>
+                    </div>
+                    <div class="modal-tabs">
+                        <button class="tab-btn active" data-tab="logs">Logs</button>
+                        <button class="tab-btn" data-tab="stats">Stats</button>
+                        <button class="tab-btn" data-tab="info">Info</button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="tab-logs" class="tab-content active">
+                            <div class="logs-toolbar">
+                                <div class="logs-toolbar-left">
+                                    <button class="btn btn-sm" onclick="refreshContainerLogs()">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                            <polyline points="23 4 23 10 17 10"/>
+                                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                        </svg>
+                                        Refresh
+                                    </button>
+                                    <input type="number" id="logs-tail" value="500" min="10" max="10000" class="small-input">
+                                    <label>lines</label>
+                                </div>
+                                <div class="logs-toolbar-right">
+                                    <div class="logs-search-wrapper">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                            <circle cx="11" cy="11" r="8"/>
+                                            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                                        </svg>
+                                        <input type="text" id="logs-filter" placeholder="Filter logs..." class="logs-filter-input" oninput="filterContainerLogs()">
+                                    </div>
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" id="logs-errors-only" onchange="filterContainerLogs()">
+                                        Errors only
+                                    </label>
+                                </div>
+                            </div>
+                            <div id="container-logs" class="log-viewer"></div>
+                        </div>
+                        <div id="tab-stats" class="tab-content">
+                            <div class="stats-detail">
+                                <div class="stat-row">
+                                    <span class="label">CPU Usage:</span>
+                                    <span class="value" id="stat-cpu">-</span>
+                                </div>
+                                <div class="stat-row">
+                                    <span class="label">Memory Usage:</span>
+                                    <span class="value" id="stat-memory">-</span>
+                                </div>
+                                <div class="stat-row">
+                                    <span class="label">Network I/O:</span>
+                                    <span class="value" id="stat-network">-</span>
+                                </div>
+                                <div class="stat-row">
+                                    <span class="label">Block I/O:</span>
+                                    <span class="value" id="stat-block">-</span>
+                                </div>
+                            </div>
+                            <button class="btn btn-sm" onclick="refreshContainerStats()">Refresh Stats</button>
+                        </div>
+                        <div id="tab-info" class="tab-content">
+                            <div class="info-detail" id="container-info">
+                                <!-- Populated by JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
