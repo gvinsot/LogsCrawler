@@ -812,7 +812,7 @@ async function loadContainers() {
         const containerCount = Object.values(projects).reduce((sum, containers) => sum + containers.length, 0);
         
         let hostHtml = `
-            <div class="host-header" onclick="toggleHostGroup(this)">
+            <div class="host-header" onclick="toggleHostGroup(event, this)">
                 <span class="host-name">
                     <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="6 9 12 15 18 9"/>
@@ -904,23 +904,14 @@ async function loadContainers() {
     }
 }
 
-function toggleHostGroup(headerEl) {
-    const hostGroup = headerEl.closest('.host-group');
-    hostGroup.classList.toggle('collapsed');
-    const content = hostGroup.querySelector('.host-content');
-    if (content) {
-        content.style.display = hostGroup.classList.contains('collapsed') ? 'none' : '';
-    }
+function toggleHostGroup(event, headerEl) {
+    event?.stopPropagation();
+    headerEl.closest('.host-group')?.classList.toggle('collapsed');
 }
 
 function toggleComposeGroup(event, headerEl) {
     event.stopPropagation();
-    const composeGroup = headerEl.closest('.compose-group');
-    composeGroup.classList.toggle('collapsed');
-    const content = composeGroup.querySelector('.compose-content');
-    if (content) {
-        content.style.display = composeGroup.classList.contains('collapsed') ? 'none' : '';
-    }
+    headerEl.closest('.compose-group')?.classList.toggle('collapsed');
 }
 
 async function refreshContainers() {
