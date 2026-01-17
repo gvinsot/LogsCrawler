@@ -130,6 +130,15 @@ async def lifespan(app: FastAPI):
         stats = vector_service.get_stats()
         print(f"✅ Vector index ready ({stats['total_vectors']} vectors)")
         
+        # Initialize OpenSearch
+        if settings.opensearch_enabled:
+            from app.services.opensearch_service import opensearch_service
+            if await opensearch_service.connect():
+                os_stats = await opensearch_service.get_stats()
+                print(f"✅ OpenSearch connected ({os_stats.get('doc_count', 0)} documents indexed)")
+            else:
+                print("⚠️  OpenSearch not connected - full-text search disabled")
+        
         # Initialize AI service RAG
         if await ai_service.initialize_rag():
             print("✅ RAG system initialized")
@@ -184,6 +193,11 @@ async def lifespan(app: FastAPI):
     if settings.rag_enabled:
         from app.services.storage_service import storage_service
         await storage_service.close()
+        
+        # Close OpenSearch connection
+        if settings.opensearch_enabled:
+            from app.services.opensearch_service import opensearch_service
+            await opensearch_service.close()
     
     # Close remote SSH connections
     await remote_systems_service.close_all_connections()

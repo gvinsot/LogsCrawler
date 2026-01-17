@@ -15,6 +15,7 @@ from app.config import settings
 from app.services.docker_service import docker_service
 from app.services.storage_service import storage_service, LogEvent, LogLevel
 from app.services.vector_service import vector_service, LogDocument
+from app.services.opensearch_service import opensearch_service, LogEntry as OSLogEntry
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,8 @@ class LogProcessor:
         message: str,
         timestamp: Optional[datetime] = None,
         store_all: bool = False,
+        system_id: Optional[str] = None,
+        system_name: Optional[str] = None,
     ) -> bool:
         """
         Ingest a single log entry.
@@ -189,6 +192,8 @@ class LogProcessor:
             message: Log message
             timestamp: Log timestamp (defaults to now)
             store_all: If False, only store warnings/errors in MongoDB
+            system_id: Remote system ID (None for local)
+            system_name: Remote system name (None for local)
         """
         processed = self.process_log(container_id, container_name, message, timestamp)
         if not processed:
@@ -223,6 +228,21 @@ class LogProcessor:
                     level=processed.level.value,
                 )
                 await vector_service.add_document(doc)
+            
+            # Store ALL logs in OpenSearch for full-text search
+            if settings.opensearch_enabled and opensearch_service.is_connected():
+                os_entry = OSLogEntry(
+                    container_id=processed.container_id,
+                    container_name=processed.container_name,
+                    message=processed.message,
+                    timestamp=processed.timestamp,
+                    level=processed.level.value,
+                    system_id=system_id,
+                    system_name=system_name,
+                    pattern=processed.pattern,
+                    category=processed.category,
+                )
+                await opensearch_service.index_log(os_entry)
             
             return True
             

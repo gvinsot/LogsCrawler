@@ -1037,6 +1037,29 @@ function renderContainersGrid(containers) {
                             AI
                         </button>
                     </div>
+                    ${(!c.system_id || c.system_id === 'local') ? `
+                    <div class="container-controls">
+                        ${c.status === 'running' ? `
+                            <button class="btn btn-control btn-stop" onclick="event.stopPropagation(); containerAction('${c.id}', 'stop')" title="Stop Container">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="6" y="6" width="12" height="12"></rect>
+                                </svg>
+                            </button>
+                            <button class="btn btn-control btn-restart" onclick="event.stopPropagation(); containerAction('${c.id}', 'restart')" title="Restart Container">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                                </svg>
+                            </button>
+                        ` : `
+                            <button class="btn btn-control btn-start" onclick="event.stopPropagation(); containerAction('${c.id}', 'start')" title="Start Container">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                </svg>
+                            </button>
+                        `}
+                    </div>
+                    ` : ''}
                 </div>
             `;
         });
@@ -1192,6 +1215,47 @@ async function analyzeContainer(containerId, systemId = 'local') {
     
     // Send analysis prompt
     sendQuickPrompt(`Analyze the logs from container "${name}" and tell me if there are any issues or problems.`);
+}
+
+async function containerAction(containerId, action) {
+    const container = state.containers.find(c => c.id === containerId);
+    const name = container ? container.name : containerId;
+    
+    const actionLabels = {
+        'start': 'Starting',
+        'stop': 'Stopping',
+        'restart': 'Restarting'
+    };
+    
+    const actionPastLabels = {
+        'start': 'started',
+        'stop': 'stopped',
+        'restart': 'restarted'
+    };
+    
+    showToast(`${actionLabels[action]} ${name}...`, 'info');
+    
+    try {
+        const response = await fetch(`/api/containers/${containerId}/${action}`, {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || `Failed to ${action} container`);
+        }
+        
+        showToast(`Container ${name} ${actionPastLabels[action]} successfully`, 'success');
+        
+        // Refresh containers after a short delay to get updated status
+        setTimeout(() => {
+            loadContainers();
+        }, 1000);
+        
+    } catch (error) {
+        console.error(`Failed to ${action} container:`, error);
+        showToast(`Failed to ${action} ${name}: ${error.message}`, 'error');
+    }
 }
 
 // ==================== Logs View ====================

@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_database: str = "logscrawler"
     
+    # OpenSearch Settings
+    opensearch_host: str = "http://localhost:9200"
+    opensearch_index: str = "logscrawler-logs"
+    opensearch_enabled: bool = True
+    
     # Log Settings
     log_tail_lines: int = 500  # Default number of lines to fetch
     log_stream_interval: float = 1.0  # Seconds between log checks

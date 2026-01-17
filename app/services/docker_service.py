@@ -154,6 +154,51 @@ class DockerService:
         except DockerException as e:
             raise Exception(f"Failed to get container: {e}")
     
+    def start_container(self, container_id: str) -> bool:
+        """Start a stopped container."""
+        try:
+            container = self.client.containers.get(container_id)
+            if container.status == 'running':
+                logger.info(f"Container {container_id} is already running")
+                return True
+            container.start()
+            logger.info(f"Started container {container_id}")
+            return True
+        except NotFound:
+            raise Exception(f"Container {container_id} not found")
+        except DockerException as e:
+            logger.error(f"Failed to start container {container_id}: {e}")
+            raise Exception(f"Failed to start container: {e}")
+    
+    def stop_container(self, container_id: str, timeout: int = 10) -> bool:
+        """Stop a running container."""
+        try:
+            container = self.client.containers.get(container_id)
+            if container.status != 'running':
+                logger.info(f"Container {container_id} is not running (status: {container.status})")
+                return True
+            container.stop(timeout=timeout)
+            logger.info(f"Stopped container {container_id}")
+            return True
+        except NotFound:
+            raise Exception(f"Container {container_id} not found")
+        except DockerException as e:
+            logger.error(f"Failed to stop container {container_id}: {e}")
+            raise Exception(f"Failed to stop container: {e}")
+    
+    def restart_container(self, container_id: str, timeout: int = 10) -> bool:
+        """Restart a container."""
+        try:
+            container = self.client.containers.get(container_id)
+            container.restart(timeout=timeout)
+            logger.info(f"Restarted container {container_id}")
+            return True
+        except NotFound:
+            raise Exception(f"Container {container_id} not found")
+        except DockerException as e:
+            logger.error(f"Failed to restart container {container_id}: {e}")
+            raise Exception(f"Failed to restart container: {e}")
+    
     def get_logs(
         self,
         container_id: str,

@@ -20,6 +20,9 @@ services:
       - LOGSCRAWLER_MONGODB_DATABASE=logscrawler
       - LOGSCRAWLER_DATA_DIR=/app/data
       - LOGSCRAWLER_LOG_RETENTION_DAYS=30
+      # OpenSearch Configuration
+      - LOGSCRAWLER_OPENSEARCH_HOST=http://opensearch:9200
+      - LOGSCRAWLER_OPENSEARCH_INDEX=logscrawler-logs
       # Ensure DOCKER_HOST is not set incorrectly (will be handled by code)
       - DOCKER_HOST=
     volumes:
@@ -30,6 +33,7 @@ services:
     depends_on:
       - ollama
       - mongodb
+      - opensearch
     networks:
       - logscrawler-net
     restart: unless-stopped
@@ -82,6 +86,35 @@ services:
       timeout: 10s
       retries: 3
 
+  # OpenSearch for full-text log indexing and search
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    container_name: logscrawler-opensearch
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - logscrawler-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
 networks:
   logscrawler-net:
     driver: bridge
@@ -92,4 +125,6 @@ volumes:
   mongodb-data:
     driver: local
   logscrawler-data:
+    driver: local
+  opensearch-data:
     driver: local

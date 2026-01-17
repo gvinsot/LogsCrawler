@@ -85,6 +85,36 @@ async def get_container(container_id: str):
     return container
 
 
+@router.post("/containers/{container_id}/start")
+async def start_container(container_id: str):
+    """Start a stopped container."""
+    try:
+        docker_service.start_container(container_id)
+        return {"status": "started", "container_id": container_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/containers/{container_id}/stop")
+async def stop_container(container_id: str):
+    """Stop a running container."""
+    try:
+        docker_service.stop_container(container_id)
+        return {"status": "stopped", "container_id": container_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/containers/{container_id}/restart")
+async def restart_container(container_id: str):
+    """Restart a container."""
+    try:
+        docker_service.restart_container(container_id)
+        return {"status": "restarted", "container_id": container_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== Logs ====================
 
 @router.get("/logs/{container_id}", response_model=List[ContainerLog])
@@ -706,5 +736,153 @@ async def get_issue_frequency(
             days=days,
         )
         return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== OpenSearch Full-Text Search ====================
+
+@router.get("/opensearch/search")
+async def opensearch_search(
+    query: str = Query("", description="Full-text search query"),
+    container: Optional[str] = Query(None, description="Filter by container name"),
+    system: Optional[str] = Query(None, description="Filter by system (local or remote name)"),
+    level: Optional[str] = Query(None, description="Filter by log level"),
+    hours: Optional[int] = Query(None, ge=1, le=720, description="Logs from last N hours"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum results"),
+):
+    """
+    Full-text search across all indexed logs using OpenSearch.
+    Supports filtering by container, system, level, and time range.
+    """
+    if not settings.opensearch_enabled:
+        raise HTTPException(status_code=400, detail="OpenSearch is not enabled")
+    
+    try:
+        from app.services.opensearch_service import opensearch_service
+        from datetime import datetime, timedelta
+        
+        if not opensearch_service.is_connected():
+            raise HTTPException(status_code=503, detail="OpenSearch not connected")
+        
+        time_from = None
+        if hours:
+            time_from = datetime.now() - timedelta(hours=hours)
+        
+        results = await opensearch_service.search(
+            query=query,
+            container=container,
+            system=system,
+            level=level,
+            time_from=time_from,
+            limit=limit,
+        )
+        
+        return {
+            "query": query,
+            "filters": {
+                "container": container,
+                "system": system,
+                "level": level,
+                "hours": hours,
+            },
+            "results": [
+                {
+                    "container_name": r.container_name,
+                    "system_name": r.system_name,
+                    "message": r.message,
+                    "timestamp": r.timestamp,
+                    "level": r.level,
+                    "score": r.score,
+                    "highlight": r.highlight,
+                }
+                for r in results
+            ],
+            "count": len(results),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/opensearch/errors")
+async def opensearch_get_errors(
+    container: Optional[str] = Query(None, description="Filter by container name"),
+    system: Optional[str] = Query(None, description="Filter by system"),
+    hours: int = Query(24, ge=1, le=168, description="Look back N hours"),
+    limit: int = Query(100, ge=1, le=500, description="Maximum results"),
+):
+    """Get recent error-level logs from OpenSearch."""
+    if not settings.opensearch_enabled:
+        raise HTTPException(status_code=400, detail="OpenSearch is not enabled")
+    
+    try:
+        from app.services.opensearch_service import opensearch_service
+        
+        if not opensearch_service.is_connected():
+            raise HTTPException(status_code=503, detail="OpenSearch not connected")
+        
+        results = await opensearch_service.search_errors(
+            container=container,
+            system=system,
+            hours=hours,
+            limit=limit,
+        )
+        
+        return {
+            "hours": hours,
+            "results": [
+                {
+                    "container_name": r.container_name,
+                    "system_name": r.system_name,
+                    "message": r.message,
+                    "timestamp": r.timestamp,
+                    "level": r.level,
+                }
+                for r in results
+            ],
+            "count": len(results),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/opensearch/stats")
+async def opensearch_get_stats():
+    """Get OpenSearch index statistics."""
+    if not settings.opensearch_enabled:
+        raise HTTPException(status_code=400, detail="OpenSearch is not enabled")
+    
+    try:
+        from app.services.opensearch_service import opensearch_service
+        
+        stats = await opensearch_service.get_stats()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/opensearch/container/{container_name}/stats")
+async def opensearch_container_stats(container_name: str):
+    """Get log statistics for a specific container from OpenSearch."""
+    if not settings.opensearch_enabled:
+        raise HTTPException(status_code=400, detail="OpenSearch is not enabled")
+    
+    try:
+        from app.services.opensearch_service import opensearch_service
+        
+        if not opensearch_service.is_connected():
+            raise HTTPException(status_code=503, detail="OpenSearch not connected")
+        
+        stats = await opensearch_service.get_container_stats(container_name)
+        return {
+            "container": container_name,
+            **stats
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
