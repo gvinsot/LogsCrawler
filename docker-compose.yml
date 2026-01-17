@@ -72,7 +72,6 @@ services:
       - LOGSCRAWLER_DEBUG=false
       - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://opensearch:9200"]
       - LOGSCRAWLER_OLLAMA_URL=http://ollama:11434
-      - LOGSCRAWLER_AI_MODEL=qwen2.5:1.5b
     extra_hosts:
       # Allows container to reach the host machine via "host.docker.internal"
       # On Linux, you may need to use your actual host IP instead

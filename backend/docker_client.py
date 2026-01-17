@@ -204,6 +204,9 @@ class DockerAPIClient:
         
         memory_percent = (memory_used_mb / memory_total_mb * 100) if memory_total_mb > 0 else 0
         
+        # Try to get GPU metrics via nvidia-smi
+        gpu_percent, gpu_mem_used, gpu_mem_total = await self._get_gpu_metrics()
+        
         return HostMetrics(
             host=self.config.name,
             timestamp=datetime.utcnow(),
@@ -214,10 +217,30 @@ class DockerAPIClient:
             disk_total_gb=0,
             disk_used_gb=0,
             disk_percent=0,
-            gpu_percent=None,
-            gpu_memory_used_mb=None,
-            gpu_memory_total_mb=None,
+            gpu_percent=gpu_percent,
+            gpu_memory_used_mb=gpu_mem_used,
+            gpu_memory_total_mb=gpu_mem_total,
         )
+    
+    async def _get_gpu_metrics(self) -> tuple:
+        """Try to get GPU metrics using nvidia-smi."""
+        import subprocess
+        try:
+            # Run nvidia-smi to get GPU utilization
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split(", ")
+                if len(parts) >= 3:
+                    return float(parts[0]), float(parts[1]), float(parts[2])
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
+            # nvidia-smi not available or failed
+            pass
+        return None, None, None
     
     async def get_container_logs(
         self,

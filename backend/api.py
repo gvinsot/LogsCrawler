@@ -110,6 +110,15 @@ async def get_http_5xx_timeseries(
     return await opensearch.get_http_status_timeseries(500, 600, hours=hours, interval=interval)
 
 
+@app.get("/api/dashboard/http-requests-timeseries", response_model=List[TimeSeriesPoint])
+async def get_http_requests_timeseries(
+    hours: int = Query(default=24, ge=1, le=168),
+    interval: str = Query(default="1h")
+):
+    """Get total HTTP requests count time series."""
+    return await opensearch.get_http_requests_timeseries(hours=hours, interval=interval)
+
+
 @app.get("/api/dashboard/cpu-timeseries", response_model=List[TimeSeriesPoint])
 async def get_cpu_timeseries(
     hours: int = Query(default=24, ge=1, le=168),
@@ -117,6 +126,15 @@ async def get_cpu_timeseries(
 ):
     """Get CPU usage time series."""
     return await opensearch.get_resource_timeseries("cpu_percent", hours=hours, interval=interval)
+
+
+@app.get("/api/dashboard/gpu-timeseries", response_model=List[TimeSeriesPoint])
+async def get_gpu_timeseries(
+    hours: int = Query(default=24, ge=1, le=168),
+    interval: str = Query(default="15m")
+):
+    """Get GPU usage time series."""
+    return await opensearch.get_resource_timeseries("gpu_percent", hours=hours, interval=interval)
 
 
 @app.get("/api/dashboard/memory-timeseries", response_model=List[TimeSeriesPoint])

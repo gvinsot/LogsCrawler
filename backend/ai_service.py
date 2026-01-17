@@ -240,97 +240,126 @@ class AIService:
             "high", "low memory", "disk space", "rate limit"
         ]
         
-        # Check for critical issues
+        # Check for obvious critical issues first (fast heuristic)
         if level in ["FATAL", "CRITICAL"] or any(p in message_lower for p in critical_patterns):
+            # Still try AI for better description
+            if not self._available:
+                await self.check_availability()
+            if self._available:
+                try:
+                    return await self._ai_analyze_log(message, level, container_name, hint_severity="critical")
+                except Exception:
+                    pass
             return {
                 "severity": "critical",
-                "assessment": "This log indicates a critical issue that requires immediate attention."
+                "assessment": "Critical issue detected - requires immediate attention."
             }
         
-        # Check for errors (but exclude HTTP 4xx in URL paths)
+        # Check for HTTP logs with status codes (fast heuristic)
         is_http_log = "http" in message_lower and ('" 2' in message or '" 3' in message or '" 4' in message or '" 5' in message)
-        has_error_in_path = "/error" in message_lower or "/errors" in message_lower
+        if is_http_log:
+            http_status = re.search(r'" (\d{3})', message)
+            if http_status:
+                status = int(http_status.group(1))
+                if 200 <= status < 400:
+                    return {
+                        "severity": "normal",
+                        "assessment": f"HTTP {status} - Successful request."
+                    }
+                elif 400 <= status < 500:
+                    return {
+                        "severity": "attention",
+                        "assessment": f"HTTP {status} client error - Check request parameters or URL."
+                    }
+                elif status >= 500:
+                    return {
+                        "severity": "critical",
+                        "assessment": f"HTTP {status} server error - Backend issue needs investigation."
+                    }
         
-        if level == "ERROR" or (any(p in message_lower for p in error_patterns) and not has_error_in_path):
-            # Check if it's just an HTTP error response
-            if is_http_log and ('" 4' in message or '" 5' in message):
-                http_status = re.search(r'" (\d{3})', message)
-                if http_status:
-                    status = int(http_status.group(1))
-                    if 400 <= status < 500:
-                        return {
-                            "severity": "attention",
-                            "assessment": f"HTTP {status} client error. May indicate bad requests or missing resources."
-                        }
-                    elif status >= 500:
-                        return {
-                            "severity": "critical",
-                            "assessment": f"HTTP {status} server error. Indicates a backend issue that needs investigation."
-                        }
-            
-            return {
-                "severity": "attention",
-                "assessment": "This log contains error indicators that should be reviewed."
-            }
-        
-        # Check for warnings
-        if level in ["WARN", "WARNING"] or any(p in message_lower for p in warning_patterns):
-            return {
-                "severity": "attention",
-                "assessment": "This log contains warnings that may need monitoring."
-            }
-        
-        # For INFO/DEBUG or no clear issues - try AI if available, else normal
+        # For all other logs, try AI analysis
         if not self._available:
             await self.check_availability()
         
         if self._available:
             try:
-                return await self._ai_analyze_log(message, level, container_name)
+                # Hint the AI about probable severity based on level
+                hint = None
+                if level == "ERROR" or any(p in message_lower for p in error_patterns):
+                    hint = "attention"
+                elif level in ["WARN", "WARNING"] or any(p in message_lower for p in warning_patterns):
+                    hint = "attention"
+                elif level == "DEBUG":
+                    hint = "normal"
+                
+                return await self._ai_analyze_log(message, level, container_name, hint_severity=hint)
             except Exception as e:
                 logger.debug("AI analysis failed, using heuristics", error=str(e))
+        
+        # Fallback to heuristics if AI not available
+        has_error_in_path = "/error" in message_lower or "/errors" in message_lower
+        
+        if level == "ERROR" or (any(p in message_lower for p in error_patterns) and not has_error_in_path):
+            return {
+                "severity": "attention",
+                "assessment": "Error indicator detected - review recommended."
+            }
+        
+        if level in ["WARN", "WARNING"] or any(p in message_lower for p in warning_patterns):
+            return {
+                "severity": "attention",
+                "assessment": "Warning indicator detected - may need monitoring."
+            }
         
         # Default: appears normal
         return {
             "severity": "normal",
-            "assessment": "This log appears to be a standard operational message."
+            "assessment": "Standard operational message."
         }
     
-    async def _ai_analyze_log(self, message: str, level: str, container_name: str) -> Dict[str, Any]:
+    async def _ai_analyze_log(self, message: str, level: str, container_name: str, hint_severity: str = None) -> Dict[str, Any]:
         """Use AI to analyze a log message."""
         session = await self._get_session()
         
-        analysis_prompt = f"""Analyze this log message and determine if it indicates a problem.
+        # Build context hint if provided
+        context_hint = ""
+        if hint_severity:
+            context_hint = f"\nNote: Based on log level '{level}', this is likely a '{hint_severity}' severity, but analyze the actual content."
+        
+        analysis_prompt = f"""Analyze this log message and provide a specific assessment.
 
 Log message: {message[:500]}
 Log level: {level or 'UNKNOWN'}
-Container: {container_name or 'UNKNOWN'}
+Container: {container_name or 'UNKNOWN'}{context_hint}
 
 Respond with a JSON object containing:
 - severity: "normal", "attention", or "critical"
-- assessment: A brief one-sentence explanation (max 100 chars)
+- assessment: A brief, SPECIFIC explanation about THIS log (max 100 chars). Be precise about what the log shows.
 
 Examples:
-{{"severity": "normal", "assessment": "Standard HTTP request log, no issues detected."}}
-{{"severity": "attention", "assessment": "Connection timeout may indicate network issues."}}
-{{"severity": "critical", "assessment": "Out of memory error requires immediate action."}}
+{{"severity": "normal", "assessment": "Startup message - service initialized successfully."}}
+{{"severity": "attention", "assessment": "Connection to Redis timed out after 30s."}}
+{{"severity": "critical", "assessment": "Database connection pool exhausted (0/50 available)."}}
+{{"severity": "normal", "assessment": "Debug trace: processing user request ID 12345."}}
+{{"severity": "attention", "assessment": "Deprecated API called - migrate to v2 endpoint."}}
 
-Respond only with JSON, no markdown or explanations."""
+DO NOT use generic messages. Describe what THIS specific log is about.
+Respond only with valid JSON, no markdown or extra text."""
 
         payload = {
             "model": self.model,
             "prompt": analysis_prompt,
             "stream": False,
             "options": {
-                "temperature": 0.1,
-                "num_predict": 100,
+                "temperature": 0.3,
+                "num_predict": 150,
             }
         }
         
         async with session.post(
             f"{self.ollama_url}/api/generate",
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=10)
+            timeout=aiohttp.ClientTimeout(total=15)
         ) as resp:
             if resp.status == 200:
                 data = await resp.json()
@@ -368,9 +397,11 @@ ai_service: Optional[AIService] = None
 def get_ai_service() -> AIService:
     """Get or create AI service instance."""
     import os
+    from .config import settings
+    
     global ai_service
     if ai_service is None:
         ollama_url = os.environ.get("LOGSCRAWLER_OLLAMA_URL", "http://ollama:11434")
-        model = os.environ.get("LOGSCRAWLER_AI_MODEL", "phi3:mini")
+        model = settings.ai.model
         ai_service = AIService(ollama_url, model)
     return ai_service

@@ -58,3 +58,9 @@ collector:
   
   # Data retention period (days)
   retention_days: 7
+
+# AI settings (Ollama)
+ai:
+  # Model to use for query conversion and log analysis
+  # Recommended: qwen2.5:1.5b (fast), llama3.2:latest (better quality)
+  model: "llama3.2:latest"

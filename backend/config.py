@@ -47,6 +47,11 @@ class CollectorConfig(BaseModel):
     retention_days: int = 7
 
 
+class AIConfig(BaseModel):
+    """AI/Ollama configuration."""
+    model: str = "qwen2.5:1.5b"
+
+
 class Settings(BaseSettings):
     """Application settings."""
     app_name: str = "LogsCrawler"
@@ -64,6 +69,9 @@ class Settings(BaseSettings):
     
     # Collector
     collector: CollectorConfig = CollectorConfig()
+    
+    # AI
+    ai: AIConfig = AIConfig()
     
     # Hosts (loaded from config file)
     hosts: List[HostConfig] = []
@@ -89,6 +97,8 @@ def load_config(config_path: str = "config.yaml") -> Settings:
                 settings.opensearch = OpenSearchConfig(**yaml_config["opensearch"])
             if "collector" in yaml_config:
                 settings.collector = CollectorConfig(**yaml_config["collector"])
+            if "ai" in yaml_config:
+                settings.ai = AIConfig(**yaml_config["ai"])
     
     # Override with environment variables
     opensearch_hosts_env = os.environ.get("LOGSCRAWLER_OPENSEARCH__HOSTS")

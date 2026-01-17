@@ -20,7 +20,6 @@ document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
     initModalTabs();
     loadDashboard();
-    loadHosts();
 });
 
 function initNavigation() {
@@ -60,6 +59,7 @@ function switchView(view) {
                 loadDefaultLogs();
             }
             checkAIStatus();
+            renderRecentQueries();
             break;
     }
 }
@@ -84,6 +84,122 @@ async function checkAIStatus() {
     }
 }
 
+// ============== Recent Queries ==============
+
+const RECENT_QUERIES_KEY = 'logscrawler_recent_queries';
+const MAX_RECENT_QUERIES = 10;
+
+function getRecentQueries() {
+    try {
+        const stored = localStorage.getItem(RECENT_QUERIES_KEY);
+        return stored ? JSON.parse(stored) : [];
+    } catch {
+        return [];
+    }
+}
+
+function saveRecentQuery(question, queryParams) {
+    const queries = getRecentQueries();
+    
+    // Remove duplicates
+    const filtered = queries.filter(q => q.question.toLowerCase() !== question.toLowerCase());
+    
+    // Add new query at the beginning
+    filtered.unshift({
+        question: question,
+        params: queryParams,
+        timestamp: Date.now()
+    });
+    
+    // Keep only MAX_RECENT_QUERIES
+    const trimmed = filtered.slice(0, MAX_RECENT_QUERIES);
+    
+    localStorage.setItem(RECENT_QUERIES_KEY, JSON.stringify(trimmed));
+    renderRecentQueries();
+}
+
+function renderRecentQueries() {
+    const queries = getRecentQueries();
+    const container = document.getElementById('recent-queries');
+    const list = document.getElementById('recent-queries-list');
+    
+    if (!queries.length) {
+        container.style.display = 'none';
+        return;
+    }
+    
+    list.innerHTML = queries.map((q, idx) => `
+        <span class="recent-query-item" onclick="useRecentQuery(${idx})" title="${escapeHtml(q.question)}">
+            ${escapeHtml(q.question.length > 40 ? q.question.substring(0, 40) + '...' : q.question)}
+            <span class="delete-query" onclick="event.stopPropagation(); deleteRecentQuery(${idx})">✕</span>
+        </span>
+    `).join('');
+    
+    container.style.display = 'block';
+}
+
+function showRecentQueries() {
+    renderRecentQueries();
+}
+
+function hideRecentQueries() {
+    // Delay hiding to allow click on items
+    setTimeout(() => {
+        const container = document.getElementById('recent-queries');
+        // Don't hide if mouse is over the container
+        if (!container.matches(':hover')) {
+            // container.style.display = 'none';
+        }
+    }, 200);
+}
+
+function useRecentQuery(index) {
+    const queries = getRecentQueries();
+    if (index >= 0 && index < queries.length) {
+        const query = queries[index];
+        document.getElementById('ai-query').value = query.question;
+        
+        // If we have saved params, use them directly (skip AI call)
+        if (query.params) {
+            populateGeneratedQuery(query.params);
+            
+            // Execute search with saved params
+            const paginationParams = { ...query.params, sort_order: query.params.sort_order || 'desc' };
+            if (query.params.time_range) {
+                const now = new Date();
+                let start = new Date(now);
+                if (query.params.time_range.endsWith('m')) {
+                    start.setMinutes(start.getMinutes() - parseInt(query.params.time_range));
+                } else if (query.params.time_range.endsWith('h')) {
+                    start.setHours(start.getHours() - parseInt(query.params.time_range));
+                } else if (query.params.time_range.endsWith('d')) {
+                    start.setDate(start.getDate() - parseInt(query.params.time_range));
+                }
+                paginationParams.start_time = start.toISOString();
+                delete paginationParams.time_range;
+            }
+            lastSearchParams = paginationParams;
+            logsPage = 0;
+            executeSearchWithParams(paginationParams);
+        } else {
+            // No saved params, run AI search
+            aiSearchLogs();
+        }
+    }
+}
+
+function deleteRecentQuery(index) {
+    const queries = getRecentQueries();
+    queries.splice(index, 1);
+    localStorage.setItem(RECENT_QUERIES_KEY, JSON.stringify(queries));
+    renderRecentQueries();
+}
+
+function clearRecentQueries() {
+    localStorage.removeItem(RECENT_QUERIES_KEY);
+    renderRecentQueries();
+}
+
 async function aiSearchLogs() {
     const question = document.getElementById('ai-query').value.trim();
     if (!question) return;
@@ -91,6 +207,9 @@ async function aiSearchLogs() {
     const btn = document.getElementById('ai-search-btn');
     const btnText = btn.querySelector('.btn-text');
     const btnLoading = btn.querySelector('.btn-loading');
+    
+    // Hide recent queries panel
+    document.getElementById('recent-queries').style.display = 'none';
     
     // Show loading
     btnText.style.display = 'none';
@@ -102,6 +221,9 @@ async function aiSearchLogs() {
         
         if (result) {
             const params = result.query_params;
+            
+            // Save to recent queries (with params for reuse)
+            saveRecentQuery(question, params);
             
             // Populate the generated query fields
             populateGeneratedQuery(params);
@@ -233,13 +355,13 @@ function displayLogsResults(logs) {
                         <pre>${escapeHtml(log.message)}</pre>
                     </div>
                     <div class="log-analysis">
-                        <div class="analysis-item similar-count" data-log-message="${encodeURIComponent(log.message.substring(0, 200))}">
+                        <div class="analysis-item similar-count">
                             <span class="analysis-label">📊 Similar logs (24h):</span>
-                            <span class="analysis-value loading">Loading...</span>
+                            <span class="analysis-value loading" id="search-similar-${index}">Loading...</span>
                         </div>
-                        <div class="analysis-item ai-assessment" data-log-message="${encodeURIComponent(log.message.substring(0, 500))}" data-log-level="${log.level || ''}">
+                        <div class="analysis-item ai-assessment">
                             <span class="analysis-label">🤖 AI Assessment:</span>
-                            <span class="analysis-value loading">Analyzing...</span>
+                            <span class="analysis-value loading" id="search-ai-${index}">Analyzing...</span>
                         </div>
                     </div>
                 </div>
@@ -255,7 +377,14 @@ function displayLogsResults(logs) {
 }
 
 async function toggleLogExpand(row, index) {
+    console.log('toggleLogExpand called', index);
+    
     const expandRow = document.getElementById(`log-expand-${index}`);
+    if (!expandRow) {
+        console.error('Expand row not found for index', index);
+        return;
+    }
+    
     const isExpanded = expandRow.style.display !== 'none';
     
     // Close all other expanded rows
@@ -266,14 +395,18 @@ async function toggleLogExpand(row, index) {
         expandRow.style.display = 'table-row';
         row.classList.add('expanded');
         
-        // Load analysis if not already loaded
-        const similarEl = expandRow.querySelector('.similar-count .analysis-value');
-        const aiEl = expandRow.querySelector('.ai-assessment .analysis-value');
+        // Load analysis if not already loaded - use getElementById for reliability
+        const similarEl = document.getElementById(`search-similar-${index}`);
+        const aiEl = document.getElementById(`search-ai-${index}`);
         
-        if (similarEl.classList.contains('loading')) {
+        console.log('Similar element:', similarEl, 'AI element:', aiEl);
+        
+        if (similarEl && similarEl.classList.contains('loading')) {
+            console.log('Loading similar count for index', index);
             loadSimilarCount(index, similarEl);
         }
-        if (aiEl.classList.contains('loading')) {
+        if (aiEl && aiEl.classList.contains('loading')) {
+            console.log('Loading AI assessment for index', index);
             loadAIAssessment(index, aiEl);
         }
     }
@@ -412,27 +545,49 @@ async function refreshDashboard() {
 }
 
 async function loadErrorsChart() {
-    const data = await apiGet('/dashboard/errors-timeseries?hours=24&interval=1h');
-    if (!data) return;
+    const [errorsData, requestsData] = await Promise.all([
+        apiGet('/dashboard/errors-timeseries?hours=24&interval=1h'),
+        apiGet('/dashboard/http-requests-timeseries?hours=24&interval=1h')
+    ]);
+    
+    if (!errorsData) return;
     
     const ctx = document.getElementById('errors-chart').getContext('2d');
     
     if (charts.errors) charts.errors.destroy();
     
+    const datasets = [
+        {
+            label: 'Errors',
+            data: errorsData.map(p => p.value),
+            borderColor: '#ef4444',
+            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+            fill: true,
+            tension: 0.3,
+            yAxisID: 'y'
+        }
+    ];
+    
+    // Add HTTP requests on secondary axis if available
+    if (requestsData && requestsData.length) {
+        datasets.push({
+            label: 'HTTP Requests',
+            data: requestsData.map(p => p.value),
+            borderColor: '#3b82f6',
+            backgroundColor: 'rgba(59, 130, 246, 0.05)',
+            fill: true,
+            tension: 0.3,
+            yAxisID: 'y1'
+        });
+    }
+    
     charts.errors = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: data.map(p => formatTime(p.timestamp)),
-            datasets: [{
-                label: 'Errors',
-                data: data.map(p => p.value),
-                borderColor: '#ef4444',
-                backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                fill: true,
-                tension: 0.3
-            }]
+            labels: errorsData.map(p => formatTime(p.timestamp)),
+            datasets: datasets
         },
-        options: getChartOptions()
+        options: getChartOptionsDualAxis('Errors', 'Requests')
     });
 }
 
@@ -476,25 +631,52 @@ async function loadHttpChart() {
 }
 
 async function loadCpuChart() {
-    const data = await apiGet('/dashboard/cpu-timeseries?hours=24&interval=15m');
-    if (!data) return;
+    const [cpuData, gpuData] = await Promise.all([
+        apiGet('/dashboard/cpu-timeseries?hours=24&interval=15m'),
+        apiGet('/dashboard/gpu-timeseries?hours=24&interval=15m')
+    ]);
+    
+    if (!cpuData) return;
     
     const ctx = document.getElementById('cpu-chart').getContext('2d');
     
     if (charts.cpu) charts.cpu.destroy();
     
+    const datasets = [
+        {
+            label: 'CPU %',
+            data: cpuData.map(p => p.value),
+            borderColor: '#00d4aa',
+            backgroundColor: 'rgba(0, 212, 170, 0.1)',
+            fill: true,
+            tension: 0.3
+        }
+    ];
+    
+    // Always add GPU line if we have data points (even if all zeros)
+    // This allows users to see GPU is being tracked
+    if (gpuData && gpuData.length) {
+        // Map GPU data to CPU timestamps for alignment
+        const gpuValues = cpuData.map((cpuPoint, idx) => {
+            const gpuPoint = gpuData[idx];
+            return gpuPoint ? (gpuPoint.value || 0) : 0;
+        });
+        
+        datasets.push({
+            label: 'GPU %',
+            data: gpuValues,
+            borderColor: '#f59e0b',
+            backgroundColor: 'rgba(245, 158, 11, 0.1)',
+            fill: true,
+            tension: 0.3
+        });
+    }
+    
     charts.cpu = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: data.map(p => formatTime(p.timestamp)),
-            datasets: [{
-                label: 'CPU %',
-                data: data.map(p => p.value),
-                borderColor: '#00d4aa',
-                backgroundColor: 'rgba(0, 212, 170, 0.1)',
-                fill: true,
-                tension: 0.3
-            }]
+            labels: cpuData.map(p => formatTime(p.timestamp)),
+            datasets: datasets
         },
         options: getChartOptions(true)
     });
@@ -525,10 +707,61 @@ async function loadMemoryChart() {
     });
 }
 
+function getChartOptionsDualAxis(leftLabel = 'Left', rightLabel = 'Right') {
+    return {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: {
+            mode: 'index',
+            intersect: false,
+        },
+        plugins: {
+            legend: {
+                display: true,
+                position: 'top',
+                labels: {
+                    color: '#8b949e',
+                    font: { family: 'Outfit' }
+                }
+            }
+        },
+        scales: {
+            x: {
+                grid: { color: '#21262d' },
+                ticks: { color: '#6e7681', maxRotation: 0 }
+            },
+            y: {
+                type: 'linear',
+                display: true,
+                position: 'left',
+                grid: { color: '#21262d' },
+                ticks: { color: '#ef4444' },
+                title: {
+                    display: true,
+                    text: leftLabel,
+                    color: '#ef4444'
+                }
+            },
+            y1: {
+                type: 'linear',
+                display: true,
+                position: 'right',
+                grid: { drawOnChartArea: false },
+                ticks: { color: '#3b82f6' },
+                title: {
+                    display: true,
+                    text: rightLabel,
+                    color: '#3b82f6'
+                }
+            }
+        }
+    };
+}
+
 function getChartOptions(isPercent = false) {
     return {
         responsive: true,
-        maintainAspectRatio: true,
+        maintainAspectRatio: false,
         plugins: {
             legend: {
                 display: true,
@@ -576,29 +809,41 @@ async function loadContainers() {
         const hostDiv = document.createElement('div');
         hostDiv.className = 'host-group';
         
+        const containerCount = Object.values(projects).reduce((sum, containers) => sum + containers.length, 0);
+        
         let hostHtml = `
-            <div class="host-header">
+            <div class="host-header" onclick="toggleHostGroup(this)">
                 <span class="host-name">
+                    <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
                         <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
                     </svg>
                     ${escapeHtml(host)}
+                    <span class="group-count">${containerCount} containers</span>
                 </span>
             </div>
+            <div class="host-content">
         `;
         
         for (const [project, containers] of Object.entries(projects)) {
             const projectName = project === '_standalone' ? 'Standalone Containers' : project;
             hostHtml += `
                 <div class="compose-group">
-                    <div class="compose-header">
+                    <div class="compose-header" onclick="toggleComposeGroup(event, this)">
+                        <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="6 9 12 15 18 9"/>
+                        </svg>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
                         </svg>
                         ${escapeHtml(projectName)}
+                        <span class="group-count">${containers.length}</span>
                     </div>
-                    <div class="container-list">
+                    <div class="compose-content">
+                        <div class="container-list">
             `;
             
             for (const c of containers) {
@@ -646,13 +891,35 @@ async function loadContainers() {
             }
             
             hostHtml += `
+                        </div>
                     </div>
                 </div>
             `;
         }
         
+        hostHtml += `</div>`; // Close host-content
+        
         hostDiv.innerHTML = hostHtml;
         container.appendChild(hostDiv);
+    }
+}
+
+function toggleHostGroup(headerEl) {
+    const hostGroup = headerEl.closest('.host-group');
+    hostGroup.classList.toggle('collapsed');
+    const content = hostGroup.querySelector('.host-content');
+    if (content) {
+        content.style.display = hostGroup.classList.contains('collapsed') ? 'none' : '';
+    }
+}
+
+function toggleComposeGroup(event, headerEl) {
+    event.stopPropagation();
+    const composeGroup = headerEl.closest('.compose-group');
+    composeGroup.classList.toggle('collapsed');
+    const content = composeGroup.querySelector('.compose-content');
+    if (content) {
+        content.style.display = composeGroup.classList.contains('collapsed') ? 'none' : '';
     }
 }
 
@@ -735,7 +1002,7 @@ function renderContainerLogs() {
         return;
     }
     
-    const html = currentContainerLogs.map(log => {
+    const html = currentContainerLogs.map((log, index) => {
         const message = log.message || '';
         const msgLower = message.toLowerCase();
         
@@ -775,11 +1042,117 @@ function renderContainerLogs() {
         
         const timestamp = formatDateTime(log.timestamp);
         
-        return `<div class="log-line ${levelClass}${hidden ? ' hidden' : ''}"><span class="log-timestamp">${timestamp}</span>${displayMessage}</div>`;
+        return `
+            <div class="log-line ${levelClass}${hidden ? ' hidden' : ''}" data-index="${index}" onclick="toggleContainerLogExpand(this, ${index})">
+                <span class="log-timestamp">${timestamp}</span>
+                <span class="log-message-truncate">${displayMessage}</span>
+            </div>
+            <div class="container-log-expand" id="container-log-expand-${index}" style="display: none;">
+                <div class="log-expand-content">
+                    <div class="log-full-message">
+                        <pre>${escapeHtml(message)}</pre>
+                    </div>
+                    <div class="log-analysis">
+                        <div class="analysis-item similar-count">
+                            <span class="analysis-label">📊 Similar logs (24h):</span>
+                            <span class="analysis-value loading" id="container-similar-${index}">Loading...</span>
+                        </div>
+                        <div class="analysis-item ai-assessment">
+                            <span class="analysis-label">🤖 AI Assessment:</span>
+                            <span class="analysis-value loading" id="container-ai-${index}">Analyzing...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
     }).join('');
     
     logViewer.innerHTML = html;
     logViewer.scrollTop = logViewer.scrollHeight;
+}
+
+function toggleContainerLogExpand(element, index) {
+    console.log('toggleContainerLogExpand called', index);
+    
+    const expandDiv = document.getElementById(`container-log-expand-${index}`);
+    if (!expandDiv) {
+        console.error('Expand div not found for index', index);
+        return;
+    }
+    
+    const isExpanded = expandDiv.style.display !== 'none';
+    
+    // Close all other expanded logs
+    document.querySelectorAll('.container-log-expand').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('.log-line').forEach(el => el.classList.remove('expanded'));
+    
+    if (!isExpanded) {
+        expandDiv.style.display = 'block';
+        element.classList.add('expanded');
+        
+        // Load analysis
+        const similarEl = document.getElementById(`container-similar-${index}`);
+        const aiEl = document.getElementById(`container-ai-${index}`);
+        
+        console.log('Similar element:', similarEl, 'AI element:', aiEl);
+        
+        if (similarEl && similarEl.classList.contains('loading')) {
+            console.log('Loading similar count for index', index);
+            loadContainerLogSimilar(index, similarEl);
+        }
+        if (aiEl && aiEl.classList.contains('loading')) {
+            console.log('Loading AI assessment for index', index);
+            loadContainerLogAI(index, aiEl);
+        }
+    }
+}
+
+async function loadContainerLogSimilar(index, element) {
+    try {
+        const log = currentContainerLogs[index];
+        const result = await apiPost('/logs/similar-count', {
+            message: log.message,
+            container_name: currentContainer.data.name,
+            hours: 24
+        });
+        
+        element.classList.remove('loading');
+        if (result && result.count !== undefined) {
+            const count = result.count;
+            element.textContent = count;
+            element.classList.add(count > 100 ? 'high' : count > 10 ? 'medium' : 'low');
+        } else {
+            element.textContent = 'N/A';
+        }
+    } catch (e) {
+        element.classList.remove('loading');
+        element.textContent = 'Error';
+    }
+}
+
+async function loadContainerLogAI(index, element) {
+    try {
+        const log = currentContainerLogs[index];
+        const result = await apiPost('/logs/ai-analyze', {
+            message: log.message,
+            level: log.level || '',
+            container_name: currentContainer.data.name
+        });
+        
+        element.classList.remove('loading');
+        if (result && result.assessment) {
+            element.innerHTML = `
+                <span class="assessment-badge ${result.severity}">${result.severity}</span>
+                <span class="assessment-text">${escapeHtml(result.assessment)}</span>
+            `;
+        } else {
+            element.textContent = 'Could not analyze';
+        }
+    } catch (e) {
+        element.classList.remove('loading');
+        element.textContent = 'AI unavailable';
+        element.classList.add('error');
+    }
 }
 
 function isErrorLog(msg) {

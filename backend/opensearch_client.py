@@ -470,6 +470,46 @@ class OpenSearchClient:
             logger.error("Failed to get error timeseries", error=str(e))
             return []
     
+    async def get_http_requests_timeseries(self, hours: int = 24, interval: str = "1h") -> List[TimeSeriesPoint]:
+        """Get total HTTP requests count time series (any log with http_status)."""
+        now = datetime.utcnow()
+        start = now - timedelta(hours=hours)
+        
+        body = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"range": {"timestamp": {"gte": start.isoformat()}}},
+                        {"exists": {"field": "http_status"}}
+                    ]
+                }
+            },
+            "size": 0,
+            "aggs": {
+                "over_time": {
+                    "date_histogram": {
+                        "field": "timestamp",
+                        "fixed_interval": interval,
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.logs_index, body=body)
+            buckets = response.get("aggregations", {}).get("over_time", {}).get("buckets", [])
+            
+            return [
+                TimeSeriesPoint(
+                    timestamp=datetime.fromisoformat(bucket["key_as_string"].replace("Z", "+00:00")),
+                    value=bucket["doc_count"]
+                )
+                for bucket in buckets
+            ]
+        except Exception as e:
+            logger.error("Failed to get HTTP requests timeseries", error=str(e))
+            return []
+    
     async def get_http_status_timeseries(self, status_min: int, status_max: int, hours: int = 24, interval: str = "1h") -> List[TimeSeriesPoint]:
         """Get HTTP status count time series."""
         now = datetime.utcnow()
@@ -553,47 +593,62 @@ class OpenSearchClient:
         
         Uses a simplified similarity approach by extracting key terms from the message.
         """
-        # Extract key terms (remove common patterns like timestamps, IDs, etc.)
         import re
         
-        # Simplify the message: remove timestamps, UUIDs, numbers, etc.
+        # Simplify the message: remove dynamic parts and special characters
         simplified = message
-        # Remove ISO timestamps
+        
+        # Remove ISO timestamps (2024-01-17T15:30:00.000Z)
         simplified = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[.\d]*Z?', '', simplified)
+        # Remove simple timestamps (15:30:00, 15:30:00.123)
+        simplified = re.sub(r'\b\d{2}:\d{2}:\d{2}[.\d]*\b', '', simplified)
+        # Remove dates (2024-01-17, 17/01/2024)
+        simplified = re.sub(r'\b\d{4}[-/]\d{2}[-/]\d{2}\b', '', simplified)
+        simplified = re.sub(r'\b\d{2}[-/]\d{2}[-/]\d{4}\b', '', simplified)
         # Remove UUIDs
         simplified = re.sub(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '', simplified, flags=re.I)
-        # Remove hex strings (like container IDs)
-        simplified = re.sub(r'[0-9a-f]{12,}', '', simplified, flags=re.I)
-        # Remove numbers (but keep words)
-        simplified = re.sub(r'\b\d+\b', '', simplified)
+        # Remove hex strings (container IDs, hashes)
+        simplified = re.sub(r'\b[0-9a-f]{12,}\b', '', simplified, flags=re.I)
         # Remove IPs
-        simplified = re.sub(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', '', simplified)
+        simplified = re.sub(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', '', simplified)
+        # Remove standalone numbers
+        simplified = re.sub(r'\b\d+\b', '', simplified)
+        # Remove ALL special characters - keep only alphanumeric and spaces
+        simplified = re.sub(r'[^a-zA-Z0-9\s]', ' ', simplified)
         # Clean up extra spaces
         simplified = ' '.join(simplified.split())
         
-        # Extract key words (at least 4 chars, not too common)
-        words = [w for w in simplified.split() if len(w) >= 4]
-        
-        # Build query - match messages containing key words
-        if not words:
-            # If no key words, use exact message search (escaped)
-            query_str = f'"{message[:100]}"'
-        else:
-            # Use key words for similarity
-            key_words = words[:5]  # Limit to first 5 key words
-            query_str = ' AND '.join([f'message:*{word}*' for word in key_words])
+        # Extract key words (at least 3 chars, filter out common/stop words)
+        stop_words = {
+            'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'her', 'was', 
+            'one', 'our', 'out', 'http', 'https', 'info', 'get', 'post', 'put', 'delete',
+            'from', 'has', 'been', 'moved', 'will', 'that', 'this', 'with', 'have', 'your',
+            'usr', 'local', 'lib', 'python', 'site', 'packages'  # Filter out path components
+        }
+        words = [w.lower() for w in simplified.split() if len(w) >= 3 and w.lower() not in stop_words]
         
         cutoff = datetime.utcnow() - timedelta(hours=hours)
+        
+        # If we have no useful words or too few, return 0 to avoid overly broad matches
+        if len(words) < 2:
+            return 0
+        
+        # Use match query with minimum_should_match for flexibility
+        # At least 50% of words should match (minimum 2)
+        key_words = words[:6]
+        min_match = max(2, len(key_words) // 2)
         
         body = {
             "query": {
                 "bool": {
                     "must": [
                         {
-                            "query_string": {
-                                "query": ' '.join(words[:5]) if words else message[:50],
-                                "default_field": "message",
-                                "default_operator": "AND"
+                            "match": {
+                                "message": {
+                                    "query": ' '.join(key_words),
+                                    "operator": "or",
+                                    "minimum_should_match": f"{min_match}"
+                                }
                             }
                         }
                     ],
