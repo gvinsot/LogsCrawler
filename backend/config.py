@@ -30,6 +30,10 @@ class HostConfig(BaseModel):
     # - "tcp://host.docker.internal:2375" (host from container)
     docker_url: Optional[str] = None
     
+    # Swarm manager flag: set to true if this host is a Docker Swarm manager
+    # Used for stack operations and grouping
+    swarm_manager: bool = False
+    
     
 class OpenSearchConfig(BaseModel):
     """OpenSearch configuration."""

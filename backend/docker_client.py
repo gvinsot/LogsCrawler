@@ -354,6 +354,11 @@ class DockerAPIClient:
         stream: str,
     ) -> Optional[LogEntry]:
         """Parse a log line with timestamp."""
+        # Filter out known non-critical warnings from external libraries
+        # This warning comes from Go libraries parsing cgroup v2 "max" values
+        if "failed to parse CPU allowed micro secs" in line and "parsing \"max\"" in line:
+            return None
+        
         # Docker timestamp format: 2024-01-15T10:30:00.123456789Z
         timestamp_pattern = r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.?\d*Z?)\s+'
         match = re.match(timestamp_pattern, line)
@@ -438,6 +443,7 @@ class DockerAPIClient:
             ContainerAction.RESTART: ("POST", f"/containers/{container_id}/restart"),
             ContainerAction.PAUSE: ("POST", f"/containers/{container_id}/pause"),
             ContainerAction.UNPAUSE: ("POST", f"/containers/{container_id}/unpause"),
+            ContainerAction.REMOVE: ("DELETE", f"/containers/{container_id}?force=true"),
         }
         
         if action not in action_map:
@@ -451,3 +457,46 @@ class DockerAPIClient:
         else:
             error_msg = data if isinstance(data, str) else json.dumps(data) if data else "Unknown error"
             return False, error_msg
+
+    async def get_swarm_stacks(self) -> Dict[str, List[str]]:
+        """Get list of Docker Swarm stacks and their services.
+        
+        Returns:
+            Dict mapping stack_name -> list of service names
+        """
+        # Docker API doesn't have stack endpoints, use subprocess
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["docker", "stack", "ls", "--format", "{{.Name}}"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode != 0:
+                return {}
+            
+            stacks = {}
+            for stack_name in result.stdout.strip().split('\n'):
+                stack_name = stack_name.strip()
+                if not stack_name:
+                    continue
+                
+                # Get services for this stack
+                services_result = subprocess.run(
+                    ["docker", "stack", "services", stack_name, "--format", "{{.Name}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if services_result.returncode == 0:
+                    services = [s.strip() for s in services_result.stdout.strip().split('\n') if s.strip()]
+                    stacks[stack_name] = services
+                else:
+                    stacks[stack_name] = []
+            
+            return stacks
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            return {}

@@ -274,6 +274,16 @@ body {
     color: var(--bg-primary);
 }
 
+.btn-danger {
+    background: var(--status-error);
+    color: white;
+}
+
+.btn-danger:hover {
+    background: #dc2626;
+    transform: translateY(-1px);
+}
+
 .btn-sm {
     padding: 6px 12px;
     font-size: 0.8rem;
@@ -301,6 +311,12 @@ body {
 .stat-card:hover {
     border-color: var(--border-light);
     box-shadow: var(--shadow-md);
+}
+
+.stat-card[onclick]:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+    border-color: var(--accent-primary);
 }
 
 .stat-icon {
@@ -482,6 +498,14 @@ body {
     cursor: pointer;
     user-select: none;
     transition: background 0.2s;
+}
+
+.host-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    padding-left: 16px;
 }
 
 .host-header:hover {

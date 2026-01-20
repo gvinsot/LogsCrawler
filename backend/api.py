@@ -173,8 +173,9 @@ async def list_containers(
 async def list_containers_grouped(
     refresh: bool = Query(default=False),
     status: Optional[ContainerStatus] = Query(default=None),
+    group_by: str = Query(default="host", description="Group by: 'host' or 'stack'"),
 ) -> Dict[str, Dict[str, List[ContainerInfo]]]:
-    """List containers grouped by host and compose project."""
+    """List containers grouped by host and compose project, or by Docker Swarm stack."""
     containers = await collector.get_all_containers(refresh=refresh)
     
     if status:
@@ -191,19 +192,137 @@ async def list_containers_grouped(
             container.memory_percent = stats.get("memory_percent")
             container.memory_usage_mb = stats.get("memory_usage_mb")
     
-    # Group by host -> compose_project
-    grouped: Dict[str, Dict[str, List[ContainerInfo]]] = {}
-    
-    for container in containers:
-        host = container.host
-        project = container.compose_project or "_standalone"
+    if group_by == "stack":
+        # Group by Docker Swarm stack -> service
+        # First, find the Swarm manager host
+        swarm_manager_host = None
+        for host_config in settings.hosts:
+            if host_config.swarm_manager:
+                swarm_manager_host = host_config.name
+                break
         
-        if host not in grouped:
-            grouped[host] = {}
-        if project not in grouped[host]:
-            grouped[host][project] = []
+        # Get stack information from manager if available
+        stack_services_map: Dict[str, List[str]] = {}
+        if swarm_manager_host:
+            manager_client = collector.clients.get(swarm_manager_host)
+            if manager_client:
+                try:
+                    stack_services_map = await manager_client.get_swarm_stacks()
+                    logger.info("Retrieved stacks from Swarm manager", host=swarm_manager_host, stacks=list(stack_services_map.keys()))
+                except Exception as e:
+                    logger.warning("Failed to get stacks from Swarm manager", host=swarm_manager_host, error=str(e))
         
-        grouped[host][project].append(container)
+        # Initialize grouped structure with all known stacks from manager
+        # This ensures stacks are shown even if they have no containers yet
+        grouped: Dict[str, Dict[str, List[ContainerInfo]]] = {}
+        for stack_name in stack_services_map.keys():
+            grouped[stack_name] = {}
+        
+        # Group containers by their stack
+        for container in containers:
+            # Try to get stack name from Swarm labels first
+            stack_name = container.labels.get("com.docker.swarm.stack.namespace")
+            service_name = container.labels.get("com.docker.swarm.service.name")
+            
+            # If no stack from labels, try to extract from container name
+            # Docker Swarm container names: stack_service.replica_id or stack_service.replica_id.node_id
+            # Example: myapp_web.1.abc123def456 -> stack: myapp, service: web
+            if not stack_name and "." in container.name:
+                main_part = container.name.split(".")[0]
+                # Check if this matches any known stack pattern
+                for known_stack in stack_services_map.keys():
+                    if main_part.startswith(known_stack + "_"):
+                        stack_name = known_stack
+                        if not service_name:
+                            service_name = main_part[len(known_stack) + 1:]
+                        break
+                
+                # If still no stack found but has underscore pattern, try to extract
+                if not stack_name and "_" in main_part:
+                    # Try to match against known stacks by checking if prefix matches
+                    for known_stack in stack_services_map.keys():
+                        if main_part.startswith(known_stack):
+                            stack_name = known_stack
+                            if not service_name:
+                                # Extract service name after stack prefix
+                                remaining = main_part[len(known_stack):]
+                                if remaining.startswith("_"):
+                                    service_name = remaining[1:]
+                                else:
+                                    service_name = remaining
+                            break
+                    
+                    # If still not found, assume first part before underscore is stack
+                    if not stack_name:
+                        parts = main_part.split("_", 1)
+                        if len(parts) == 2:
+                            potential_stack = parts[0]
+                            # Check if this potential stack exists in our known stacks
+                            if potential_stack in stack_services_map:
+                                stack_name = potential_stack
+                                service_name = parts[1] if not service_name else service_name
+            
+            # If we have stack info from manager, verify the stack exists
+            if stack_name and stack_name in stack_services_map:
+                # This is a confirmed Swarm stack
+                if not service_name:
+                    # Last resort: extract from container name
+                    if "." in container.name:
+                        main_part = container.name.split(".")[0]
+                        if "_" in main_part and main_part.startswith(stack_name + "_"):
+                            service_name = main_part[len(stack_name) + 1:]
+                        else:
+                            service_name = main_part.split("_", 1)[-1] if "_" in main_part else main_part
+                    else:
+                        service_name = container.name
+            elif stack_name:
+                # Has swarm label but stack not found in manager - might be stale
+                # Still group it but use the stack name from label
+                if not service_name:
+                    if "." in container.name:
+                        main_part = container.name.split(".")[0]
+                        if "_" in main_part and main_part.startswith(stack_name + "_"):
+                            service_name = main_part[len(stack_name) + 1:]
+                        else:
+                            service_name = main_part.split("_", 1)[-1] if "_" in main_part else main_part
+                    else:
+                        service_name = container.name
+            else:
+                # Not a Swarm stack, use compose project or standalone
+                stack_name = container.compose_project or "_standalone"
+                service_name = container.compose_service or \
+                              container.name.split(".")[0] if "." in container.name else container.name
+            
+            # Ensure stack group exists
+            if stack_name not in grouped:
+                grouped[stack_name] = {}
+            
+            # Ensure service group exists
+            if service_name not in grouped[stack_name]:
+                grouped[stack_name][service_name] = []
+            
+            grouped[stack_name][service_name].append(container)
+        
+        # Remove empty stacks (stacks from manager that have no containers)
+        # But keep stacks that have containers even if not in manager list
+        empty_stacks = [stack for stack, services in grouped.items() 
+                       if not services and stack in stack_services_map]
+        for stack in empty_stacks:
+            del grouped[stack]
+    else:
+        # Group by host -> compose_project (default)
+        grouped: Dict[str, Dict[str, List[ContainerInfo]]] = {}
+        
+        for container in containers:
+            host = container.host
+            project = container.compose_project or "_standalone"
+            
+            if host not in grouped:
+                grouped[host] = {}
+            if project not in grouped[host]:
+                grouped[host][project] = []
+            
+            grouped[host][project].append(container)
     
     return grouped
 
@@ -243,6 +362,50 @@ async def execute_container_action(request: ActionRequest) -> ActionResult:
         container_id=request.container_id,
         action=request.action,
     )
+
+
+@app.post("/api/stacks/{stack_name}/remove")
+async def remove_stack(stack_name: str, host: Optional[str] = Query(default=None)) -> Dict[str, Any]:
+    """Remove a Docker Swarm stack."""
+    containers = await collector.get_all_containers(refresh=True)
+    
+    # Find containers belonging to this stack
+    stack_containers = [
+        c for c in containers 
+        if (c.labels.get("com.docker.swarm.stack.namespace") == stack_name or
+            (stack_name != "_standalone" and c.compose_project == stack_name))
+    ]
+    
+    if not stack_containers:
+        raise HTTPException(status_code=404, detail=f"Stack '{stack_name}' not found")
+    
+    # If host not specified, use the first host that has containers from this stack
+    if not host:
+        host = stack_containers[0].host
+    
+    # Check if this is actually a Swarm stack (has swarm labels)
+    is_swarm_stack = any(
+        c.labels.get("com.docker.swarm.stack.namespace") == stack_name 
+        for c in stack_containers
+    )
+    
+    if not is_swarm_stack:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"'{stack_name}' is not a Docker Swarm stack. Use container removal for compose projects."
+        )
+    
+    # Execute stack removal
+    client = collector.clients.get(host)
+    if not client:
+        raise HTTPException(status_code=404, detail=f"Host '{host}' not found")
+    
+    success, message = await client.remove_stack(stack_name)
+    
+    if success:
+        return {"success": True, "message": message, "stack_name": stack_name}
+    else:
+        raise HTTPException(status_code=500, detail=message)
 
 
 # ============== Logs Search ==============

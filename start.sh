@@ -22,7 +22,7 @@ fi
 case $GPU_TYPE in
     nvidia)
         echo "🚀 Starting with NVIDIA GPU support..."
-        docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+        docker-compose -f docker-compose.yml -f docker-compose.cuda.yml up -d
         ;;
     rocm)
         echo "🚀 Starting with AMD ROCm GPU support..."

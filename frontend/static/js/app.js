@@ -336,6 +336,46 @@ async function loadDefaultLogs() {
     document.getElementById('results-count').textContent = `${formatNumber(totalLogs)} total logs (showing latest)`;
 }
 
+async function refreshLogsSearch() {
+    // If we have a previous search, re-execute it
+    if (lastSearchParams) {
+        logsPage = 0; // Reset to first page
+        await executeSearchWithParams(lastSearchParams);
+    } else {
+        // Otherwise, load default logs
+        await loadDefaultLogs();
+    }
+}
+
+async function searchHttpErrors(minStatus, maxStatus) {
+    // Switch to logs view
+    switchView('logs');
+    
+    // Calculate time range for last 24 hours
+    const now = new Date();
+    const startTime = new Date(now);
+    startTime.setHours(startTime.getHours() - 24);
+    
+    // Build search params
+    const params = {
+        http_status_min: minStatus,
+        http_status_max: maxStatus,
+        start_time: startTime.toISOString(),
+        sort_order: 'desc'
+    };
+    
+    // Store for pagination
+    lastSearchParams = params;
+    logsPage = 0;
+    
+    // Execute search
+    await executeSearchWithParams(params);
+    
+    // Update results count message
+    const statusRange = minStatus === 400 ? '4xx' : '5xx';
+    document.getElementById('results-count').textContent = `${formatNumber(totalLogs)} HTTP ${statusRange} errors (last 24h)`;
+}
+
 function displayLogsResults(logs) {
     const tbody = document.getElementById('logs-table-body');
     tbody.innerHTML = logs.map((log, index) => `
@@ -792,9 +832,81 @@ function getChartOptions(isPercent = false) {
 
 // ============== Containers ==============
 
+// Local storage keys
+const CONTAINERS_FILTER_KEY = 'logscrawler_containers_filter';
+const CONTAINERS_GROUPS_KEY = 'logscrawler_containers_groups';
+const CONTAINERS_GROUP_BY_KEY = 'logscrawler_containers_group_by';
+
+function getStoredFilter() {
+    try {
+        return localStorage.getItem(CONTAINERS_FILTER_KEY);
+    } catch {
+        return null;
+    }
+}
+
+function saveFilter(value) {
+    try {
+        localStorage.setItem(CONTAINERS_FILTER_KEY, value);
+    } catch (e) {
+        console.error('Failed to save filter:', e);
+    }
+}
+
+function getStoredGroups() {
+    try {
+        const stored = localStorage.getItem(CONTAINERS_GROUPS_KEY);
+        return stored ? JSON.parse(stored) : {};
+    } catch {
+        return {};
+    }
+}
+
+function saveGroups(groups) {
+    try {
+        localStorage.setItem(CONTAINERS_GROUPS_KEY, JSON.stringify(groups));
+    } catch (e) {
+        console.error('Failed to save groups:', e);
+    }
+}
+
+function getGroupKey(host, project) {
+    return `${host}::${project}`;
+}
+
+function getStoredGroupBy() {
+    try {
+        return localStorage.getItem(CONTAINERS_GROUP_BY_KEY) || 'host';
+    } catch {
+        return 'host';
+    }
+}
+
+function saveGroupBy(value) {
+    try {
+        localStorage.setItem(CONTAINERS_GROUP_BY_KEY, value);
+    } catch (e) {
+        console.error('Failed to save group by:', e);
+    }
+}
+
 async function loadContainers() {
-    const statusFilter = document.getElementById('status-filter').value;
-    let endpoint = '/containers/grouped?refresh=true';
+    // Restore filters from localStorage
+    const storedFilter = getStoredFilter();
+    const statusFilter = storedFilter !== null ? storedFilter : document.getElementById('status-filter').value;
+    if (storedFilter !== null) {
+        document.getElementById('status-filter').value = storedFilter;
+    }
+    
+    // Restore group by preference
+    const storedGroupBy = getStoredGroupBy();
+    const groupBy = document.getElementById('group-by-filter')?.value || storedGroupBy;
+    if (document.getElementById('group-by-filter')) {
+        document.getElementById('group-by-filter').value = groupBy;
+    }
+    saveGroupBy(groupBy);
+    
+    let endpoint = `/containers/grouped?refresh=true&group_by=${groupBy}`;
     if (statusFilter) {
         endpoint += `&status=${statusFilter}`;
     }
@@ -802,36 +914,74 @@ async function loadContainers() {
     const grouped = await apiGet(endpoint);
     if (!grouped) return;
     
+    // Get stored group states
+    const storedGroups = getStoredGroups();
+    
     const container = document.getElementById('containers-list');
     container.innerHTML = '';
     
-    for (const [host, projects] of Object.entries(grouped)) {
-        const hostDiv = document.createElement('div');
-        hostDiv.className = 'host-group';
+    const isStackView = groupBy === 'stack';
+    const topLevelLabel = isStackView ? 'Stack' : 'Host';
+    const topLevelIcon = isStackView ? 
+        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+        </svg>` :
+        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+        </svg>`;
+    
+    for (const [topLevel, services] of Object.entries(grouped)) {
+        const topLevelDiv = document.createElement('div');
+        topLevelDiv.className = 'host-group';
+        topLevelDiv.dataset.host = topLevel;
+        topLevelDiv.dataset.stack = topLevel;
         
-        const containerCount = Object.values(projects).reduce((sum, containers) => sum + containers.length, 0);
+        // Check if top level group should be collapsed
+        const topLevelKey = getGroupKey(topLevel, '');
+        const isTopLevelCollapsed = storedGroups[topLevelKey] === false;
+        if (isTopLevelCollapsed) {
+            topLevelDiv.classList.add('collapsed');
+        }
         
-        let hostHtml = `
+        const containerCount = Object.values(services).reduce((sum, containers) => sum + containers.length, 0);
+        
+        // Get the first host from containers in this stack (for stack removal)
+        const firstHost = Object.values(services)[0]?.[0]?.host || '';
+        
+        let topLevelHtml = `
             <div class="host-header" onclick="toggleHostGroup(event, this)">
                 <span class="host-name">
                     <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="6 9 12 15 18 9"/>
                     </svg>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
-                        <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
-                    </svg>
-                    ${escapeHtml(host)}
+                    ${topLevelIcon}
+                    ${escapeHtml(topLevel)}
                     <span class="group-count">${containerCount} containers</span>
                 </span>
+                ${isStackView && topLevel !== '_standalone' ? `
+                <div class="host-header-actions" onclick="event.stopPropagation();">
+                    <button class="btn btn-sm btn-danger" onclick="removeStack('${escapeHtml(topLevel)}', '${escapeHtml(firstHost)}')" title="Remove entire stack">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <polyline points="3 6 5 6 21 6"/>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        </svg>
+                        Remove Stack
+                    </button>
+                </div>
+                ` : ''}
             </div>
             <div class="host-content">
         `;
         
-        for (const [project, containers] of Object.entries(projects)) {
-            const projectName = project === '_standalone' ? 'Standalone Containers' : project;
-            hostHtml += `
-                <div class="compose-group">
+        for (const [service, containers] of Object.entries(services)) {
+            const serviceName = service === '_standalone' ? 'Standalone Containers' : service;
+            const groupKey = getGroupKey(topLevel, service);
+            const isServiceCollapsed = storedGroups[groupKey] === false;
+            const serviceGroupClass = isServiceCollapsed ? 'compose-group collapsed' : 'compose-group';
+            
+            topLevelHtml += `
+                <div class="${serviceGroupClass}" data-host="${escapeHtml(topLevel)}" data-project="${escapeHtml(service)}">
                     <div class="compose-header" onclick="toggleComposeGroup(event, this)">
                         <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="6 9 12 15 18 9"/>
@@ -839,7 +989,7 @@ async function loadContainers() {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
                         </svg>
-                        ${escapeHtml(projectName)}
+                        ${escapeHtml(serviceName)}
                         <span class="group-count">${containers.length}</span>
                     </div>
                     <div class="compose-content">
@@ -854,12 +1004,17 @@ async function loadContainers() {
                     ? `${c.memory_percent}%${c.memory_usage_mb ? ` (${c.memory_usage_mb}MB)` : ''}`
                     : '-';
                 
-                hostHtml += `
-                    <div class="container-item" onclick="openContainer('${escapeHtml(host)}', '${escapeHtml(c.id)}', ${JSON.stringify(c).replace(/"/g, '&quot;')})">
+                // In stack view, show host info in container name
+                const containerNameHtml = isStackView && c.host ? 
+                    `${escapeHtml(c.name)} <span style="color: var(--text-muted); font-size: 0.85em;">(${escapeHtml(c.host)})</span>` :
+                    escapeHtml(c.name);
+                
+                topLevelHtml += `
+                    <div class="container-item" onclick="openContainer('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', ${JSON.stringify(c).replace(/"/g, '&quot;')})">
                         <div class="container-info">
                             <span class="container-status ${c.status}"></span>
                             <div>
-                                <div class="container-name">${escapeHtml(c.name)}</div>
+                                <div class="container-name">${containerNameHtml}</div>
                                 <div class="container-image">${escapeHtml(c.image)}</div>
                             </div>
                         </div>
@@ -882,36 +1037,60 @@ async function loadContainers() {
                         </div>
                         ` : ''}
                         <div class="container-actions">
-                            <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); quickAction('${escapeHtml(host)}', '${escapeHtml(c.id)}', 'restart')">
+                            <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); quickAction('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', 'restart', '${escapeHtml(c.name)}')">
                                 Restart
+                            </button>
+                            <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); quickAction('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', 'remove', '${escapeHtml(c.name)}')">
+                                Remove
                             </button>
                         </div>
                     </div>
                 `;
             }
             
-            hostHtml += `
+            topLevelHtml += `
                         </div>
                     </div>
                 </div>
             `;
         }
         
-        hostHtml += `</div>`; // Close host-content
+        topLevelHtml += `</div>`; // Close host-content
         
-        hostDiv.innerHTML = hostHtml;
-        container.appendChild(hostDiv);
+        topLevelDiv.innerHTML = topLevelHtml;
+        container.appendChild(topLevelDiv);
     }
 }
 
 function toggleHostGroup(event, headerEl) {
     event?.stopPropagation();
-    headerEl.closest('.host-group')?.classList.toggle('collapsed');
+    const hostGroup = headerEl.closest('.host-group');
+    if (!hostGroup) return;
+    
+    const host = hostGroup.dataset.host;
+    const isCollapsed = hostGroup.classList.toggle('collapsed');
+    
+    // Save state
+    const storedGroups = getStoredGroups();
+    const hostKey = getGroupKey(host, '');
+    storedGroups[hostKey] = !isCollapsed; // true = expanded, false = collapsed
+    saveGroups(storedGroups);
 }
 
 function toggleComposeGroup(event, headerEl) {
     event.stopPropagation();
-    headerEl.closest('.compose-group')?.classList.toggle('collapsed');
+    const composeGroup = headerEl.closest('.compose-group');
+    if (!composeGroup) return;
+    
+    const host = composeGroup.dataset.host;
+    const project = composeGroup.dataset.project;
+    const isCollapsed = composeGroup.classList.toggle('collapsed');
+    
+    // Save state
+    const storedGroups = getStoredGroups();
+    const groupKey = getGroupKey(host, project);
+    storedGroups[groupKey] = !isCollapsed; // true = expanded, false = collapsed
+    saveGroups(storedGroups);
 }
 
 async function refreshContainers() {
@@ -919,6 +1098,14 @@ async function refreshContainers() {
 }
 
 function filterContainers() {
+    // Save filter value
+    const filterValue = document.getElementById('status-filter').value;
+    saveFilter(filterValue);
+    
+    // Save group by value
+    const groupByValue = document.getElementById('group-by-filter').value;
+    saveGroupBy(groupByValue);
+    
     loadContainers();
 }
 
@@ -1222,7 +1409,21 @@ async function containerAction(action) {
     }
 }
 
-async function quickAction(host, containerId, action) {
+async function quickAction(host, containerId, action, containerName = '') {
+    // Show confirmation for destructive actions
+    let confirmMessage = '';
+    const name = containerName || containerId;
+    
+    if (action === 'restart') {
+        confirmMessage = `Are you sure you want to restart container "${name}"?`;
+    } else if (action === 'remove') {
+        confirmMessage = `Are you sure you want to remove container "${name}"?\n\nThis action cannot be undone. The container will be stopped and deleted.`;
+    }
+    
+    if (confirmMessage && !confirm(confirmMessage)) {
+        return;
+    }
+    
     const result = await apiPost('/containers/action', {
         host: host,
         container_id: containerId,
@@ -1232,6 +1433,40 @@ async function quickAction(host, containerId, action) {
     if (result) {
         alert(result.message);
         setTimeout(loadContainers, 1000);
+    }
+}
+
+async function removeStack(stackName, host) {
+    // Show confirmation
+    const confirmMessage = `Are you sure you want to remove the entire Docker Swarm stack "${stackName}"?\n\nThis will remove ALL services and containers in this stack. This action cannot be undone.`;
+    
+    if (!confirm(confirmMessage)) {
+        return;
+    }
+    
+    try {
+        const url = `/api/stacks/${encodeURIComponent(stackName)}/remove${host ? `?host=${encodeURIComponent(host)}` : ''}`;
+        const response = await fetch(`${API_BASE}${url}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result && result.success) {
+            alert(result.message);
+            setTimeout(loadContainers, 2000); // Wait a bit longer for stack removal
+        } else {
+            alert(result?.message || result?.detail || 'Failed to remove stack');
+        }
+    } catch (error) {
+        console.error('Failed to remove stack:', error);
+        alert(`Failed to remove stack: ${error.message || 'Unknown error'}`);
     }
 }
 

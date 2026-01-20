@@ -382,6 +382,11 @@ class SSHClient:
         compose_service: Optional[str],
     ) -> Optional[LogEntry]:
         """Parse a log line with timestamp."""
+        # Filter out known non-critical warnings from external libraries
+        # This warning comes from Go libraries parsing cgroup v2 "max" values
+        if "failed to parse CPU allowed micro secs" in line and "parsing \"max\"" in line:
+            return None
+        
         # Docker log format: 2024-01-15T10:30:00.123456789Z message
         timestamp_pattern = r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z?)\s+'
         match = re.match(timestamp_pattern, line)
@@ -463,6 +468,7 @@ class SSHClient:
             ContainerAction.RESTART: f"docker restart {container_id}",
             ContainerAction.PAUSE: f"docker pause {container_id}",
             ContainerAction.UNPAUSE: f"docker unpause {container_id}",
+            ContainerAction.REMOVE: f"docker rm -f {container_id}",
         }
         
         cmd = cmd_map.get(action)
@@ -475,3 +481,33 @@ class SSHClient:
             return True, f"Action {action.value} completed successfully"
         else:
             return False, stderr or "Command failed"
+
+    async def get_swarm_stacks(self) -> Dict[str, List[str]]:
+        """Get list of Docker Swarm stacks and their services.
+        
+        Returns:
+            Dict mapping stack_name -> list of service names
+        """
+        cmd = "docker stack ls --format '{{.Name}}'"
+        stdout, stderr, code = await self.run_command(cmd)
+        
+        if code != 0:
+            return {}
+        
+        stacks = {}
+        for stack_name in stdout.strip().split('\n'):
+            stack_name = stack_name.strip()
+            if not stack_name:
+                continue
+            
+            # Get services for this stack
+            services_cmd = f"docker stack services {stack_name} --format '{{.Name}}'"
+            services_out, _, services_code = await self.run_command(services_cmd)
+            
+            if services_code == 0:
+                services = [s.strip() for s in services_out.strip().split('\n') if s.strip()]
+                stacks[stack_name] = services
+            else:
+                stacks[stack_name] = []
+        
+        return stacks

@@ -1,6 +1,6 @@
 """Unified host client interface."""
 
-from typing import List, Optional, Tuple, Protocol
+from typing import Dict, List, Optional, Tuple, Protocol
 from datetime import datetime
 
 import structlog
@@ -32,6 +32,8 @@ class HostClientProtocol(Protocol):
         compose_service: Optional[str] = None,
     ) -> List[LogEntry]: ...
     async def execute_container_action(self, container_id: str, action: ContainerAction) -> Tuple[bool, str]: ...
+    async def remove_stack(self, stack_name: str) -> Tuple[bool, str]: ...
+    async def get_swarm_stacks(self) -> Dict[str, List[str]]: ...
     async def close(self) -> None: ...
 
 

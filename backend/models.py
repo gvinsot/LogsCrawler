@@ -136,6 +136,7 @@ class ContainerAction(str, Enum):
     RESTART = "restart"
     PAUSE = "pause"
     UNPAUSE = "unpause"
+    REMOVE = "remove"
 
 
 class ActionRequest(BaseModel):
