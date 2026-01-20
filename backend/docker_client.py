@@ -356,7 +356,9 @@ class DockerAPIClient:
         """Parse a log line with timestamp."""
         # Filter out known non-critical warnings from external libraries
         # This warning comes from Go libraries parsing cgroup v2 "max" values
-        if "failed to parse CPU allowed micro secs" in line and "parsing \"max\"" in line:
+        # Check both in raw line and in structured log format (msg=...)
+        if ("failed to parse CPU allowed micro secs" in line and 
+            ("parsing \"max\"" in line or "parsing \\\"max\\\"" in line)):
             return None
         
         # Docker timestamp format: 2024-01-15T10:30:00.123456789Z

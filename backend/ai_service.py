@@ -23,6 +23,39 @@ You must respond with a valid JSON object containing these fields:
 - time_range: string (relative time: "5m", "10m", "1h", "6h", "24h", "7d") or null
 - sort_order: "desc" or "asc"
 
+These parameters are converted into an OpenSearch query with the following structure:
+{
+  "query": {
+    "bool": {
+      "must": [
+        {"query_string": {"query": "search terms", "default_field": "message"}}
+      ],
+      "filter": [
+        {"terms": {"host": ["host1", "host2"]}},
+        {"terms": {"container_name": ["container1", "container2"]}},
+        {"terms": {"level": ["ERROR", "WARN"]}},
+        {"range": {"http_status": {"gte": 400, "lte": 499}}},
+        {"range": {"timestamp": {"gte": "2024-01-01T00:00:00", "lte": "2024-01-02T00:00:00"}}}
+      ]
+    }
+  },
+  "sort": [{"timestamp": {"order": "desc"}}],
+  "from": 0,
+  "size": 100
+}
+
+Available log fields in OpenSearch:
+- timestamp: ISO datetime string
+- host: string (keyword field)
+- container_name: string (keyword field)
+- container_id: string (keyword field)
+- compose_project: string (keyword field)
+- compose_service: string (keyword field)
+- message: string (text field, full-text searchable)
+- level: string (keyword: ERROR, WARN, INFO, DEBUG, FATAL, CRITICAL)
+- http_status: integer (HTTP status code)
+- stream: string (stdout or stderr)
+
 Examples:
 User: "Find errors from the last 10 minutes"
 Response: {"query": null, "levels": ["ERROR"], "http_status_min": null, "http_status_max": null, "hosts": [], "containers": [], "time_range": "10m", "sort_order": "desc"}

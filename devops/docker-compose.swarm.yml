@@ -1,0 +1,134 @@
+version: '3.9'
+
+# ============================================================================
+# LogsCrawler - Docker Swarm Deployment
+# Deploy with: docker stack deploy -c docker-compose.swarm.yml logscrawler
+# ============================================================================
+
+services:
+  # OpenSearch for log storage and search
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.gpu != true
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  # Ollama for AI-powered log search (optional)
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - internal
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.gpu != true
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+  # LogsCrawler Backend & Frontend
+  logscrawler:
+    image: registry.methodinfo.fr/logscrawler:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # Run as root to access Docker socket
+    user: root
+    volumes:
+      # Mount SSH keys for host access (optional, for SSH mode)
+      - /root/.ssh:/root/.ssh:ro
+      # Mount config file
+      - /opt/logscrawler/config.yaml:/app/config.yaml:ro
+      # Mount Docker socket for direct Docker API access (mode: docker)
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - LOGSCRAWLER_DEBUG=false
+      - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://opensearch:9200"]
+      - LOGSCRAWLER_OLLAMA_URL=http://ollama:11434
+    networks:
+      - proxy
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - opensearch
+      - ollama
+    deploy:
+      replicas: 1
+      labels:
+        # Enable Traefik
+        - "traefik.enable=true"
+        
+        # Define service port
+        - "traefik.http.services.logscrawler.loadbalancer.server.port=8000"
+        
+        # HTTPS Router (main)
+        - "traefik.http.routers.logscrawler.rule=Host(`logs.methodinfo.fr`)"
+        - "traefik.http.routers.logscrawler.entrypoints=websecure"
+        - "traefik.http.routers.logscrawler.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.logscrawler.middlewares=global@file,local-only@file"
+        - "traefik.http.routers.logscrawler.service=logscrawler"
+        
+        # HTTP Router (redirect to HTTPS)
+        - "traefik.http.routers.logscrawler-http.rule=Host(`logs.methodinfo.fr`)"
+        - "traefik.http.routers.logscrawler-http.entrypoints=web"
+        - "traefik.http.routers.logscrawler-http.middlewares=redirect-to-https@file"
+        - "traefik.http.routers.logscrawler-http.service=noop@internal"
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.labels.gpu != true
+
+# ============================================================================
+# Volumes
+# ============================================================================
+volumes:
+  opensearch-data:
+    driver: local
+  ollama-data:
+    driver: local
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  proxy:
+    external: true
+  internal:
+    driver: overlay
+    internal: true
+    attachable: true
