@@ -40,38 +40,6 @@ services:
         reservations:
           memory: 1G
 
-  # Ollama for AI/LLM processing
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama-data:/root/.ollama
-    networks:
-      - internal
-    environment:
-      - AMD_VISIBLE_DEVICES=all
-      - OLLAMA_MODEL=codellama:7b
-      - OLLAMA_CONTEXT_LENGTH=8096
-      - OLLAMA_VULKAN=1
-      - OLLAMA_KEEP_ALIVE=-1
-      - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_FLASH_ATTENTION=1
-      - OLLAMA_MAX_LOADED_MODELS=1
-      - OLLAMA_BATCH_SIZE=128
-      - OLLAMA_NUM_BATCH=128
-      - OLLAMA_NO_MMAP=0
-    deploy:
-      replicas: 1
-      placement:
-        constraints:
-          - node.hostname == server-c
-      restart_policy:
-        condition: on-failure
-      resources:
-        limits:
-          memory: 4G
-        reservations:
-          memory: 2G
-
   # LogsCrawler Backend & Frontend
   logscrawler:
     image: registry.methodinfo.fr/logscrawler:latest
