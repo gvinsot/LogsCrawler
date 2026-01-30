@@ -74,7 +74,7 @@ services:
       - |
         LOGSCRAWLER_HOSTS=[
           {
-            "name": "swarm-manager",
+            "name": "server-b",
             "mode": "docker",
             "docker_url": "unix:///var/run/docker.sock",
             "swarm_manager": true,

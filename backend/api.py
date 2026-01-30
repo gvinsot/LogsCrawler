@@ -77,7 +77,8 @@ async def get_dashboard_stats():
     containers = await collector.get_all_containers()
     stats.total_containers = len(containers)
     stats.running_containers = len([c for c in containers if c.status == ContainerStatus.RUNNING])
-    stats.total_hosts = len(settings.hosts)
+    # Total hosts = configured hosts + discovered swarm nodes (each swarm node counts as a host)
+    stats.total_hosts = len(collector.clients)
     stats.healthy_hosts = len(collector.clients)  # Simplistic health check
     
     return stats
@@ -562,16 +563,33 @@ async def analyze_log_message(request: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/hosts")
 async def list_hosts() -> List[Dict[str, Any]]:
-    """List configured hosts."""
-    return [
+    """List all hosts: configured hosts plus discovered Docker Swarm nodes.
+
+    Each swarm node is exposed as a host so the Containers tab can show
+    containers per node. Host count = configured + swarm nodes.
+    """
+    configured_names = {h.name for h in settings.hosts}
+    result = [
         {
             "name": host.name,
             "hostname": host.hostname,
             "port": host.port,
             "username": host.username,
+            "is_swarm_node": False,
         }
         for host in settings.hosts
     ]
+    # Add discovered swarm nodes as hosts (so they appear in host list and Containers tab)
+    for name, client in collector.clients.items():
+        if name not in configured_names:
+            result.append({
+                "name": name,
+                "hostname": client.config.hostname,
+                "port": client.config.port,
+                "username": client.config.username,
+                "is_swarm_node": True,
+            })
+    return result
 
 
 # ============== Health ==============
