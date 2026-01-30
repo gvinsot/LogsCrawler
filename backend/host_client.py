@@ -75,64 +75,64 @@ class SwarmProxyClient:
                    manager=manager_client.config.name)
 
     async def get_containers(self) -> List[ContainerInfo]:
-        """Get containers running on this specific node."""
-        # Get all tasks and filter by node
-        tasks = await self._manager.get_swarm_tasks()
-        node_container_ids = [
-            t["container_id"] for t in tasks
+        """Get containers running on this specific node.
+
+        Uses task/service data from Swarm API instead of /containers/{id}/json
+        which only works for containers on the local node.
+        """
+        from .models import ContainerStatus
+
+        # Get tasks with service info for building ContainerInfo
+        tasks = await self._manager.get_swarm_tasks(include_service_info=True)
+
+        # Filter tasks for this node
+        node_tasks = [
+            t for t in tasks
             if t["node_id"].startswith(self._node_id[:12]) or self._node_id.startswith(t["node_id"][:12])
         ]
 
-        if not node_container_ids:
+        if not node_tasks:
             return []
 
-        # Get container details for each
         containers = []
-        for container_id in node_container_ids:
-            data, status = await self._manager._request("GET", f"/containers/{container_id}/json")
-            if status == 200 and data:
+        for task in node_tasks:
+            if not task.get("container_id"):
+                continue
+
+            try:
+                # Build container name from service name and slot (like Docker does)
+                service_name = task.get("service_name", "unknown")
+                slot = task.get("slot", 0)
+                container_name = f"{service_name}.{slot}.{task['id']}"
+
+                # Parse created timestamp
+                created_str = task.get("created", "")
                 try:
-                    labels = data.get("Config", {}).get("Labels", {}) or {}
-                    name = data.get("Name", "/unknown").lstrip("/")
+                    created = datetime.fromisoformat(created_str.replace("Z", "+00:00")[:26]) if created_str else datetime.now()
+                except:
+                    created = datetime.now()
 
-                    # Parse status
-                    state = data.get("State", {})
-                    from .models import ContainerStatus
-                    status_str = state.get("Status", "unknown").lower()
-                    try:
-                        container_status = ContainerStatus(status_str)
-                    except ValueError:
-                        container_status = ContainerStatus.RUNNING
+                # Use stack as compose_project
+                stack = task.get("stack", "")
 
-                    # Parse created time
-                    created_str = data.get("Created", "")
-                    try:
-                        created = datetime.fromisoformat(created_str.replace("Z", "+00:00")[:26])
-                    except:
-                        created = datetime.now()
-
-                    # Get compose/stack project and service
-                    # Try Compose labels first, then Swarm stack labels
-                    compose_project = (labels.get("com.docker.compose.project") or
-                                       labels.get("com.docker.stack.namespace"))
-                    compose_service = (labels.get("com.docker.compose.service") or
-                                       labels.get("com.docker.swarm.service.name"))
-
-                    container = ContainerInfo(
-                        id=container_id[:12],
-                        name=name,
-                        image=data.get("Config", {}).get("Image", "unknown"),
-                        status=container_status,
-                        created=created,
-                        host=self._node_hostname,  # Use the node hostname
-                        compose_project=compose_project,
-                        compose_service=compose_service,
-                        ports={},
-                        labels=labels,
-                    )
-                    containers.append(container)
-                except Exception as e:
-                    logger.error("Failed to parse container", container_id=container_id, error=str(e))
+                container = ContainerInfo(
+                    id=task["container_id"][:12],
+                    name=container_name,
+                    image=task.get("image", "unknown"),
+                    status=ContainerStatus.RUNNING,
+                    created=created,
+                    host=self._node_hostname,
+                    compose_project=stack if stack else None,
+                    compose_service=service_name,
+                    ports={},
+                    labels={
+                        "com.docker.swarm.service.name": service_name,
+                        "com.docker.stack.namespace": stack,
+                    } if stack else {"com.docker.swarm.service.name": service_name},
+                )
+                containers.append(container)
+            except Exception as e:
+                logger.error("Failed to parse container", container_id=task.get("container_id"), error=str(e))
 
         return containers
 

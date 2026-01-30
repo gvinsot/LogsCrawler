@@ -307,14 +307,18 @@ class Collector:
             return containers
 
         # When swarm autodiscover is enabled, fetch all swarm containers in one go from the
-        # manager (Tasks API). Per-node fetch via SwarmProxyClient can fail for worker
-        # containers because the manager API may not expose /containers/{id}/json for them.
+        # manager (Tasks API). This builds ContainerInfo from task/service data instead of
+        # /containers/{id}/json which only works for local containers.
         filled_from_swarm = False
         if refresh and self._swarm_autodiscover_enabled and self._swarm_manager_host:
             manager_client = self.clients.get(self._swarm_manager_host)
             if manager_client and hasattr(manager_client, "get_all_swarm_containers"):
                 try:
                     containers_by_node = await manager_client.get_all_swarm_containers()
+                    logger.info("Fetched swarm containers", 
+                               nodes=list(containers_by_node.keys()),
+                               counts={k: len(v) for k, v in containers_by_node.items()})
+                    
                     # Resolve manager node hostname so we can map to configured name
                     local_node_id = None
                     if hasattr(manager_client, "_get_local_node_id"):
@@ -329,6 +333,15 @@ class Collector:
                             ):
                                 manager_node_hostname = node.get("hostname")
                                 break
+                    
+                    # Clear cache for swarm nodes before filling with new data
+                    swarm_hostnames = set(containers_by_node.keys())
+                    if manager_node_hostname:
+                        swarm_hostnames.add(manager_node_hostname)
+                    for hostname in list(self._containers_cache.keys()):
+                        if hostname in swarm_hostnames or hostname == self._swarm_manager_host:
+                            del self._containers_cache[hostname]
+                    
                     for node_hostname, host_containers in containers_by_node.items():
                         if manager_node_hostname and node_hostname == manager_node_hostname:
                             self._containers_cache[self._swarm_manager_host] = host_containers
