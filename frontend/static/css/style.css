@@ -62,6 +62,7 @@ body {
     color: var(--text-primary);
     line-height: 1.6;
     overflow: hidden;
+    /* Allow scrolling on mobile via main-content */
 }
 
 /* App Layout */
@@ -188,7 +189,8 @@ body {
 /* Main Content */
 .main-content {
     flex: 1;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
     padding: 16px 24px;
     display: flex;
     flex-direction: column;
@@ -204,6 +206,8 @@ body {
     flex-direction: column;
     flex: 1;
     min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .view-header {
@@ -544,6 +548,36 @@ body {
     padding: 2px 8px;
     background: var(--bg-elevated);
     border-radius: var(--radius-sm);
+}
+
+/* Group stats (memory, CPU) */
+.group-stat {
+    font-size: 0.7rem;
+    font-weight: 500;
+    margin-left: 6px;
+    padding: 2px 8px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+}
+
+.group-memory {
+    color: var(--accent-tertiary);
+}
+
+.group-cpu {
+    color: var(--accent-primary);
+}
+
+.group-cpu.cpu-warning {
+    color: var(--status-warning);
+    background: rgba(245, 158, 11, 0.15);
+}
+
+.group-cpu.cpu-critical {
+    color: var(--status-error);
+    background: rgba(239, 68, 68, 0.2);
+    font-weight: 600;
 }
 
 .host-name {
@@ -1954,6 +1988,11 @@ body {
 }
 
 @media (max-width: 768px) {
+    /* Allow body scroll on mobile */
+    body {
+        overflow: auto;
+    }
+    
     /* Show mobile menu toggle */
     .mobile-menu-toggle {
         display: flex;
@@ -1965,15 +2004,22 @@ body {
         top: 0;
         left: 0;
         height: 100vh;
+        height: 100dvh; /* Use dynamic viewport height for mobile browsers */
         width: var(--sidebar-width);
         z-index: 1000;
         transform: translateX(-100%);
         transition: transform 0.3s ease;
         padding: 16px;
+        overflow-y: auto;
     }
 
     .sidebar.mobile-open {
         transform: translateX(0);
+    }
+    
+    /* Overlay when menu is open */
+    .sidebar-overlay.active {
+        display: block;
     }
 
     /* Logo adjustment */
@@ -1986,10 +2032,13 @@ body {
         display: inline;
     }
 
-    /* Main content - full width */
+    /* Main content - full width with scroll */
     .main-content {
         padding: 70px 12px 12px;
         width: 100%;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
     }
 
     .view-header {
@@ -2489,5 +2538,10 @@ body {
 
     .modal-header-actions {
         justify-content: flex-end;
+    }
+    
+    /* Hide group stats on very small screens */
+    .group-stat {
+        display: none;
     }
 }

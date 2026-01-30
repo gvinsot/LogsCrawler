@@ -22,12 +22,36 @@ document.addEventListener('DOMContentLoaded', () => {
     loadDashboard();
 });
 
+// ============== Mobile Menu ==============
+
+function toggleMobileMenu() {
+    const sidebar = document.querySelector('.sidebar');
+    const overlay = document.querySelector('.sidebar-overlay');
+    
+    sidebar.classList.toggle('mobile-open');
+    overlay.classList.toggle('active');
+    
+    // Prevent body scroll when menu is open
+    document.body.style.overflow = sidebar.classList.contains('mobile-open') ? 'hidden' : '';
+}
+
+function closeMobileMenu() {
+    const sidebar = document.querySelector('.sidebar');
+    const overlay = document.querySelector('.sidebar-overlay');
+    
+    sidebar.classList.remove('mobile-open');
+    overlay.classList.remove('active');
+    document.body.style.overflow = '';
+}
+
 function initNavigation() {
     document.querySelectorAll('.nav-item').forEach(item => {
         item.addEventListener('click', (e) => {
             e.preventDefault();
             const view = item.dataset.view;
             switchView(view);
+            // Close mobile menu after navigation
+            closeMobileMenu();
         });
     });
 }
@@ -951,6 +975,19 @@ async function loadContainers() {
         
         const containerCount = Object.values(services).reduce((sum, containers) => sum + containers.length, 0);
         
+        // Calculate group stats: total memory and max CPU
+        let topLevelTotalMemory = 0;
+        let topLevelMaxCpu = 0;
+        for (const containers of Object.values(services)) {
+            for (const c of containers) {
+                if (c.memory_usage_mb != null) topLevelTotalMemory += c.memory_usage_mb;
+                if (c.cpu_percent != null && c.cpu_percent > topLevelMaxCpu) topLevelMaxCpu = c.cpu_percent;
+            }
+        }
+        const topLevelMemoryDisplay = topLevelTotalMemory > 0 ? formatMemory(topLevelTotalMemory) : '';
+        const topLevelCpuClass = topLevelMaxCpu >= 80 ? 'cpu-critical' : (topLevelMaxCpu >= 50 ? 'cpu-warning' : '');
+        const topLevelCpuDisplay = topLevelMaxCpu > 0 ? `${topLevelMaxCpu.toFixed(1)}%` : '';
+        
         // Get the first host from containers in this stack (for stack removal)
         const firstHost = Object.values(services)[0]?.[0]?.host || '';
         
@@ -963,6 +1000,8 @@ async function loadContainers() {
                     ${topLevelIcon}
                     ${escapeHtml(topLevel)}
                     <span class="group-count">${containerCount} containers</span>
+                    ${topLevelMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${topLevelMemoryDisplay}</span>` : ''}
+                    ${topLevelCpuDisplay ? `<span class="group-stat group-cpu ${topLevelCpuClass}" title="Max CPU usage">⚡ ${topLevelCpuDisplay}</span>` : ''}
                 </span>
                 ${isStackView && topLevel !== '_standalone' ? `
                 <div class="host-header-actions" onclick="event.stopPropagation();">
@@ -985,6 +1024,17 @@ async function loadContainers() {
             const isServiceCollapsed = storedGroups[groupKey] === false;
             const serviceGroupClass = isServiceCollapsed ? 'compose-group collapsed' : 'compose-group';
             
+            // Calculate service stats: total memory and max CPU
+            let serviceTotalMemory = 0;
+            let serviceMaxCpu = 0;
+            for (const c of containers) {
+                if (c.memory_usage_mb != null) serviceTotalMemory += c.memory_usage_mb;
+                if (c.cpu_percent != null && c.cpu_percent > serviceMaxCpu) serviceMaxCpu = c.cpu_percent;
+            }
+            const serviceMemoryDisplay = serviceTotalMemory > 0 ? formatMemory(serviceTotalMemory) : '';
+            const serviceCpuClass = serviceMaxCpu >= 80 ? 'cpu-critical' : (serviceMaxCpu >= 50 ? 'cpu-warning' : '');
+            const serviceCpuDisplay = serviceMaxCpu > 0 ? `${serviceMaxCpu.toFixed(1)}%` : '';
+            
             topLevelHtml += `
                 <div class="${serviceGroupClass}" data-host="${escapeHtml(topLevel)}" data-project="${escapeHtml(service)}">
                     <div class="compose-header" onclick="toggleComposeGroup(event, this)">
@@ -996,6 +1046,8 @@ async function loadContainers() {
                         </svg>
                         ${escapeHtml(serviceName)}
                         <span class="group-count">${containers.length}</span>
+                        ${serviceMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${serviceMemoryDisplay}</span>` : ''}
+                        ${serviceCpuDisplay ? `<span class="group-stat group-cpu ${serviceCpuClass}" title="Max CPU usage">⚡ ${serviceCpuDisplay}</span>` : ''}
                     </div>
                     <div class="compose-content">
                         <div class="container-list">
@@ -1618,6 +1670,14 @@ function formatBytes(bytes) {
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function formatMemory(mb) {
+    if (mb === 0 || mb == null) return '';
+    if (mb >= 1024) {
+        return (mb / 1024).toFixed(1) + ' GB';
+    }
+    return Math.round(mb) + ' MB';
 }
 
 function formatTime(isoString) {
