@@ -410,14 +410,53 @@ class Collector:
         # Fall back to direct client
         return self.clients.get(host)
 
+    async def _find_container(self, host: str, container_id: str, refresh_on_miss: bool = True) -> Optional[ContainerInfo]:
+        """Find a container by ID, with prefix matching and optional cache refresh.
+        
+        Args:
+            host: The host name
+            container_id: Container ID (can be partial/prefix)
+            refresh_on_miss: If True and container not found, refresh cache and retry
+            
+        Returns:
+            ContainerInfo if found, None otherwise
+        """
+        from .models import ContainerInfo
+        
+        containers = self._containers_cache.get(host, [])
+        
+        # Try exact match first
+        container = next((c for c in containers if c.id == container_id), None)
+        if container:
+            return container
+        
+        # Try prefix match (container IDs are often truncated)
+        container = next((c for c in containers if c.id.startswith(container_id) or container_id.startswith(c.id)), None)
+        if container:
+            return container
+        
+        # Try matching by name prefix (before the first dot for Swarm containers)
+        # Swarm container names are like: service_name.slot.task_id
+        container_prefix = container_id.split('.')[0] if '.' in container_id else container_id
+        container = next((c for c in containers if c.name.startswith(container_prefix) or c.id.startswith(container_prefix)), None)
+        if container:
+            return container
+        
+        # If still not found and refresh is enabled, refresh cache and retry
+        if refresh_on_miss:
+            logger.debug("Container not found in cache, refreshing", container_id=container_id, host=host)
+            await self.get_all_containers(refresh=True)
+            return await self._find_container(host, container_id, refresh_on_miss=False)
+        
+        return None
+
     async def get_container_stats(self, host: str, container_id: str) -> Optional[dict]:
         """Get current stats for a specific container.
 
         For Swarm containers on worker nodes, stats are fetched by connecting
         to the worker node (if SSH is configured) or returned as None.
         """
-        containers = self._containers_cache.get(host, [])
-        container = next((c for c in containers if c.id == container_id), None)
+        container = await self._find_container(host, container_id)
         if not container:
             return None
 
@@ -427,7 +466,7 @@ class Collector:
         # If we have a direct client for this host, use it
         direct_client = self.clients.get(host)
         if direct_client:
-            stats = await direct_client.get_container_stats(container_id, container.name)
+            stats = await direct_client.get_container_stats(container.id, container.name)
             return stats.model_dump() if stats else None
         
         # For Swarm worker nodes without direct client, try manager with task info
@@ -435,7 +474,7 @@ class Collector:
             manager_client = self.clients.get(self._swarm_manager_host)
             if manager_client:
                 # Try to get stats - will work if container happens to be on manager
-                stats = await manager_client.get_container_stats(container_id, container.name)
+                stats = await manager_client.get_container_stats(container.id, container.name)
                 if stats:
                     return stats.model_dump()
                 # Stats not available for remote Swarm containers without SSH
@@ -481,8 +520,7 @@ class Collector:
         if not client:
             return []
 
-        containers = self._containers_cache.get(host, [])
-        container = next((c for c in containers if c.id == container_id), None)
+        container = await self._find_container(host, container_id)
         
         # Extract task_id from labels if this is a Swarm container
         task_id = None
@@ -490,7 +528,7 @@ class Collector:
             task_id = container.labels.get("com.docker.swarm.task.id")
 
         logs = await client.get_container_logs(
-            container_id=container_id,
+            container_id=container.id if container else container_id,
             container_name=container.name if container else container_id,
             tail=tail,
             compose_project=container.compose_project if container else None,
@@ -506,16 +544,15 @@ class Collector:
         For local containers: runs printenv inside the container.
         For Swarm containers on worker nodes: retrieves env from service spec.
         """
-        containers = self._containers_cache.get(host, [])
-        container = next((c for c in containers if c.id == container_id), None)
+        container = await self._find_container(host, container_id)
         
         # Check if this is a Swarm container
         service_id = container.labels.get("com.docker.swarm.service.id") if container and container.labels else None
         
         # If we have a direct client for this host, use exec
         direct_client = self.clients.get(host)
-        if direct_client:
-            success, output = await direct_client.exec_command(container_id, ["printenv"])
+        if direct_client and container:
+            success, output = await direct_client.exec_command(container.id, ["printenv"])
             if success:
                 env_vars = {}
                 for line in output.strip().split('\n'):

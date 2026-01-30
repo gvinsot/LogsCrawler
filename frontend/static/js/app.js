@@ -574,6 +574,29 @@ async function apiGet(endpoint) {
     }
 }
 
+/**
+ * API GET with 404 retry support. If the endpoint returns 404,
+ * refreshes the container list and retries once.
+ */
+async function apiGetWithRetry(endpoint, retryCallback = null) {
+    try {
+        const response = await fetch(`${API_BASE}${endpoint}`);
+        if (response.status === 404 && retryCallback) {
+            console.log(`Container not found (404), refreshing and retrying...`);
+            await retryCallback();
+            // Retry once after refresh
+            const retryResponse = await fetch(`${API_BASE}${endpoint}`);
+            if (!retryResponse.ok) throw new Error(`HTTP ${retryResponse.status}`);
+            return await retryResponse.json();
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json();
+    } catch (error) {
+        console.error(`API Error (${endpoint}):`, error);
+        return null;
+    }
+}
+
 async function apiPost(endpoint, data) {
     try {
         const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -930,7 +953,7 @@ function saveGroupBy(value) {
     }
 }
 
-async function loadContainers() {
+async function loadContainers(forceRefresh = false) {
     // Restore filters from localStorage
     const storedFilter = getStoredFilter();
     const statusFilter = storedFilter !== null ? storedFilter : document.getElementById('status-filter').value;
@@ -947,6 +970,7 @@ async function loadContainers() {
     const groupBy = groupBySelect?.value || storedGroupBy || 'host';
     saveGroupBy(groupBy);
     
+    // forceRefresh ensures backend cache is invalidated
     let endpoint = `/containers/grouped?refresh=true&group_by=${groupBy}`;
     if (statusFilter) {
         endpoint += `&status=${statusFilter}`;
@@ -1255,7 +1279,10 @@ async function refreshContainerLogs() {
     if (!currentContainer) return;
     
     const tail = document.getElementById('logs-tail').value || 500;
-    const logs = await apiGet(`/containers/${currentContainer.host}/${currentContainer.id}/logs?tail=${tail}`);
+    const logs = await apiGetWithRetry(
+        `/containers/${currentContainer.host}/${currentContainer.id}/logs?tail=${tail}`,
+        () => loadContainers(true)  // Refresh container list on 404
+    );
     
     const logViewer = document.getElementById('container-logs');
     currentContainerLogs = logs || [];
@@ -1464,7 +1491,10 @@ function filterContainerLogs() {
 async function refreshContainerStats() {
     if (!currentContainer) return;
 
-    const stats = await apiGet(`/containers/${currentContainer.host}/${currentContainer.id}/stats`);
+    const stats = await apiGetWithRetry(
+        `/containers/${currentContainer.host}/${currentContainer.id}/stats`,
+        () => loadContainers(true)  // Refresh container list on 404
+    );
 
     if (stats) {
         document.getElementById('stat-cpu').textContent = `${stats.cpu_percent.toFixed(2)}%`;
@@ -1488,7 +1518,10 @@ async function refreshContainerEnv() {
     const envViewer = document.getElementById('container-env');
     envViewer.innerHTML = '<div class="loading">Loading environment variables...</div>';
 
-    const envData = await apiGet(`/containers/${currentContainer.host}/${currentContainer.id}/env`);
+    const envData = await apiGetWithRetry(
+        `/containers/${currentContainer.host}/${currentContainer.id}/env`,
+        () => loadContainers(true)  // Refresh container list on 404
+    );
 
     if (envData && envData.variables) {
         currentContainerEnv = envData.variables;
