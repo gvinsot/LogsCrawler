@@ -85,6 +85,12 @@ class GitHubConfig(BaseModel):
     repos_path: str = "~/repos"
     # Path to deployment scripts
     scripts_path: str = "~/PrivateNetwork"
+    # SSH configuration for executing commands on the host
+    # Required when LogsCrawler runs in a container and needs to run git/build on the host
+    ssh_host: Optional[str] = None
+    ssh_user: str = "root"
+    ssh_port: int = 22
+    ssh_key_path: Optional[str] = None
 
 
 class Settings(BaseSettings):
@@ -186,6 +192,14 @@ def load_config() -> Settings:
         settings.github.repos_path = os.environ["LOGSCRAWLER_GITHUB__REPOS_PATH"]
     if os.environ.get("LOGSCRAWLER_GITHUB__SCRIPTS_PATH"):
         settings.github.scripts_path = os.environ["LOGSCRAWLER_GITHUB__SCRIPTS_PATH"]
+    if os.environ.get("LOGSCRAWLER_GITHUB__SSH_HOST"):
+        settings.github.ssh_host = os.environ["LOGSCRAWLER_GITHUB__SSH_HOST"]
+    if os.environ.get("LOGSCRAWLER_GITHUB__SSH_USER"):
+        settings.github.ssh_user = os.environ["LOGSCRAWLER_GITHUB__SSH_USER"]
+    if os.environ.get("LOGSCRAWLER_GITHUB__SSH_PORT"):
+        settings.github.ssh_port = int(os.environ["LOGSCRAWLER_GITHUB__SSH_PORT"])
+    if os.environ.get("LOGSCRAWLER_GITHUB__SSH_KEY_PATH"):
+        settings.github.ssh_key_path = os.environ["LOGSCRAWLER_GITHUB__SSH_KEY_PATH"]
 
     return settings
 

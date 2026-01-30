@@ -118,15 +118,47 @@ class GitHubService:
 class StackDeployer:
     """Service for building and deploying stacks from GitHub repos."""
 
-    def __init__(self, config: GitHubConfig, host_client):
+    def __init__(self, config: GitHubConfig, host_client=None):
         """Initialize the deployer.
 
         Args:
             config: GitHub configuration
-            host_client: Host client for executing commands (SSH or Docker)
+            host_client: Host client for executing commands (fallback if no SSH configured)
         """
         self.config = config
         self.host_client = host_client
+        self._ssh_client = None
+
+    async def _get_ssh_client(self):
+        """Get or create SSH client for host commands."""
+        if self._ssh_client is not None:
+            return self._ssh_client
+        
+        # If SSH host is configured, use SSH
+        if self.config.ssh_host:
+            from .ssh_client import SSHClient
+            from .config import HostConfig
+            
+            ssh_config = HostConfig(
+                name="github-deploy-host",
+                hostname=self.config.ssh_host,
+                port=self.config.ssh_port,
+                username=self.config.ssh_user,
+                ssh_key_path=self.config.ssh_key_path,
+                mode="ssh"
+            )
+            self._ssh_client = SSHClient(ssh_config)
+            logger.info("Using SSH for stack operations", 
+                       host=self.config.ssh_host, 
+                       user=self.config.ssh_user)
+        
+        return self._ssh_client
+
+    async def close(self):
+        """Close SSH connection if open."""
+        if self._ssh_client:
+            await self._ssh_client.close()
+            self._ssh_client = None
 
     async def _ensure_repo_cloned(self, repo_name: str, ssh_url: str) -> tuple[bool, str]:
         """Ensure the repository is cloned on the host.
@@ -173,6 +205,9 @@ class StackDeployer:
     async def _run_command(self, command: str) -> tuple[bool, str]:
         """Run a shell command on the host.
 
+        Prefers SSH if configured (for running on Docker host from container).
+        Falls back to host_client or local execution.
+
         Args:
             command: Shell command to run
 
@@ -180,21 +215,26 @@ class StackDeployer:
             Tuple of (success, output)
         """
         try:
-            # Use the host client to run the command
-            # This works for both SSH and Docker clients
-            if hasattr(self.host_client, 'run_shell_command'):
+            # First, try to use SSH if configured (for executing on host from container)
+            ssh_client = await self._get_ssh_client()
+            if ssh_client:
+                return await ssh_client.run_shell_command(command)
+            
+            # Fallback: use the host client if available
+            if self.host_client and hasattr(self.host_client, 'run_shell_command'):
                 return await self.host_client.run_shell_command(command)
-            else:
-                # Fallback: run locally using asyncio
-                proc = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await proc.communicate()
-                output = stdout.decode() + stderr.decode()
-                return proc.returncode == 0, output.strip()
+            
+            # Last resort: run locally using asyncio
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            output = stdout.decode() + stderr.decode()
+            return proc.returncode == 0, output.strip()
         except Exception as e:
+            logger.error("Command execution failed", command=command[:80], error=str(e))
             return False, str(e)
 
     async def build(self, repo_name: str, ssh_url: str, version: str = "1.0") -> Dict[str, Any]:

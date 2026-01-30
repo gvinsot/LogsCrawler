@@ -51,6 +51,8 @@ services:
     volumes:
       # Mount Docker socket for Swarm API access (required for auto-discovery)
       - /var/run/docker.sock:/var/run/docker.sock
+      # Mount SSH keys for git clone/build operations on host
+      - /root/.ssh:/gildas/.ssh:ro
     environment:
       # ========== All configuration via environment variables ==========
       - LOGSCRAWLER_DEBUG=false
@@ -68,8 +70,16 @@ services:
       - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS=15
       - LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH=500
       - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS=7
+      
+      # GitHub integration for Stacks tab
       - LOGSCRAWLER_GITHUB__TOKEN=${LOGSCRAWLER_GITHUB__TOKEN}
       - LOGSCRAWLER_GITHUB__USERNAME=gvinsot
+      - LOGSCRAWLER_GITHUB__REPOS_PATH=~/repos
+      - LOGSCRAWLER_GITHUB__SCRIPTS_PATH=~/PrivateNetwork
+      # SSH config for running git/build commands on the Docker host (not in container)
+      - LOGSCRAWLER_GITHUB__SSH_HOST=server-b
+      - LOGSCRAWLER_GITHUB__SSH_USER=root
+      
       # Host configuration (JSON array)
       # Using Swarm auto-discovery: only configure the manager, workers are discovered!
       - |
