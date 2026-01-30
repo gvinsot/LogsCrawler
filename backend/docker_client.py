@@ -129,38 +129,60 @@ class DockerAPIClient:
         """Get container resource statistics."""
         # stream=false for one-shot stats
         data, status = await self._request("GET", f"/containers/{container_id}/stats?stream=false")
-        
+
         if status != 200 or not data:
             return None
-        
+
         try:
+            cpu_stats = data.get("cpu_stats", {})
+            precpu_stats = data.get("precpu_stats", {})
+
             # Calculate CPU percentage
-            cpu_delta = data["cpu_stats"]["cpu_usage"]["total_usage"] - \
-                       data["precpu_stats"]["cpu_usage"]["total_usage"]
-            system_delta = data["cpu_stats"]["system_cpu_usage"] - \
-                          data["precpu_stats"]["system_cpu_usage"]
-            num_cpus = data["cpu_stats"].get("online_cpus", 1)
-            
+            # Handle different Docker versions and platforms (Linux, Windows, macOS)
             cpu_percent = 0.0
-            if system_delta > 0:
-                cpu_percent = (cpu_delta / system_delta) * num_cpus * 100.0
-            
+            num_cpus = cpu_stats.get("online_cpus") or len(cpu_stats.get("cpu_usage", {}).get("percpu_usage", [])) or 1
+
+            cpu_usage = cpu_stats.get("cpu_usage", {})
+            precpu_usage = precpu_stats.get("cpu_usage", {})
+
+            cpu_delta = cpu_usage.get("total_usage", 0) - precpu_usage.get("total_usage", 0)
+
+            # Try system_cpu_usage first (Linux with cgroup v1)
+            if "system_cpu_usage" in cpu_stats and "system_cpu_usage" in precpu_stats:
+                system_delta = cpu_stats["system_cpu_usage"] - precpu_stats["system_cpu_usage"]
+                if system_delta > 0 and cpu_delta > 0:
+                    cpu_percent = (cpu_delta / system_delta) * num_cpus * 100.0
+            else:
+                # Fallback for cgroup v2, Windows, macOS - use usage_in_kernelmode + usage_in_usermode
+                # Or calculate based on time period if available
+                if cpu_delta > 0:
+                    # Estimate based on 1 second polling interval (stats are roughly 1s apart)
+                    # CPU time is in nanoseconds, so divide by 1e9 to get seconds
+                    cpu_percent = (cpu_delta / 1e9) * 100.0 / num_cpus
+                    # Cap at reasonable value
+                    cpu_percent = min(cpu_percent, 100.0 * num_cpus)
+
             # Memory stats
             memory_stats = data.get("memory_stats", {})
             memory_usage = memory_stats.get("usage", 0) / (1024 * 1024)  # MB
-            memory_limit = memory_stats.get("limit", 1) / (1024 * 1024)  # MB
+            memory_limit = memory_stats.get("limit", 0) / (1024 * 1024)  # MB
+
+            # Handle unlimited memory (very large limit value)
+            if memory_limit > 1e12:  # > 1 PB, essentially unlimited
+                memory_limit = memory_usage * 2 if memory_usage > 0 else 1024  # Show relative usage
+
             memory_percent = (memory_usage / memory_limit * 100) if memory_limit > 0 else 0
-            
+
             # Network stats
             networks = data.get("networks", {})
             net_rx = sum(n.get("rx_bytes", 0) for n in networks.values())
             net_tx = sum(n.get("tx_bytes", 0) for n in networks.values())
-            
+
             # Block I/O stats
             blkio = data.get("blkio_stats", {}).get("io_service_bytes_recursive", []) or []
-            block_read = sum(s.get("value", 0) for s in blkio if s.get("op") == "read")
-            block_write = sum(s.get("value", 0) for s in blkio if s.get("op") == "write")
-            
+            block_read = sum(s.get("value", 0) for s in blkio if s.get("op", "").lower() == "read")
+            block_write = sum(s.get("value", 0) for s in blkio if s.get("op", "").lower() == "write")
+
             return ContainerStats(
                 container_id=container_id,
                 container_name=container_name,
@@ -175,7 +197,7 @@ class DockerAPIClient:
                 block_read_bytes=block_read,
                 block_write_bytes=block_write,
             )
-            
+
         except Exception as e:
             logger.error("Failed to parse container stats", container=container_id, error=str(e))
             return None

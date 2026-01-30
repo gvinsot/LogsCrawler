@@ -582,6 +582,106 @@ async def health_check() -> Dict[str, str]:
     return {"status": "healthy", "service": "logscrawler"}
 
 
+# ============== Configuration ==============
+
+@app.get("/api/config")
+async def get_config() -> Dict[str, Any]:
+    """Get current configuration (for debugging).
+
+    Returns the loaded configuration including hosts, opensearch settings,
+    and collector settings. Useful for verifying environment variables
+    are being parsed correctly.
+    """
+    # Get list of configured hosts
+    configured_hosts = [
+        {
+            "name": h.name,
+            "hostname": h.hostname,
+            "mode": h.mode,
+            "docker_url": h.docker_url,
+            "swarm_manager": h.swarm_manager,
+            "swarm_routing": h.swarm_routing,
+            "swarm_autodiscover": h.swarm_autodiscover,
+        }
+        for h in settings.hosts
+    ]
+
+    # Get list of active clients (including discovered nodes)
+    active_clients = [
+        {
+            "name": name,
+            "mode": client.config.mode,
+            "hostname": client.config.hostname,
+        }
+        for name, client in collector.clients.items()
+    ]
+
+    return {
+        "hosts": {
+            "configured": configured_hosts,
+            "active_clients": active_clients,
+            "discovered_nodes": list(collector._discovered_nodes.keys()) if hasattr(collector, '_discovered_nodes') else [],
+        },
+        "opensearch": {
+            "hosts": settings.opensearch.hosts,
+            "index_prefix": settings.opensearch.index_prefix,
+            "has_auth": bool(settings.opensearch.username),
+        },
+        "collector": {
+            "log_interval_seconds": settings.collector.log_interval_seconds,
+            "metrics_interval_seconds": settings.collector.metrics_interval_seconds,
+            "log_lines_per_fetch": settings.collector.log_lines_per_fetch,
+            "retention_days": settings.collector.retention_days,
+        },
+        "ai": {
+            "model": settings.ai.model,
+        },
+        "swarm": {
+            "manager_host": collector._swarm_manager_host if hasattr(collector, '_swarm_manager_host') else None,
+            "routing_enabled": collector._swarm_routing_enabled if hasattr(collector, '_swarm_routing_enabled') else False,
+            "autodiscover_enabled": collector._swarm_autodiscover_enabled if hasattr(collector, '_swarm_autodiscover_enabled') else False,
+        }
+    }
+
+
+@app.get("/api/config/test")
+async def test_config() -> Dict[str, Any]:
+    """Test configuration by checking connectivity to all hosts.
+
+    Returns status of each configured host including:
+    - Connection status
+    - Number of containers found
+    - Any errors encountered
+    """
+    results = []
+
+    for name, client in collector.clients.items():
+        result = {
+            "name": name,
+            "mode": client.config.mode,
+            "status": "unknown",
+            "containers": 0,
+            "error": None,
+        }
+
+        try:
+            containers = await client.get_containers()
+            result["status"] = "connected"
+            result["containers"] = len(containers)
+        except Exception as e:
+            result["status"] = "error"
+            result["error"] = str(e)
+
+        results.append(result)
+
+    return {
+        "hosts": results,
+        "total_hosts": len(results),
+        "connected": sum(1 for r in results if r["status"] == "connected"),
+        "errors": sum(1 for r in results if r["status"] == "error"),
+    }
+
+
 # Serve static files (frontend)
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 
