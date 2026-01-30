@@ -111,6 +111,13 @@ class SwarmProxyClient:
                     except:
                         created = datetime.now()
 
+                    # Get compose/stack project and service
+                    # Try Compose labels first, then Swarm stack labels
+                    compose_project = (labels.get("com.docker.compose.project") or
+                                       labels.get("com.docker.stack.namespace"))
+                    compose_service = (labels.get("com.docker.compose.service") or
+                                       labels.get("com.docker.swarm.service.name"))
+
                     container = ContainerInfo(
                         id=container_id[:12],
                         name=name,
@@ -118,8 +125,8 @@ class SwarmProxyClient:
                         status=container_status,
                         created=created,
                         host=self._node_hostname,  # Use the node hostname
-                        compose_project=labels.get("com.docker.stack.namespace"),
-                        compose_service=labels.get("com.docker.swarm.service.name"),
+                        compose_project=compose_project,
+                        compose_service=compose_service,
                         ports={},
                         labels=labels,
                     )

@@ -21,15 +21,16 @@ logger = structlog.get_logger()
 
 class DockerAPIClient:
     """Direct Docker API client (via socket or TCP)."""
-    
+
     def __init__(self, host_config: HostConfig):
         self.config = host_config
         self._session: Optional[aiohttp.ClientSession] = None
         self._connector: Optional[aiohttp.BaseConnector] = None
         self._closing = False  # Flag to track graceful shutdown
+        self._local_node_id: Optional[str] = None  # Cached local node ID for Swarm filtering
 
         docker_url = host_config.docker_url or "unix:///var/run/docker.sock"
-        
+
         # Determine connection type
         if docker_url.startswith("unix://"):
             # Unix socket connection
@@ -86,35 +87,89 @@ class DockerAPIClient:
             if not self._closing:
                 logger.error("Docker API request failed", endpoint=endpoint, error=str(e))
             return None, 500
+
+    async def _get_local_node_id(self) -> Optional[str]:
+        """Get the local node ID for Swarm filtering.
+
+        Caches the result since node ID doesn't change.
+        """
+        if self._local_node_id:
+            return self._local_node_id
+
+        data, status = await self._request("GET", "/info")
+        if status == 200 and data:
+            swarm_info = data.get("Swarm", {})
+            node_id = swarm_info.get("NodeID")
+            if node_id:
+                self._local_node_id = node_id
+                logger.debug("Got local Swarm node ID", node_id=node_id[:12])
+        return self._local_node_id
+
+    async def _get_local_container_ids(self) -> set:
+        """Get container IDs running on this specific Swarm node.
+
+        Used to filter containers when swarm_autodiscover is enabled.
+        """
+        local_node_id = await self._get_local_node_id()
+        if not local_node_id:
+            return set()
+
+        tasks = await self.get_swarm_tasks()
+        local_container_ids = set()
+        for task in tasks:
+            # Match node ID (may be truncated)
+            if (task["node_id"].startswith(local_node_id[:12]) or
+                    local_node_id.startswith(task["node_id"][:12])):
+                if task["container_id"]:
+                    local_container_ids.add(task["container_id"][:12])
+
+        return local_container_ids
     
     async def get_containers(self) -> List[ContainerInfo]:
-        """Get list of all Docker containers."""
+        """Get list of all Docker containers.
+
+        When swarm_autodiscover is enabled, only returns containers running on
+        the local node (worker containers are handled by SwarmProxyClient).
+        """
         data, status = await self._request("GET", "/containers/json?all=true")
-        
+
         if status != 200 or not data:
             return []
-        
+
+        # If swarm_autodiscover is enabled, filter to only local node containers
+        local_container_ids = None
+        if self.config.swarm_autodiscover:
+            local_container_ids = await self._get_local_container_ids()
+            logger.debug("Filtering containers to local node",
+                        local_count=len(local_container_ids))
+
         containers = []
         for c in data:
             try:
+                container_id = c["Id"][:12]
+
+                # Filter by local node if autodiscover is enabled
+                if local_container_ids is not None and container_id not in local_container_ids:
+                    continue
+
                 # Parse status
                 state = c.get("State", "").lower()
                 try:
                     container_status = ContainerStatus(state)
                 except ValueError:
                     container_status = ContainerStatus.EXITED
-                
+
                 # Parse labels
                 labels = c.get("Labels", {}) or {}
-                
+
                 # Parse created timestamp
                 created_ts = c.get("Created", 0)
                 created = datetime.fromtimestamp(created_ts) if created_ts else datetime.now()
-                
+
                 # Parse name (remove leading /)
                 names = c.get("Names", ["/unknown"])
                 name = names[0].lstrip("/") if names else "unknown"
-                
+
                 # Parse ports
                 ports = {}
                 for port in c.get("Ports", []):
@@ -122,24 +177,31 @@ class DockerAPIClient:
                     public = f"{port.get('IP', '')}:{port.get('PublicPort', '')}" if port.get('PublicPort') else None
                     if public:
                         ports[private] = public
-                
+
+                # Get compose/stack project and service
+                # Try Compose labels first, then Swarm stack labels
+                compose_project = (labels.get("com.docker.compose.project") or
+                                   labels.get("com.docker.stack.namespace"))
+                compose_service = (labels.get("com.docker.compose.service") or
+                                   labels.get("com.docker.swarm.service.name"))
+
                 container = ContainerInfo(
-                    id=c["Id"][:12],
+                    id=container_id,
                     name=name,
                     image=c.get("Image", "unknown"),
                     status=container_status,
                     created=created,
                     host=self.config.name,
-                    compose_project=labels.get("com.docker.compose.project"),
-                    compose_service=labels.get("com.docker.compose.service"),
+                    compose_project=compose_project,
+                    compose_service=compose_service,
                     ports=ports,
                     labels=labels,
                 )
                 containers.append(container)
-                
+
             except Exception as e:
                 logger.error("Failed to parse container", error=str(e))
-        
+
         return containers
     
     async def get_container_stats(self, container_id: str, container_name: str) -> Optional[ContainerStats]:
@@ -717,6 +779,12 @@ class DockerAPIClient:
                         labels = data.get("Config", {}).get("Labels", {}) or {}
                         name = data.get("Name", "unknown").lstrip("/")
 
+                        # Get compose/stack project and service
+                        compose_project = (labels.get("com.docker.compose.project") or
+                                           labels.get("com.docker.stack.namespace"))
+                        compose_service = (labels.get("com.docker.compose.service") or
+                                           labels.get("com.docker.swarm.service.name"))
+
                         container = ContainerInfo(
                             id=task["container_id"],
                             name=name,
@@ -724,8 +792,8 @@ class DockerAPIClient:
                             status=ContainerStatus.RUNNING,
                             created=datetime.fromisoformat(data.get("Created", "").replace("Z", "+00:00")),
                             host=self.config.name,
-                            compose_project=labels.get("com.docker.stack.namespace"),
-                            compose_service=labels.get("com.docker.swarm.service.name"),
+                            compose_project=compose_project,
+                            compose_service=compose_service,
                             ports={},
                             labels=labels,
                         )
@@ -777,6 +845,13 @@ class DockerAPIClient:
                     labels = data.get("Config", {}).get("Labels", {}) or {}
                     name = data.get("Name", "unknown").lstrip("/")
 
+                    # Get compose/stack project and service
+                    # Try Compose labels first, then Swarm stack labels
+                    compose_project = (labels.get("com.docker.compose.project") or
+                                       labels.get("com.docker.stack.namespace"))
+                    compose_service = (labels.get("com.docker.compose.service") or
+                                       labels.get("com.docker.swarm.service.name"))
+
                     container = ContainerInfo(
                         id=task["container_id"],
                         name=name,
@@ -784,8 +859,8 @@ class DockerAPIClient:
                         status=ContainerStatus.RUNNING,
                         created=datetime.fromisoformat(data.get("Created", "").replace("Z", "+00:00")),
                         host=node_hostname,  # Use the actual node hostname
-                        compose_project=labels.get("com.docker.stack.namespace"),
-                        compose_service=labels.get("com.docker.swarm.service.name"),
+                        compose_project=compose_project,
+                        compose_service=compose_service,
                         ports={},
                         labels=labels,
                     )

@@ -147,6 +147,11 @@ class Collector:
             nodes = await manager_client.get_swarm_nodes()
             logger.info("Discovered Swarm nodes", count=len(nodes), manager=self._swarm_manager_host)
 
+            # Get the local node ID to identify the manager node
+            local_node_id = None
+            if hasattr(manager_client, '_get_local_node_id'):
+                local_node_id = await manager_client._get_local_node_id()
+
             # Track which nodes we've seen
             current_nodes = set()
 
@@ -163,8 +168,12 @@ class Collector:
                     logger.debug("Skipping non-ready node", node=node_hostname, status=node_status)
                     continue
 
-                # Skip the manager itself (it's already configured)
-                if node_hostname == self._swarm_manager_host:
+                # Skip the local/manager node (identified by node ID, not hostname)
+                # This handles the case where config name differs from actual hostname
+                if local_node_id and (node_id.startswith(local_node_id[:12]) or
+                                      local_node_id.startswith(node_id[:12])):
+                    logger.debug("Skipping local manager node", node=node_hostname,
+                               config_name=self._swarm_manager_host)
                     continue
 
                 # Skip if we already have a client for this host (explicitly configured)
