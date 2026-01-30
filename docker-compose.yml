@@ -122,5 +122,3 @@ networks:
 volumes:
   opensearch-data:
     driver: local
-  ollama-data:
-    driver: local

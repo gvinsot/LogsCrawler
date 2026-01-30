@@ -105,7 +105,7 @@ services:
         - "traefik.http.routers.logscrawler.rule=Host(`logs.methodinfo.fr`)"
         - "traefik.http.routers.logscrawler.entrypoints=websecure"
         - "traefik.http.routers.logscrawler.tls.certresolver=letsencrypt"
-        - "traefik.http.routers.logscrawler.middlewares=global@file,local-only@file"
+        - "traefik.http.routers.logscrawler.middlewares=global@file,dashboard-auth@file"
         - "traefik.http.routers.logscrawler.service=logscrawler"
 
         # HTTP Router (redirect to HTTPS)
