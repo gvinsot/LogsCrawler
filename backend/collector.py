@@ -288,19 +288,23 @@ class Collector:
             logger.error("Failed to collect metrics from host", host=host_name, error=str(e))
     
     async def get_all_containers(self, refresh: bool = False) -> List[ContainerInfo]:
-        """Get all containers from all hosts."""
+        """Get all containers from all hosts (including every Docker Swarm node)."""
+        # When refreshing, ensure swarm node list is up to date so Containers tab shows all nodes
+        if refresh and self._swarm_autodiscover_enabled:
+            await self._discover_swarm_nodes()
+
         # Use cache if available and not stale (30 seconds)
         if (
-            not refresh 
-            and self._containers_cache_time 
+            not refresh
+            and self._containers_cache_time
             and (datetime.utcnow() - self._containers_cache_time) < timedelta(seconds=30)
         ):
             containers = []
             for host_containers in self._containers_cache.values():
                 containers.extend(host_containers)
             return containers
-        
-        # Refresh from all hosts
+
+        # Refresh from all hosts (configured + discovered swarm nodes)
         tasks = []
         for host_name, client in self.clients.items():
             tasks.append(self._fetch_and_cache_containers(host_name, client))
