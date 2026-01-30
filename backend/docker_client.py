@@ -833,6 +833,41 @@ class DockerAPIClient:
 
         return services
 
+    async def get_service_env(self, service_id: str) -> Optional[Dict[str, str]]:
+        """Get environment variables from a Swarm service spec.
+        
+        This retrieves the env vars configured in the service definition,
+        useful for Swarm containers where we can't exec into remote nodes.
+        
+        Args:
+            service_id: The service ID (can be partial)
+            
+        Returns:
+            Dict of env var name -> value, or None if not found
+        """
+        # Get service details
+        data, status = await self._request("GET", f"/services/{service_id}")
+        
+        if status != 200 or not data:
+            return None
+        
+        try:
+            spec = data.get("Spec", {})
+            container_spec = spec.get("TaskTemplate", {}).get("ContainerSpec", {})
+            env_list = container_spec.get("Env", [])
+            
+            # Parse "KEY=VALUE" format
+            env_vars = {}
+            for env in env_list:
+                if '=' in env:
+                    key, _, value = env.partition('=')
+                    env_vars[key] = value
+            
+            return env_vars
+        except Exception as e:
+            logger.error("Failed to parse service env", service_id=service_id, error=str(e))
+            return None
+
     async def get_swarm_tasks(self, include_service_info: bool = False) -> List[Dict[str, Any]]:
         """Get all tasks (container instances) across the Swarm.
 

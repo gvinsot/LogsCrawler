@@ -142,32 +142,27 @@ class SwarmProxyClient:
         return await self._manager.get_container_stats(container_id, container_name)
 
     async def get_host_metrics(self) -> HostMetrics:
-        """Get host metrics (limited for proxy nodes)."""
-        # We can't get full host metrics via Swarm API, return aggregated container stats
-        containers = await self.get_containers()
-        from .models import ContainerStatus
-
-        running = [c for c in containers if c.status == ContainerStatus.RUNNING]
-
-        cpu_percent = 0.0
-        memory_used_mb = 0.0
-
-        for container in running[:10]:
-            stats = await self.get_container_stats(container.id, container.name)
-            if stats:
-                cpu_percent += stats.cpu_percent
-                memory_used_mb += stats.memory_usage_mb
-
+        """Get host metrics (limited for proxy nodes).
+        
+        For autodiscovered Swarm nodes, we can't get full host metrics
+        as the Docker API doesn't expose them for remote nodes.
+        Returns basic info derived from node info if available.
+        """
+        # For Swarm proxy nodes, we have limited visibility
+        # Container stats won't work for remote nodes, so return empty metrics
         return HostMetrics(
             host=self._node_hostname,
             timestamp=datetime.utcnow(),
-            cpu_percent=round(cpu_percent, 2),
-            memory_total_mb=0,  # Unknown via Swarm API
-            memory_used_mb=round(memory_used_mb, 2),
+            cpu_percent=0,  # Not available for remote Swarm nodes
+            memory_total_mb=0,
+            memory_used_mb=0,
             memory_percent=0,
             disk_total_gb=0,
             disk_used_gb=0,
             disk_percent=0,
+            gpu_percent=None,  # Not available for remote Swarm nodes
+            gpu_memory_used_mb=None,
+            gpu_memory_total_mb=None,
         )
 
     async def get_container_logs(

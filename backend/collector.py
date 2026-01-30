@@ -273,16 +273,25 @@ class Collector:
             host_metrics = await client.get_host_metrics()
             await self.opensearch.index_host_metrics(host_metrics)
             
-            # Container-level metrics
+            # Container-level metrics - only for containers we can actually access
             containers = self._containers_cache.get(host_name, [])
             running = [c for c in containers if c.status == ContainerStatus.RUNNING]
             
+            # Check if this is an autodiscovered node (not in original clients list)
+            is_autodiscovered = host_name in self._discovered_nodes
+            
             for container in running:
+                # Skip stats for containers on autodiscovered Swarm nodes
+                # because we can't access /containers/{id}/stats through the manager
+                if is_autodiscovered:
+                    continue
+                
                 stats = await client.get_container_stats(container.id, container.name)
                 if stats:
                     await self.opensearch.index_container_stats(stats)
             
-            logger.debug("Collected metrics", host=host_name)
+            logger.debug("Collected metrics", host=host_name, containers=len(running), 
+                        autodiscovered=is_autodiscovered)
             
         except Exception as e:
             logger.error("Failed to collect metrics from host", host=host_name, error=str(e))
@@ -404,21 +413,36 @@ class Collector:
     async def get_container_stats(self, host: str, container_id: str) -> Optional[dict]:
         """Get current stats for a specific container.
 
-        If Swarm routing is enabled, stats are fetched through the
-        Swarm manager, eliminating the need for direct SSH access.
+        For Swarm containers on worker nodes, stats are fetched by connecting
+        to the worker node (if SSH is configured) or returned as None.
         """
-        # Use routing client (may route through Swarm manager)
-        client = self._get_exec_client(host)
-        if not client:
-            return None
-
         containers = self._containers_cache.get(host, [])
         container = next((c for c in containers if c.id == container_id), None)
         if not container:
             return None
 
-        stats = await client.get_container_stats(container_id, container.name)
-        return stats.model_dump() if stats else None
+        # Check if this is a Swarm container on a different node
+        task_id = container.labels.get("com.docker.swarm.task.id") if container.labels else None
+        
+        # If we have a direct client for this host, use it
+        direct_client = self.clients.get(host)
+        if direct_client:
+            stats = await direct_client.get_container_stats(container_id, container.name)
+            return stats.model_dump() if stats else None
+        
+        # For Swarm worker nodes without direct client, try manager with task info
+        if self._swarm_routing_enabled and self._swarm_manager_host and task_id:
+            manager_client = self.clients.get(self._swarm_manager_host)
+            if manager_client:
+                # Try to get stats - will work if container happens to be on manager
+                stats = await manager_client.get_container_stats(container_id, container.name)
+                if stats:
+                    return stats.model_dump()
+                # Stats not available for remote Swarm containers without SSH
+                logger.debug("Stats not available for remote Swarm container", 
+                           container=container_id, host=host)
+        
+        return None
     
     async def execute_action(self, host: str, container_id: str, action: str) -> tuple:
         """Execute an action on a container.
@@ -477,26 +501,36 @@ class Collector:
         return [log.model_dump() for log in logs]
 
     async def get_container_env(self, host: str, container_id: str) -> Optional[dict]:
-        """Get environment variables for a specific container by running printenv.
+        """Get environment variables for a specific container.
 
-        If Swarm routing is enabled, the command is executed through the
-        Swarm manager, eliminating the need for direct SSH access to the host.
+        For local containers: runs printenv inside the container.
+        For Swarm containers on worker nodes: retrieves env from service spec.
         """
-        # Use routing client (may route through Swarm manager)
-        client = self._get_exec_client(host)
-        if not client:
-            return None
-
-        success, output = await client.exec_command(container_id, ["printenv"])
-
-        if not success:
+        containers = self._containers_cache.get(host, [])
+        container = next((c for c in containers if c.id == container_id), None)
+        
+        # Check if this is a Swarm container
+        service_id = container.labels.get("com.docker.swarm.service.id") if container and container.labels else None
+        
+        # If we have a direct client for this host, use exec
+        direct_client = self.clients.get(host)
+        if direct_client:
+            success, output = await direct_client.exec_command(container_id, ["printenv"])
+            if success:
+                env_vars = {}
+                for line in output.strip().split('\n'):
+                    if '=' in line:
+                        key, _, value = line.partition('=')
+                        env_vars[key] = value
+                return {"variables": env_vars}
             return {"error": output}
-
-        # Parse printenv output into key-value pairs
-        env_vars = {}
-        for line in output.strip().split('\n'):
-            if '=' in line:
-                key, _, value = line.partition('=')
-                env_vars[key] = value
-
-        return {"variables": env_vars}
+        
+        # For Swarm containers without direct access, get env from service spec
+        if self._swarm_routing_enabled and self._swarm_manager_host and service_id:
+            manager_client = self.clients.get(self._swarm_manager_host)
+            if manager_client and hasattr(manager_client, 'get_service_env'):
+                env_vars = await manager_client.get_service_env(service_id)
+                if env_vars:
+                    return {"variables": env_vars, "source": "service_spec"}
+        
+        return {"error": "Cannot access container environment (remote Swarm node)"}
