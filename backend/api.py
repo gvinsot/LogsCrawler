@@ -17,6 +17,7 @@ from .models import (
     DashboardStats, LogSearchQuery, LogSearchResult, TimeSeriesPoint
 )
 from .opensearch_client import OpenSearchClient
+from .github_service import GitHubService, StackDeployer
 
 logger = structlog.get_logger()
 
@@ -24,12 +25,13 @@ logger = structlog.get_logger()
 settings: Settings = None
 opensearch: OpenSearchClient = None
 collector: Collector = None
+github_service: GitHubService = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global settings, opensearch, collector
+    global settings, opensearch, collector, github_service
     
     # Startup
     logger.info("Starting LogsCrawler API")
@@ -41,12 +43,16 @@ async def lifespan(app: FastAPI):
     collector = Collector(settings, opensearch)
     await collector.start()
     
+    # Initialize GitHub service
+    github_service = GitHubService(settings.github)
+    
     yield
     
     # Shutdown
     logger.info("Shutting down LogsCrawler API")
     await collector.stop()
     await opensearch.close()
+    await github_service.close()
 
 
 app = FastAPI(
@@ -698,6 +704,99 @@ async def test_config() -> Dict[str, Any]:
         "connected": sum(1 for r in results if r["status"] == "connected"),
         "errors": sum(1 for r in results if r["status"] == "error"),
     }
+
+
+# ============== Stacks (GitHub Integration) ==============
+
+@app.get("/api/stacks/status")
+async def get_stacks_status():
+    """Get GitHub integration status."""
+    return {
+        "configured": github_service.is_configured(),
+        "username": settings.github.username,
+    }
+
+
+@app.get("/api/stacks/repos")
+async def get_starred_repos():
+    """Get list of starred GitHub repositories."""
+    if not github_service.is_configured():
+        raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    repos = await github_service.get_starred_repos()
+    return {"repos": repos, "count": len(repos)}
+
+
+@app.post("/api/stacks/build")
+async def build_stack(
+    repo_name: str = Query(..., description="Repository name"),
+    ssh_url: str = Query(..., description="SSH URL for cloning"),
+    version: str = Query(default="1.0", description="Version tag"),
+):
+    """Build a stack from a GitHub repository."""
+    if not github_service.is_configured():
+        raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    # Get the first configured host client for running commands
+    if not collector.clients:
+        raise HTTPException(status_code=500, detail="No host clients available")
+    
+    # Use the swarm manager or first available host
+    host_name = None
+    host_client = None
+    
+    # Prefer swarm manager if available
+    for name, client in collector.clients.items():
+        if hasattr(client, 'config') and getattr(client.config, 'swarm_manager', False):
+            host_name = name
+            host_client = client
+            break
+    
+    # Fallback to first host
+    if not host_client:
+        host_name, host_client = next(iter(collector.clients.items()))
+    
+    deployer = StackDeployer(settings.github, host_client)
+    result = await deployer.build(repo_name, ssh_url, version)
+    result["host"] = host_name
+    
+    return result
+
+
+@app.post("/api/stacks/deploy")
+async def deploy_stack(
+    repo_name: str = Query(..., description="Repository name"),
+    ssh_url: str = Query(..., description="SSH URL for cloning"),
+    version: str = Query(default="1.0", description="Version tag"),
+):
+    """Deploy a stack from a GitHub repository."""
+    if not github_service.is_configured():
+        raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    # Get the first configured host client for running commands
+    if not collector.clients:
+        raise HTTPException(status_code=500, detail="No host clients available")
+    
+    # Use the swarm manager or first available host
+    host_name = None
+    host_client = None
+    
+    # Prefer swarm manager if available
+    for name, client in collector.clients.items():
+        if hasattr(client, 'config') and getattr(client.config, 'swarm_manager', False):
+            host_name = name
+            host_client = client
+            break
+    
+    # Fallback to first host
+    if not host_client:
+        host_name, host_client = next(iter(collector.clients.items()))
+    
+    deployer = StackDeployer(settings.github, host_client)
+    result = await deployer.deploy(repo_name, ssh_url, version)
+    result["host"] = host_name
+    
+    return result
 
 
 # Serve static files (frontend)

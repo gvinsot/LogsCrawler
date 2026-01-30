@@ -77,6 +77,16 @@ class AIConfig(BaseModel):
     model: str = "qwen2.5:1.5b"
 
 
+class GitHubConfig(BaseModel):
+    """GitHub integration configuration."""
+    token: Optional[str] = None
+    username: Optional[str] = None
+    # Path where repos are cloned on the host
+    repos_path: str = "~/repos"
+    # Path to deployment scripts
+    scripts_path: str = "~/PrivateNetwork"
+
+
 class Settings(BaseSettings):
     """Application settings."""
     app_name: str = "LogsCrawler"
@@ -94,6 +104,9 @@ class Settings(BaseSettings):
 
     # AI
     ai: AIConfig = AIConfig()
+
+    # GitHub
+    github: GitHubConfig = GitHubConfig()
 
     # Hosts (configured via LOGSCRAWLER_HOSTS env var)
     hosts: List[HostConfig] = []
@@ -163,6 +176,16 @@ def load_config() -> Settings:
     # AI
     if os.environ.get("LOGSCRAWLER_AI__MODEL"):
         settings.ai.model = os.environ["LOGSCRAWLER_AI__MODEL"]
+
+    # GitHub
+    if os.environ.get("LOGSCRAWLER_GITHUB__TOKEN"):
+        settings.github.token = os.environ["LOGSCRAWLER_GITHUB__TOKEN"]
+    if os.environ.get("LOGSCRAWLER_GITHUB__USERNAME"):
+        settings.github.username = os.environ["LOGSCRAWLER_GITHUB__USERNAME"]
+    if os.environ.get("LOGSCRAWLER_GITHUB__REPOS_PATH"):
+        settings.github.repos_path = os.environ["LOGSCRAWLER_GITHUB__REPOS_PATH"]
+    if os.environ.get("LOGSCRAWLER_GITHUB__SCRIPTS_PATH"):
+        settings.github.scripts_path = os.environ["LOGSCRAWLER_GITHUB__SCRIPTS_PATH"]
 
     return settings
 

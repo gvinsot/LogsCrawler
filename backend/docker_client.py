@@ -672,6 +672,33 @@ class DockerAPIClient:
             logger.error("Exec command failed", container_id=container_id, error=str(e))
             return False, str(e)
 
+    async def run_shell_command(self, command: str) -> Tuple[bool, str]:
+        """Execute a shell command on the host.
+        
+        This runs the command locally using asyncio subprocess.
+        For Docker API mode, commands are executed on the host running the LogsCrawler.
+        
+        Args:
+            command: Shell command to run
+            
+        Returns:
+            Tuple of (success, output)
+        """
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            output = stdout.decode('utf-8', errors='replace')
+            if stderr:
+                output += stderr.decode('utf-8', errors='replace')
+            return proc.returncode == 0, output.strip()
+        except Exception as e:
+            logger.error("Shell command failed", command=command[:50], error=str(e))
+            return False, str(e)
+
     # ============== Swarm-specific methods ==============
 
     async def get_swarm_nodes(self) -> List[Dict[str, Any]]:

@@ -68,7 +68,8 @@ services:
       - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS=15
       - LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH=500
       - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS=7
-
+      - LOGSCRAWLER_GITHUB__TOKEN=${LOGSCRAWLER_GITHUB__TOKEN}
+      - LOGSCRAWLER_GITHUB__USERNAME=gvinsot
       # Host configuration (JSON array)
       # Using Swarm auto-discovery: only configure the manager, workers are discovered!
       - |

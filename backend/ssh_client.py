@@ -109,6 +109,15 @@ class SSHClient:
         result = await conn.run(command, check=False)
         return result.stdout or "", result.stderr or "", result.exit_status
     
+    async def run_shell_command(self, command: str) -> Tuple[bool, str]:
+        """Execute a shell command and return (success, output).
+        
+        This is a convenience wrapper around run_command for stack operations.
+        """
+        stdout, stderr, exit_code = await self.run_command(command)
+        output = stdout + stderr if stderr else stdout
+        return exit_code == 0, output.strip()
+    
     async def _run_local_command(self, command: str) -> Tuple[str, str, int]:
         """Execute command locally using asyncio subprocess."""
         try:

@@ -85,6 +85,9 @@ function switchView(view) {
             checkAIStatus();
             renderRecentQueries();
             break;
+        case 'stacks':
+            loadStacks();
+            break;
     }
 }
 
@@ -1648,6 +1651,238 @@ function exportLogs() {
     a.download = `logs-export-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+}
+
+// ============== Stacks (GitHub Integration) ==============
+
+let stacksRepos = [];
+
+async function loadStacks() {
+    // Check GitHub status
+    const status = await apiGet('/stacks/status');
+    const statusText = document.getElementById('github-status-text');
+    const statusEl = document.getElementById('github-status');
+    
+    if (status && status.configured) {
+        statusText.textContent = status.username ? `@${status.username}` : 'Connected';
+        statusEl.classList.add('connected');
+        statusEl.classList.remove('disconnected');
+    } else {
+        statusText.textContent = 'Not configured';
+        statusEl.classList.add('disconnected');
+        statusEl.classList.remove('connected');
+        document.getElementById('stacks-list').innerHTML = `
+            <div class="stacks-not-configured">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="48" height="48">
+                    <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>
+                </svg>
+                <h3>GitHub Integration Not Configured</h3>
+                <p>Set the following environment variables to enable:</p>
+                <code>LOGSCRAWLER_GITHUB__TOKEN</code><br>
+                <code>LOGSCRAWLER_GITHUB__USERNAME</code>
+            </div>
+        `;
+        return;
+    }
+    
+    // Load starred repos
+    await refreshStacks();
+}
+
+async function refreshStacks() {
+    const listEl = document.getElementById('stacks-list');
+    listEl.innerHTML = '<div class="loading-placeholder">Loading starred repositories...</div>';
+    
+    const data = await apiGet('/stacks/repos');
+    if (!data || !data.repos) {
+        listEl.innerHTML = '<div class="error-placeholder">Failed to load repositories</div>';
+        return;
+    }
+    
+    stacksRepos = data.repos;
+    
+    if (stacksRepos.length === 0) {
+        listEl.innerHTML = '<div class="empty-placeholder">No starred repositories found</div>';
+        return;
+    }
+    
+    renderStacksList();
+}
+
+function renderStacksList() {
+    const listEl = document.getElementById('stacks-list');
+    const version = document.getElementById('stack-version')?.value || '1.0';
+    
+    listEl.innerHTML = stacksRepos.map(repo => `
+        <div class="stack-item" data-repo="${escapeHtml(repo.name)}">
+            <div class="stack-info">
+                <div class="stack-name">
+                    <a href="${escapeHtml(repo.html_url)}" target="_blank" rel="noopener">
+                        ${escapeHtml(repo.name)}
+                    </a>
+                    ${repo.private ? '<span class="stack-badge private">Private</span>' : ''}
+                    ${repo.language ? `<span class="stack-badge lang">${escapeHtml(repo.language)}</span>` : ''}
+                </div>
+                <div class="stack-description">${escapeHtml(repo.description) || 'No description'}</div>
+                <div class="stack-meta">
+                    <span class="stack-owner">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                            <circle cx="12" cy="7" r="4"/>
+                        </svg>
+                        ${escapeHtml(repo.owner)}
+                    </span>
+                    <span class="stack-updated">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                            <circle cx="12" cy="12" r="10"/>
+                            <polyline points="12 6 12 12 16 14"/>
+                        </svg>
+                        ${formatRelativeTime(repo.updated_at)}
+                    </span>
+                </div>
+            </div>
+            <div class="stack-actions">
+                <button class="btn btn-secondary" onclick="buildStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="build-${escapeHtml(repo.name)}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                        <polyline points="22 4 12 14.01 9 11.01"/>
+                    </svg>
+                    Build
+                </button>
+                <button class="btn btn-primary" onclick="deployStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="deploy-${escapeHtml(repo.name)}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                        <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
+                        <polyline points="7.5 19.79 7.5 14.6 3 12"/>
+                        <polyline points="21 12 16.5 14.6 16.5 19.79"/>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                        <line x1="12" y1="22.08" x2="12" y2="12"/>
+                    </svg>
+                    Deploy
+                </button>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function buildStack(repoName, sshUrl) {
+    const version = document.getElementById('stack-version')?.value || '1.0';
+    const btn = document.getElementById(`build-${repoName}`);
+    
+    // Disable button and show loading
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="btn-loading"></span> Building...';
+    }
+    
+    try {
+        const result = await apiPost(`/stacks/build?repo_name=${encodeURIComponent(repoName)}&ssh_url=${encodeURIComponent(sshUrl)}&version=${encodeURIComponent(version)}`);
+        showStackOutput('Build', repoName, result);
+    } catch (e) {
+        showStackOutput('Build', repoName, { success: false, output: e.message || 'Build failed' });
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                </svg>
+                Build
+            `;
+        }
+    }
+}
+
+async function deployStack(repoName, sshUrl) {
+    const version = document.getElementById('stack-version')?.value || '1.0';
+    const btn = document.getElementById(`deploy-${repoName}`);
+    
+    // Disable button and show loading
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="btn-loading"></span> Deploying...';
+    }
+    
+    try {
+        const result = await apiPost(`/stacks/deploy?repo_name=${encodeURIComponent(repoName)}&ssh_url=${encodeURIComponent(sshUrl)}&version=${encodeURIComponent(version)}`);
+        showStackOutput('Deploy', repoName, result);
+    } catch (e) {
+        showStackOutput('Deploy', repoName, { success: false, output: e.message || 'Deploy failed' });
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                    <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
+                    <polyline points="7.5 19.79 7.5 14.6 3 12"/>
+                    <polyline points="21 12 16.5 14.6 16.5 19.79"/>
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                    <line x1="12" y1="22.08" x2="12" y2="12"/>
+                </svg>
+                Deploy
+            `;
+        }
+    }
+}
+
+function showStackOutput(action, repoName, result) {
+    const modal = document.getElementById('stack-output-modal');
+    const title = document.getElementById('stack-output-title');
+    const status = document.getElementById('stack-output-status');
+    const content = document.getElementById('stack-output-content');
+    
+    title.textContent = `${action}: ${repoName}`;
+    
+    if (result.success) {
+        status.innerHTML = `
+            <span class="status-success">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                </svg>
+                Success
+            </span>
+            ${result.duration_seconds ? `<span class="status-duration">${result.duration_seconds.toFixed(1)}s</span>` : ''}
+            ${result.host ? `<span class="status-host">on ${result.host}</span>` : ''}
+        `;
+    } else {
+        status.innerHTML = `
+            <span class="status-error">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="15" y1="9" x2="9" y2="15"/>
+                    <line x1="9" y1="9" x2="15" y2="15"/>
+                </svg>
+                Failed
+            </span>
+            ${result.duration_seconds ? `<span class="status-duration">${result.duration_seconds.toFixed(1)}s</span>` : ''}
+        `;
+    }
+    
+    content.textContent = result.output || 'No output';
+    modal.classList.add('active');
+}
+
+function closeStackOutputModal() {
+    document.getElementById('stack-output-modal').classList.remove('active');
+}
+
+function formatRelativeTime(isoString) {
+    if (!isoString) return '';
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+    
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 30) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
 }
 
 // ============== Utilities ==============
