@@ -33,6 +33,7 @@ class HostClientProtocol(Protocol):
         tail: Optional[int] = 500,
         compose_project: Optional[str] = None,
         compose_service: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> List[LogEntry]: ...
     async def execute_container_action(self, container_id: str, action: ContainerAction) -> Tuple[bool, str]: ...
     async def exec_command(self, container_id: str, command: List[str]) -> Tuple[bool, str]: ...
@@ -177,11 +178,12 @@ class SwarmProxyClient:
         tail: Optional[int] = 500,
         compose_project: Optional[str] = None,
         compose_service: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> List[LogEntry]:
-        """Get container logs via manager."""
+        """Get container logs via manager using tasks API for swarm containers."""
         return await self._manager.get_container_logs(
             container_id, container_name, since, tail,
-            compose_project, compose_service
+            compose_project, compose_service, task_id
         )
 
     async def execute_container_action(self, container_id: str, action: ContainerAction) -> Tuple[bool, str]:

@@ -334,18 +334,51 @@ class SSHClient:
         disk_used = float(disk_parts[2].replace("G", "")) if len(disk_parts) > 2 else 0.0
         disk_percent = float(disk_parts[4].replace("%", "")) if len(disk_parts) > 4 else 0.0
         
-        # GPU (NVIDIA)
+        # GPU (AMD rocm-smi first, then NVIDIA nvidia-smi)
         gpu_percent = None
         gpu_mem_used = None
         gpu_mem_total = None
-        gpu_cmd = "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null || echo ''"
-        gpu_out, _, code = await self.run_command(gpu_cmd)
-        if gpu_out.strip():
-            gpu_parts = gpu_out.strip().split(", ")
-            if len(gpu_parts) >= 3:
-                gpu_percent = float(gpu_parts[0])
-                gpu_mem_used = float(gpu_parts[1])
-                gpu_mem_total = float(gpu_parts[2])
+        
+        # Try AMD GPU first (rocm-smi)
+        rocm_cmd = "rocm-smi --showuse --csv 2>/dev/null | tail -1"
+        rocm_out, _, rocm_code = await self.run_command(rocm_cmd)
+        if rocm_out.strip() and not rocm_out.startswith("device"):
+            parts = [p.strip() for p in rocm_out.strip().split(",")]
+            if len(parts) >= 2:
+                try:
+                    gpu_percent = float(parts[1].replace('%', '').strip())
+                    # Get memory info
+                    mem_cmd = "rocm-smi --showmeminfo vram 2>/dev/null"
+                    mem_out, _, _ = await self.run_command(mem_cmd)
+                    for line in mem_out.split("\n"):
+                        if "VRAM Total" in line:
+                            try:
+                                bytes_val = int(line.split(":")[-1].strip())
+                                gpu_mem_total = bytes_val / (1024 * 1024)
+                            except ValueError:
+                                pass
+                        elif "VRAM Used" in line:
+                            try:
+                                bytes_val = int(line.split(":")[-1].strip())
+                                gpu_mem_used = bytes_val / (1024 * 1024)
+                            except ValueError:
+                                pass
+                except (ValueError, IndexError):
+                    pass
+        
+        # Fallback to NVIDIA GPU
+        if gpu_percent is None:
+            gpu_cmd = "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null || echo ''"
+            gpu_out, _, code = await self.run_command(gpu_cmd)
+            if gpu_out.strip():
+                gpu_parts = gpu_out.strip().split(", ")
+                if len(gpu_parts) >= 3:
+                    try:
+                        gpu_percent = float(gpu_parts[0])
+                        gpu_mem_used = float(gpu_parts[1])
+                        gpu_mem_total = float(gpu_parts[2])
+                    except ValueError:
+                        pass
         
         return HostMetrics(
             host=self.config.name,
@@ -370,6 +403,7 @@ class SSHClient:
         tail: Optional[int] = 500,
         compose_project: Optional[str] = None,
         compose_service: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> List[LogEntry]:
         """Get container logs.
         
@@ -380,6 +414,7 @@ class SSHClient:
             tail: If since is None, limit to last N lines (initial fetch)
             compose_project: Optional compose project name
             compose_service: Optional compose service name
+            task_id: Optional Swarm task ID (unused for SSH, included for API compatibility)
         """
         cmd = f"docker logs {container_id} --timestamps"
         if since:

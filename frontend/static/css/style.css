@@ -359,6 +359,11 @@ body {
     color: var(--accent-tertiary);
 }
 
+.stat-icon.gpu {
+    background: rgba(251, 146, 60, 0.15);
+    color: #fb923c;
+}
+
 .stat-card.warning .stat-icon {
     background: rgba(245, 158, 11, 0.15);
     color: var(--status-warning);
@@ -575,6 +580,21 @@ body {
 }
 
 .group-cpu.cpu-critical {
+    color: var(--status-error);
+    background: rgba(239, 68, 68, 0.2);
+    font-weight: 600;
+}
+
+.group-gpu {
+    color: #fb923c;
+}
+
+.group-gpu.gpu-warning {
+    color: var(--status-warning);
+    background: rgba(245, 158, 11, 0.15);
+}
+
+.group-gpu.gpu-critical {
     color: var(--status-error);
     background: rgba(239, 68, 68, 0.2);
     font-weight: 600;

@@ -121,6 +121,7 @@ class DashboardStats(BaseModel):
     http_5xx_24h: int
     avg_cpu_percent: float
     avg_memory_percent: float
+    avg_gpu_percent: Optional[float] = None
 
 
 class TimeSeriesPoint(BaseModel):

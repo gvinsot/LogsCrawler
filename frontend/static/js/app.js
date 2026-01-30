@@ -601,6 +601,14 @@ async function loadDashboard() {
         document.getElementById('http-5xx').textContent = formatNumber(stats.http_5xx_24h);
         document.getElementById('avg-cpu').textContent = `${stats.avg_cpu_percent.toFixed(1)}%`;
         document.getElementById('avg-memory').textContent = `${stats.avg_memory_percent.toFixed(1)}%`;
+        
+        // Show GPU stats if available
+        if (stats.avg_gpu_percent != null) {
+            document.getElementById('gpu-stat-card').style.display = '';
+            document.getElementById('avg-gpu').textContent = `${stats.avg_gpu_percent.toFixed(1)}%`;
+        } else {
+            document.getElementById('gpu-stat-card').style.display = 'none';
+        }
     }
     
     // Load charts
@@ -930,12 +938,13 @@ async function loadContainers() {
         document.getElementById('status-filter').value = storedFilter;
     }
     
-    // Restore group by preference
+    // Restore group by preference - prioritize stored value
     const storedGroupBy = getStoredGroupBy();
-    const groupBy = document.getElementById('group-by-filter')?.value || storedGroupBy;
-    if (document.getElementById('group-by-filter')) {
-        document.getElementById('group-by-filter').value = groupBy;
+    const groupBySelect = document.getElementById('group-by-filter');
+    if (groupBySelect && storedGroupBy) {
+        groupBySelect.value = storedGroupBy;
     }
+    const groupBy = groupBySelect?.value || storedGroupBy || 'host';
     saveGroupBy(groupBy);
     
     let endpoint = `/containers/grouped?refresh=true&group_by=${groupBy}`;
@@ -943,7 +952,11 @@ async function loadContainers() {
         endpoint += `&status=${statusFilter}`;
     }
     
-    const grouped = await apiGet(endpoint);
+    // Fetch containers and host metrics in parallel
+    const [grouped, hostMetrics] = await Promise.all([
+        apiGet(endpoint),
+        apiGet('/hosts/metrics')
+    ]);
     if (!grouped) return;
     
     // Get stored group states
@@ -991,6 +1004,17 @@ async function loadContainers() {
         const topLevelCpuClass = topLevelMaxCpu >= 80 ? 'cpu-critical' : (topLevelMaxCpu >= 50 ? 'cpu-warning' : '');
         const topLevelCpuDisplay = topLevelMaxCpu > 0 ? `${topLevelMaxCpu.toFixed(1)}%` : '';
         
+        // Get GPU usage from host metrics (only in host view, not stack view)
+        let topLevelGpuDisplay = '';
+        let topLevelGpuClass = '';
+        if (!isStackView && hostMetrics && hostMetrics[topLevel]) {
+            const gpuPercent = hostMetrics[topLevel].gpu_percent;
+            if (gpuPercent != null) {
+                topLevelGpuClass = gpuPercent >= 80 ? 'gpu-critical' : (gpuPercent >= 50 ? 'gpu-warning' : '');
+                topLevelGpuDisplay = `${gpuPercent.toFixed(1)}%`;
+            }
+        }
+        
         // Get the first host from containers in this stack (for stack removal)
         const firstHost = Object.values(services)[0]?.[0]?.host || '';
         
@@ -1005,6 +1029,7 @@ async function loadContainers() {
                     <span class="group-count">${containerCount} containers</span>
                     ${topLevelMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${topLevelMemoryDisplay}</span>` : ''}
                     ${topLevelCpuDisplay ? `<span class="group-stat group-cpu ${topLevelCpuClass}" title="Max CPU usage">⚡ ${topLevelCpuDisplay}</span>` : ''}
+                    ${topLevelGpuDisplay ? `<span class="group-stat group-gpu ${topLevelGpuClass}" title="GPU usage">🎮 ${topLevelGpuDisplay}</span>` : ''}
                 </span>
                 ${isStackView && topLevel !== '_standalone' ? `
                 <div class="host-header-actions" onclick="event.stopPropagation();">

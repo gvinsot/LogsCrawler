@@ -257,6 +257,49 @@ class OpenSearchClient:
             logger.error("Failed to get latest container stats", error=str(e))
             return {}
     
+    async def get_latest_host_metrics(self, host_name: str) -> Optional[Dict[str, Any]]:
+        """Get the latest metrics for a specific host including GPU.
+        
+        Args:
+            host_name: Name of the host
+            
+        Returns:
+            Dict with cpu_percent, memory_percent, gpu_percent, etc. or None
+        """
+        try:
+            body = {
+                "query": {
+                    "term": {"host": host_name}
+                },
+                "size": 1,
+                "sort": [{"timestamp": "desc"}],
+                "_source": [
+                    "cpu_percent", "memory_percent", "memory_used_mb", "memory_total_mb",
+                    "gpu_percent", "gpu_memory_used_mb", "gpu_memory_total_mb", "timestamp"
+                ]
+            }
+            
+            response = await self._client.search(index=self.host_metrics_index, body=body)
+            hits = response.get("hits", {}).get("hits", [])
+            
+            if hits:
+                source = hits[0]["_source"]
+                return {
+                    "cpu_percent": round(source.get("cpu_percent", 0) or 0, 1),
+                    "memory_percent": round(source.get("memory_percent", 0) or 0, 1),
+                    "memory_used_mb": round(source.get("memory_used_mb", 0) or 0, 1),
+                    "memory_total_mb": round(source.get("memory_total_mb", 0) or 0, 1),
+                    "gpu_percent": round(source.get("gpu_percent"), 1) if source.get("gpu_percent") is not None else None,
+                    "gpu_memory_used_mb": round(source.get("gpu_memory_used_mb"), 1) if source.get("gpu_memory_used_mb") is not None else None,
+                    "gpu_memory_total_mb": round(source.get("gpu_memory_total_mb"), 1) if source.get("gpu_memory_total_mb") is not None else None,
+                    "timestamp": source.get("timestamp"),
+                }
+            
+            return None
+        except Exception as e:
+            logger.error("Failed to get latest host metrics", host=host_name, error=str(e))
+            return None
+    
     async def search_logs(self, query: LogSearchQuery) -> LogSearchResult:
         """Search logs with filters."""
         must = []
@@ -406,6 +449,7 @@ class OpenSearchClient:
             "aggs": {
                 "avg_cpu": {"avg": {"field": "cpu_percent"}},
                 "avg_memory": {"avg": {"field": "memory_percent"}},
+                "avg_gpu": {"avg": {"field": "gpu_percent"}},
             }
         }
         
@@ -414,8 +458,10 @@ class OpenSearchClient:
             metrics_aggs = metrics_response.get("aggregations", {})
             avg_cpu = metrics_aggs.get("avg_cpu", {}).get("value", 0) or 0
             avg_memory = metrics_aggs.get("avg_memory", {}).get("value", 0) or 0
+            avg_gpu = metrics_aggs.get("avg_gpu", {}).get("value")  # Keep None if no GPU data
         except:
             avg_cpu = avg_memory = 0
+            avg_gpu = None
         
         return DashboardStats(
             total_containers=0,  # Will be filled by API
@@ -428,6 +474,7 @@ class OpenSearchClient:
             http_5xx_24h=http_5xx,
             avg_cpu_percent=round(avg_cpu, 2),
             avg_memory_percent=round(avg_memory, 2),
+            avg_gpu_percent=round(avg_gpu, 2) if avg_gpu is not None else None,
         )
     
     async def get_error_timeseries(self, hours: int = 24, interval: str = "1h") -> List[TimeSeriesPoint]:

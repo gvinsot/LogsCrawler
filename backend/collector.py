@@ -449,7 +449,8 @@ class Collector:
         """Get live logs for a specific container.
 
         If Swarm routing is enabled, logs are fetched through the
-        Swarm manager, eliminating the need for direct SSH access.
+        Swarm manager using the tasks API, eliminating the need for 
+        direct SSH access to worker nodes.
         """
         # Use routing client (may route through Swarm manager)
         client = self._get_exec_client(host)
@@ -458,6 +459,11 @@ class Collector:
 
         containers = self._containers_cache.get(host, [])
         container = next((c for c in containers if c.id == container_id), None)
+        
+        # Extract task_id from labels if this is a Swarm container
+        task_id = None
+        if container and container.labels:
+            task_id = container.labels.get("com.docker.swarm.task.id")
 
         logs = await client.get_container_logs(
             container_id=container_id,
@@ -465,6 +471,7 @@ class Collector:
             tail=tail,
             compose_project=container.compose_project if container else None,
             compose_service=container.compose_service if container else None,
+            task_id=task_id,
         )
 
         return [log.model_dump() for log in logs]

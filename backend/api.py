@@ -598,6 +598,28 @@ async def list_hosts() -> List[Dict[str, Any]]:
     return result
 
 
+@app.get("/api/hosts/metrics")
+async def get_hosts_metrics() -> Dict[str, Dict[str, Any]]:
+    """Get latest metrics for all hosts including GPU usage.
+    
+    Returns a dict keyed by host name with metrics:
+    - cpu_percent, memory_percent, memory_used_mb, memory_total_mb
+    - gpu_percent, gpu_memory_used_mb, gpu_memory_total_mb (if GPU available)
+    """
+    result = {}
+    
+    # Get latest host metrics from OpenSearch
+    try:
+        for host_name in collector.clients.keys():
+            metrics = await opensearch.get_latest_host_metrics(host_name)
+            if metrics:
+                result[host_name] = metrics
+    except Exception as e:
+        logger.error("Failed to get host metrics", error=str(e))
+    
+    return result
+
+
 # ============== Health ==============
 
 @app.get("/api/health")

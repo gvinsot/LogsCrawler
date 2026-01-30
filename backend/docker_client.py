@@ -324,10 +324,40 @@ class DockerAPIClient:
         )
     
     async def _get_gpu_metrics(self) -> tuple:
-        """Try to get GPU metrics using nvidia-smi."""
+        """Try to get GPU metrics using nvidia-smi or rocm-smi."""
         import subprocess
+        
+        # Try AMD GPU first (rocm-smi)
         try:
-            # Run nvidia-smi to get GPU utilization
+            result = subprocess.run(
+                ["rocm-smi", "--showuse", "--showmeminfo", "vram", "--csv"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # Parse rocm-smi CSV output
+                lines = result.stdout.strip().split("\n")
+                # Find the data line (skip headers)
+                for line in lines:
+                    if line.startswith("card") or line.startswith("GPU"):
+                        continue
+                    parts = [p.strip() for p in line.split(",")]
+                    # rocm-smi output varies, try to extract GPU usage %
+                    # Format is typically: device, GPU use %, GPU memory use %, ...
+                    if len(parts) >= 2:
+                        try:
+                            gpu_use = float(parts[1].replace('%', '').strip())
+                            # Try to get memory info from --showmeminfo
+                            mem_used, mem_total = await self._get_rocm_memory()
+                            return gpu_use, mem_used, mem_total
+                        except (ValueError, IndexError):
+                            pass
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+            pass
+        
+        # Fallback to NVIDIA GPU (nvidia-smi)
+        try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
                 capture_output=True,
@@ -338,10 +368,43 @@ class DockerAPIClient:
                 parts = result.stdout.strip().split(", ")
                 if len(parts) >= 3:
                     return float(parts[0]), float(parts[1]), float(parts[2])
-        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
-            # nvidia-smi not available or failed
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
             pass
+        
         return None, None, None
+    
+    async def _get_rocm_memory(self) -> tuple:
+        """Get AMD GPU memory usage via rocm-smi."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["rocm-smi", "--showmeminfo", "vram"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # Parse output like "GPU[0] : VRAM Total Memory (B): 17163091968"
+                # and "GPU[0] : VRAM Used Memory (B): 1234567890"
+                total_mb = None
+                used_mb = None
+                for line in result.stdout.split("\n"):
+                    if "VRAM Total" in line:
+                        try:
+                            bytes_val = int(line.split(":")[-1].strip())
+                            total_mb = bytes_val / (1024 * 1024)
+                        except ValueError:
+                            pass
+                    elif "VRAM Used" in line:
+                        try:
+                            bytes_val = int(line.split(":")[-1].strip())
+                            used_mb = bytes_val / (1024 * 1024)
+                        except ValueError:
+                            pass
+                return used_mb, total_mb
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return None, None
     
     async def get_container_logs(
         self,
@@ -351,8 +414,14 @@ class DockerAPIClient:
         tail: Optional[int] = 500,
         compose_project: Optional[str] = None,
         compose_service: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> List[LogEntry]:
-        """Get container logs via Docker API."""
+        """Get container logs via Docker API.
+        
+        If task_id is provided (for Swarm containers), uses /tasks/{task_id}/logs
+        which works for containers on any node in the swarm.
+        Otherwise uses /containers/{container_id}/logs which only works locally.
+        """
         params = ["timestamps=true", "stdout=true", "stderr=true"]
         
         if since:
@@ -361,7 +430,12 @@ class DockerAPIClient:
         elif tail:
             params.append(f"tail={tail}")
         
-        endpoint = f"/containers/{container_id}/logs?{'&'.join(params)}"
+        # Use tasks API for swarm containers, containers API for local
+        if task_id:
+            endpoint = f"/tasks/{task_id}/logs?{'&'.join(params)}"
+            logger.debug("Fetching swarm task logs", task_id=task_id, container=container_id)
+        else:
+            endpoint = f"/containers/{container_id}/logs?{'&'.join(params)}"
         
         session = await self._get_session()
         url = f"{self._base_url}{endpoint}"
@@ -369,6 +443,13 @@ class DockerAPIClient:
         try:
             async with session.get(url) as response:
                 if response.status != 200:
+                    # If task logs fail, try container logs as fallback
+                    if task_id:
+                        logger.debug("Task logs failed, trying container API", task_id=task_id)
+                        return await self.get_container_logs(
+                            container_id, container_name, since, tail,
+                            compose_project, compose_service, task_id=None
+                        )
                     return []
                 
                 # Docker logs come as a stream with header bytes
@@ -905,6 +986,15 @@ class DockerAPIClient:
                 # Use stack as compose_project and service_name as compose_service
                 stack = task.get("stack", "")
 
+                # Store task_id and service_id in labels for log retrieval
+                labels = {
+                    "com.docker.swarm.service.name": service_name,
+                    "com.docker.swarm.task.id": task["id"],
+                    "com.docker.swarm.service.id": task.get("service_id", ""),
+                }
+                if stack:
+                    labels["com.docker.stack.namespace"] = stack
+
                 container = ContainerInfo(
                     id=task["container_id"],
                     name=container_name,
@@ -915,10 +1005,7 @@ class DockerAPIClient:
                     compose_project=stack if stack else None,
                     compose_service=service_name,
                     ports={},
-                    labels={
-                        "com.docker.swarm.service.name": service_name,
-                        "com.docker.stack.namespace": stack,
-                    } if stack else {"com.docker.swarm.service.name": service_name},
+                    labels=labels,
                 )
                 containers_by_node[node_hostname].append(container)
             except Exception as e:
