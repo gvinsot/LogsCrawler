@@ -304,15 +304,54 @@ class Collector:
                 containers.extend(host_containers)
             return containers
 
-        # Refresh from all hosts (configured + discovered swarm nodes)
-        tasks = []
-        for host_name, client in self.clients.items():
-            tasks.append(self._fetch_and_cache_containers(host_name, client))
-        
-        await asyncio.gather(*tasks, return_exceptions=True)
-        
+        # When swarm autodiscover is enabled, fetch all swarm containers in one go from the
+        # manager (Tasks API). Per-node fetch via SwarmProxyClient can fail for worker
+        # containers because the manager API may not expose /containers/{id}/json for them.
+        filled_from_swarm = False
+        if refresh and self._swarm_autodiscover_enabled and self._swarm_manager_host:
+            manager_client = self.clients.get(self._swarm_manager_host)
+            if manager_client and hasattr(manager_client, "get_all_swarm_containers"):
+                try:
+                    containers_by_node = await manager_client.get_all_swarm_containers()
+                    # Resolve manager node hostname so we can map to configured name
+                    local_node_id = None
+                    if hasattr(manager_client, "_get_local_node_id"):
+                        local_node_id = await manager_client._get_local_node_id()
+                    nodes = await manager_client.get_swarm_nodes()
+                    manager_node_hostname = None
+                    if local_node_id:
+                        for node in nodes:
+                            nid = node.get("id", "")
+                            if nid and (
+                                local_node_id.startswith(nid) or nid.startswith(local_node_id[:12])
+                            ):
+                                manager_node_hostname = node.get("hostname")
+                                break
+                    for node_hostname, host_containers in containers_by_node.items():
+                        if manager_node_hostname and node_hostname == manager_node_hostname:
+                            self._containers_cache[self._swarm_manager_host] = host_containers
+                        else:
+                            self._containers_cache[node_hostname] = host_containers
+                    filled_from_swarm = True
+                except Exception as e:
+                    logger.warning("get_all_swarm_containers failed, falling back to per-host fetch",
+                                  error=str(e))
+
+        if filled_from_swarm:
+            # Fetch only from hosts not in cache (e.g. other configured non-swarm hosts)
+            for host_name, client in self.clients.items():
+                if host_name in self._containers_cache:
+                    continue
+                await self._fetch_and_cache_containers(host_name, client)
+        else:
+            # Fetch from all clients (normal path or swarm path failed)
+            tasks = []
+            for host_name, client in self.clients.items():
+                tasks.append(self._fetch_and_cache_containers(host_name, client))
+            await asyncio.gather(*tasks, return_exceptions=True)
+
         self._containers_cache_time = datetime.utcnow()
-        
+
         containers = []
         for host_containers in self._containers_cache.values():
             containers.extend(host_containers)
