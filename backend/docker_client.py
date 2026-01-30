@@ -26,7 +26,8 @@ class DockerAPIClient:
         self.config = host_config
         self._session: Optional[aiohttp.ClientSession] = None
         self._connector: Optional[aiohttp.BaseConnector] = None
-        
+        self._closing = False  # Flag to track graceful shutdown
+
         docker_url = host_config.docker_url or "unix:///var/run/docker.sock"
         
         # Determine connection type
@@ -42,23 +43,33 @@ class DockerAPIClient:
             self._connector = None
             logger.info("Docker API client (TCP)", host=self.config.name, url=self._base_url)
     
-    async def _get_session(self) -> aiohttp.ClientSession:
+    async def _get_session(self) -> Optional[aiohttp.ClientSession]:
         """Get or create aiohttp session."""
+        if self._closing:
+            return None
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(connector=self._connector)
         return self._session
-    
+
     async def close(self):
         """Close the client session."""
+        self._closing = True
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
-    
+
     async def _request(self, method: str, endpoint: str, **kwargs) -> Tuple[Any, int]:
         """Make HTTP request to Docker API."""
+        # Skip requests if we're shutting down
+        if self._closing:
+            return None, 503
+
         session = await self._get_session()
+        if session is None:
+            return None, 503
+
         url = f"{self._base_url}{endpoint}"
-        
+
         try:
             async with session.request(method, url, **kwargs) as response:
                 if response.content_type == "application/json":
@@ -66,8 +77,14 @@ class DockerAPIClient:
                 else:
                     data = await response.text()
                 return data, response.status
+        except aiohttp.ClientError as e:
+            # Don't log errors during shutdown (session closed, server disconnected, etc.)
+            if not self._closing:
+                logger.error("Docker API request failed", endpoint=endpoint, error=str(e))
+            return None, 500
         except Exception as e:
-            logger.error("Docker API request failed", endpoint=endpoint, error=str(e))
+            if not self._closing:
+                logger.error("Docker API request failed", endpoint=endpoint, error=str(e))
             return None, 500
     
     async def get_containers(self) -> List[ContainerInfo]:
