@@ -55,16 +55,30 @@ class GitHubService:
         repos = []
         page = 1
 
+        # Log token prefix for debugging (first 10 chars only for security)
+        token_prefix = self.config.token[:10] if self.config.token else "none"
+        logger.info("Fetching starred repos", token_prefix=f"{token_prefix}...", url=url)
+
         try:
             while True:
                 params["page"] = page
                 async with session.get(url, params=params) as response:
+                    # Log response headers for debugging scopes
+                    scopes = response.headers.get("X-OAuth-Scopes", "none")
+                    rate_limit = response.headers.get("X-RateLimit-Remaining", "?")
+                    logger.info("GitHub API response", 
+                               status=response.status, 
+                               page=page,
+                               scopes=scopes, 
+                               rate_limit=rate_limit)
+                    
                     if response.status != 200:
                         error_text = await response.text()
                         logger.error("GitHub API error", status=response.status, error=error_text)
                         break
 
                     data = await response.json()
+                    logger.info("GitHub API data received", page=page, count=len(data) if data else 0)
                     if not data:
                         break
 

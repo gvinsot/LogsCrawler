@@ -1457,7 +1457,8 @@ body {
     padding: 20px;
 }
 
-.modal.open {
+.modal.open,
+.modal.active {
     display: flex;
 }
 
