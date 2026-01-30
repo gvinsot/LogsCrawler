@@ -3,12 +3,16 @@ version: '3.9'
 # ============================================================================
 # LogsCrawler - Docker Swarm Deployment
 # Deploy with: docker stack deploy -c docker-compose.swarm.yml logscrawler
+#
+# NO CONFIG FILE NEEDED - All configuration is via environment variables!
+# The Swarm manager is configured with auto-discovery, so worker nodes
+# are detected automatically.
 # ============================================================================
 
 services:
   # OpenSearch for log storage and search
   opensearch:
-    image: opensearchproject/opensearch:2.11.1
+    image: opensearchproject/opensearch:3.4.0
     environment:
       - discovery.type=single-node
       - bootstrap.memory_lock=true
@@ -27,7 +31,7 @@ services:
       replicas: 1
       placement:
         constraints:
-          - node.labels.gpu != true
+          - node.hostname == server-d
       restart_policy:
         condition: on-failure
       resources:
@@ -36,18 +40,30 @@ services:
         reservations:
           memory: 1G
 
-  # Ollama for AI-powered log search (optional)
+  # Ollama for AI/LLM processing
   ollama:
     image: ollama/ollama:latest
     volumes:
       - ollama-data:/root/.ollama
     networks:
       - internal
+    environment:
+      - AMD_VISIBLE_DEVICES=all
+      - OLLAMA_MODEL=codellama:7b
+      - OLLAMA_CONTEXT_LENGTH=8096
+      - OLLAMA_VULKAN=1
+      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_BATCH_SIZE=128
+      - OLLAMA_NUM_BATCH=128
+      - OLLAMA_NO_MMAP=0
     deploy:
       replicas: 1
       placement:
         constraints:
-          - node.labels.gpu != true
+          - node.hostname == server-c
       restart_policy:
         condition: on-failure
       resources:
@@ -65,16 +81,39 @@ services:
     # Run as root to access Docker socket
     user: root
     volumes:
-      # Mount SSH keys for host access (optional, for SSH mode)
-      - /root/.ssh:/root/.ssh:ro
-      # Mount config file
-      - /opt/logscrawler/config.yaml:/app/config.yaml:ro
-      # Mount Docker socket for direct Docker API access (mode: docker)
+      # Mount Docker socket for Swarm API access (required for auto-discovery)
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
+      # ========== All configuration via environment variables ==========
       - LOGSCRAWLER_DEBUG=false
+
+      # OpenSearch configuration
       - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://opensearch:9200"]
-      - LOGSCRAWLER_OLLAMA_URL=http://ollama:11434
+      - LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX=logscrawler
+
+      # AI/Ollama configuration
+      - LOGSCRAWLER_AI__MODEL=llama3.2:latest
+      - LOGSCRAWLER_OLLAMA_URL=https://llm-dev.methodinfo.fr
+
+      # Collector settings
+      - LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS=30
+      - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS=15
+      - LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH=500
+      - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS=7
+
+      # Host configuration (JSON array)
+      # Using Swarm auto-discovery: only configure the manager, workers are discovered!
+      - |
+        LOGSCRAWLER_HOSTS=[
+          {
+            "name": "swarm-manager",
+            "mode": "docker",
+            "docker_url": "unix:///var/run/docker.sock",
+            "swarm_manager": true,
+            "swarm_routing": true,
+            "swarm_autodiscover": true
+          }
+        ]
     networks:
       - proxy
       - internal
@@ -85,23 +124,22 @@ services:
       retries: 3
     depends_on:
       - opensearch
-      - ollama
     deploy:
       replicas: 1
       labels:
         # Enable Traefik
         - "traefik.enable=true"
-        
+
         # Define service port
         - "traefik.http.services.logscrawler.loadbalancer.server.port=8000"
-        
+
         # HTTPS Router (main)
         - "traefik.http.routers.logscrawler.rule=Host(`logs.methodinfo.fr`)"
         - "traefik.http.routers.logscrawler.entrypoints=websecure"
         - "traefik.http.routers.logscrawler.tls.certresolver=letsencrypt"
         - "traefik.http.routers.logscrawler.middlewares=global@file,local-only@file"
         - "traefik.http.routers.logscrawler.service=logscrawler"
-        
+
         # HTTP Router (redirect to HTTPS)
         - "traefik.http.routers.logscrawler-http.rule=Host(`logs.methodinfo.fr`)"
         - "traefik.http.routers.logscrawler-http.entrypoints=web"
@@ -111,15 +149,13 @@ services:
         condition: on-failure
       placement:
         constraints:
-          - node.labels.gpu != true
+          - node.hostname == server-b
 
 # ============================================================================
 # Volumes
 # ============================================================================
 volumes:
   opensearch-data:
-    driver: local
-  ollama-data:
     driver: local
 
 # ============================================================================

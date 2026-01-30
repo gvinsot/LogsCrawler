@@ -515,16 +515,21 @@ function initModalTabs() {
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const tab = btn.dataset.tab;
-            
+
             // Update buttons
             document.querySelectorAll('.tab-btn').forEach(b => {
                 b.classList.toggle('active', b.dataset.tab === tab);
             });
-            
+
             // Update content
             document.querySelectorAll('.tab-content').forEach(c => {
                 c.classList.toggle('active', c.id === `tab-${tab}`);
             });
+
+            // Load env vars on demand when switching to env tab
+            if (tab === 'env' && currentContainer && Object.keys(currentContainerEnv).length === 0) {
+                refreshContainerEnv();
+            }
         });
     });
 }
@@ -1113,22 +1118,29 @@ function filterContainers() {
 
 // Store raw logs for filtering
 let currentContainerLogs = [];
+// Store raw env vars for filtering
+let currentContainerEnv = {};
 
 function openContainer(host, containerId, containerData) {
     currentContainer = { host, id: containerId, data: containerData };
     currentContainerLogs = [];
-    
+    currentContainerEnv = {};
+
     document.getElementById('modal-container-name').textContent = containerData.name;
-    
+
     // Update status badge
     const statusBadge = document.getElementById('modal-container-status');
     statusBadge.textContent = containerData.status;
     statusBadge.className = `status-badge ${containerData.status}`;
-    
+
     // Clear filter inputs
     document.getElementById('logs-filter').value = '';
     document.getElementById('logs-errors-only').checked = false;
-    
+    document.getElementById('env-filter').value = '';
+
+    // Clear env viewer
+    document.getElementById('container-env').innerHTML = '';
+
     // Show info
     const infoDiv = document.getElementById('container-info');
     infoDiv.innerHTML = `
@@ -1156,6 +1168,7 @@ function closeModal() {
     document.getElementById('container-modal').classList.remove('open');
     currentContainer = null;
     currentContainerLogs = [];
+    currentContainerEnv = {};
 }
 
 async function refreshContainerLogs() {
@@ -1370,16 +1383,16 @@ function filterContainerLogs() {
 
 async function refreshContainerStats() {
     if (!currentContainer) return;
-    
+
     const stats = await apiGet(`/containers/${currentContainer.host}/${currentContainer.id}/stats`);
-    
+
     if (stats) {
         document.getElementById('stat-cpu').textContent = `${stats.cpu_percent.toFixed(2)}%`;
-        document.getElementById('stat-memory').textContent = 
+        document.getElementById('stat-memory').textContent =
             `${stats.memory_usage_mb.toFixed(1)} MB / ${stats.memory_limit_mb.toFixed(1)} MB (${stats.memory_percent.toFixed(1)}%)`;
-        document.getElementById('stat-network').textContent = 
+        document.getElementById('stat-network').textContent =
             `↓ ${formatBytes(stats.network_rx_bytes)} / ↑ ${formatBytes(stats.network_tx_bytes)}`;
-        document.getElementById('stat-block').textContent = 
+        document.getElementById('stat-block').textContent =
             `Read: ${formatBytes(stats.block_read_bytes)} / Write: ${formatBytes(stats.block_write_bytes)}`;
     } else {
         document.getElementById('stat-cpu').textContent = '-';
@@ -1387,6 +1400,60 @@ async function refreshContainerStats() {
         document.getElementById('stat-network').textContent = '-';
         document.getElementById('stat-block').textContent = '-';
     }
+}
+
+async function refreshContainerEnv() {
+    if (!currentContainer) return;
+
+    const envViewer = document.getElementById('container-env');
+    envViewer.innerHTML = '<div class="loading">Loading environment variables...</div>';
+
+    const envData = await apiGet(`/containers/${currentContainer.host}/${currentContainer.id}/env`);
+
+    if (envData && envData.variables) {
+        currentContainerEnv = envData.variables;
+        renderContainerEnv();
+    } else if (envData && envData.error) {
+        envViewer.innerHTML = `<div class="error-message">${escapeHtml(envData.error)}</div>`;
+        currentContainerEnv = {};
+    } else {
+        envViewer.innerHTML = '<div class="error-message">Failed to load environment variables</div>';
+        currentContainerEnv = {};
+    }
+}
+
+function renderContainerEnv() {
+    const envViewer = document.getElementById('container-env');
+    const filter = document.getElementById('env-filter').value.toLowerCase();
+
+    // Sort keys alphabetically
+    const sortedKeys = Object.keys(currentContainerEnv).sort();
+
+    if (sortedKeys.length === 0) {
+        envViewer.innerHTML = '<div class="empty-message">No environment variables found</div>';
+        return;
+    }
+
+    let html = '';
+    for (const key of sortedKeys) {
+        const value = currentContainerEnv[key];
+        const matchesFilter = !filter ||
+            key.toLowerCase().includes(filter) ||
+            value.toLowerCase().includes(filter);
+
+        html += `
+            <div class="env-row${matchesFilter ? '' : ' hidden'}">
+                <span class="env-key">${escapeHtml(key)}</span>
+                <span class="env-value">${escapeHtml(value)}</span>
+            </div>
+        `;
+    }
+
+    envViewer.innerHTML = html;
+}
+
+function filterContainerEnv() {
+    renderContainerEnv();
 }
 
 async function containerAction(action) {

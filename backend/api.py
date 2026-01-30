@@ -338,13 +338,22 @@ async def get_container_stats(host: str, container_id: str) -> Dict[str, Any]:
 
 @app.get("/api/containers/{host}/{container_id}/logs")
 async def get_container_logs(
-    host: str, 
+    host: str,
     container_id: str,
     tail: int = Query(default=200, ge=1, le=10000)
 ) -> List[Dict[str, Any]]:
     """Get live logs for a container."""
     logs = await collector.get_container_logs_live(host, container_id, tail=tail)
     return logs
+
+
+@app.get("/api/containers/{host}/{container_id}/env")
+async def get_container_env(host: str, container_id: str) -> Dict[str, Any]:
+    """Get environment variables for a container by running printenv inside it."""
+    env_data = await collector.get_container_env(host, container_id)
+    if not env_data:
+        raise HTTPException(status_code=404, detail="Container not found")
+    return env_data
 
 
 @app.post("/api/containers/action", response_model=ActionResult)

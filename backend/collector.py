@@ -9,14 +9,14 @@ import structlog
 from .config import Settings
 from .models import ContainerInfo, ContainerStatus
 from .opensearch_client import OpenSearchClient
-from .host_client import create_host_client, HostClientProtocol
+from .host_client import create_host_client, HostClientProtocol, SwarmProxyClient
 
 logger = structlog.get_logger()
 
 
 class Collector:
     """Collects logs and metrics from all configured hosts."""
-    
+
     def __init__(self, settings: Settings, opensearch: OpenSearchClient):
         self.settings = settings
         self.opensearch = opensearch
@@ -27,23 +27,49 @@ class Collector:
         self._last_log_timestamp: Dict[str, datetime] = {}
         self._containers_cache: Dict[str, List[ContainerInfo]] = {}
         self._containers_cache_time: Optional[datetime] = None
-        
+
+        # Track Swarm manager for routing (if swarm_routing is enabled)
+        self._swarm_manager_host: Optional[str] = None
+        self._swarm_routing_enabled: bool = False
+        self._swarm_autodiscover_enabled: bool = False
+        self._discovered_nodes: Dict[str, str] = {}  # node_hostname -> node_id
+
         # Initialize clients based on host configuration
         for host in settings.hosts:
             self.clients[host.name] = create_host_client(host)
+
+            # Track Swarm manager with routing/autodiscover enabled
+            if host.swarm_manager:
+                if host.swarm_routing:
+                    self._swarm_manager_host = host.name
+                    self._swarm_routing_enabled = True
+                    logger.info("Swarm routing enabled via manager", manager=host.name)
+
+                if host.swarm_autodiscover:
+                    self._swarm_manager_host = host.name
+                    self._swarm_autodiscover_enabled = True
+                    logger.info("Swarm auto-discovery enabled via manager", manager=host.name)
     
     async def start(self):
         """Start the collector background tasks."""
         if self._running:
             return
-            
+
         self._running = True
         logger.info("Starting collector")
-        
+
+        # Discover Swarm nodes if auto-discovery is enabled
+        if self._swarm_autodiscover_enabled:
+            await self._discover_swarm_nodes()
+
         # Start collection tasks
         asyncio.create_task(self._log_collection_loop())
         asyncio.create_task(self._metrics_collection_loop())
         asyncio.create_task(self._cleanup_loop())
+
+        # Start node discovery refresh loop if auto-discovery is enabled
+        if self._swarm_autodiscover_enabled:
+            asyncio.create_task(self._node_discovery_loop())
     
     async def stop(self):
         """Stop the collector."""
@@ -82,9 +108,89 @@ class Collector:
                 await self.opensearch.cleanup_old_data(self.settings.collector.retention_days)
             except Exception as e:
                 logger.error("Cleanup error", error=str(e))
-            
+
             # Run cleanup once per hour
             await asyncio.sleep(3600)
+
+    async def _node_discovery_loop(self):
+        """Periodically refresh discovered Swarm nodes."""
+        while self._running:
+            # Refresh every 5 minutes
+            await asyncio.sleep(300)
+
+            try:
+                await self._discover_swarm_nodes()
+            except Exception as e:
+                logger.error("Node discovery error", error=str(e))
+
+    async def _discover_swarm_nodes(self):
+        """Discover Swarm nodes and create proxy clients for each.
+
+        This method queries the Swarm manager for all nodes in the cluster
+        and creates SwarmProxyClient instances for each worker node. These
+        proxy clients route all Docker commands through the manager.
+        """
+        if not self._swarm_manager_host:
+            return
+
+        manager_client = self.clients.get(self._swarm_manager_host)
+        if not manager_client:
+            return
+
+        # Check if manager client supports Swarm operations
+        if not hasattr(manager_client, 'get_swarm_nodes'):
+            logger.warning("Manager client does not support Swarm node discovery",
+                         manager=self._swarm_manager_host)
+            return
+
+        try:
+            nodes = await manager_client.get_swarm_nodes()
+            logger.info("Discovered Swarm nodes", count=len(nodes), manager=self._swarm_manager_host)
+
+            # Track which nodes we've seen
+            current_nodes = set()
+
+            for node in nodes:
+                node_id = node["id"]
+                node_hostname = node["hostname"]
+                node_status = node["status"]
+                node_role = node["role"]
+
+                current_nodes.add(node_hostname)
+
+                # Skip nodes that are not ready
+                if node_status != "ready":
+                    logger.debug("Skipping non-ready node", node=node_hostname, status=node_status)
+                    continue
+
+                # Skip the manager itself (it's already configured)
+                if node_hostname == self._swarm_manager_host:
+                    continue
+
+                # Skip if we already have a client for this host (explicitly configured)
+                if node_hostname in self.clients and node_hostname not in self._discovered_nodes:
+                    logger.debug("Skipping explicitly configured host", node=node_hostname)
+                    continue
+
+                # Create or update proxy client for this node
+                if node_hostname not in self._discovered_nodes:
+                    proxy_client = SwarmProxyClient(manager_client, node_id, node_hostname)
+                    self.clients[node_hostname] = proxy_client
+                    self._discovered_nodes[node_hostname] = node_id
+                    logger.info("Discovered new Swarm node",
+                              node=node_hostname, role=node_role, node_id=node_id[:12])
+
+            # Remove clients for nodes that no longer exist
+            for hostname in list(self._discovered_nodes.keys()):
+                if hostname not in current_nodes:
+                    logger.info("Removing departed Swarm node", node=hostname)
+                    if hostname in self.clients:
+                        await self.clients[hostname].close()
+                        del self.clients[hostname]
+                    del self._discovered_nodes[hostname]
+
+        except Exception as e:
+            logger.error("Failed to discover Swarm nodes", error=str(e))
     
     async def _collect_all_logs(self):
         """Collect logs from all hosts in parallel."""
@@ -207,49 +313,85 @@ class Collector:
         except Exception as e:
             logger.error("Failed to fetch containers", host=host_name, error=str(e))
     
+    def _get_exec_client(self, host: str) -> Optional[HostClientProtocol]:
+        """Get the client to use for exec operations on a container.
+
+        If Swarm routing is enabled and the target host is in the Swarm,
+        uses the Swarm manager client instead of direct connection.
+        This eliminates the need for SSH access to worker nodes.
+        """
+        # If swarm routing is enabled and we have a manager
+        if self._swarm_routing_enabled and self._swarm_manager_host:
+            manager_client = self.clients.get(self._swarm_manager_host)
+            if manager_client:
+                # Check if target host is different from manager
+                # (manager can handle its own containers directly)
+                if host != self._swarm_manager_host:
+                    logger.debug("Routing exec through Swarm manager",
+                                target_host=host, manager=self._swarm_manager_host)
+                    return manager_client
+
+        # Fall back to direct client
+        return self.clients.get(host)
+
     async def get_container_stats(self, host: str, container_id: str) -> Optional[dict]:
-        """Get current stats for a specific container."""
-        client = self.clients.get(host)
+        """Get current stats for a specific container.
+
+        If Swarm routing is enabled, stats are fetched through the
+        Swarm manager, eliminating the need for direct SSH access.
+        """
+        # Use routing client (may route through Swarm manager)
+        client = self._get_exec_client(host)
         if not client:
             return None
-        
+
         containers = self._containers_cache.get(host, [])
         container = next((c for c in containers if c.id == container_id), None)
         if not container:
             return None
-        
+
         stats = await client.get_container_stats(container_id, container.name)
         return stats.model_dump() if stats else None
     
     async def execute_action(self, host: str, container_id: str, action: str) -> tuple:
-        """Execute an action on a container."""
+        """Execute an action on a container.
+
+        If Swarm routing is enabled, actions are executed through the
+        Swarm manager, eliminating the need for direct SSH access.
+        """
         from .models import ContainerAction
-        
-        client = self.clients.get(host)
+
+        # Use routing client (may route through Swarm manager)
+        client = self._get_exec_client(host)
         if not client:
             return False, f"Unknown host: {host}"
-        
+
         try:
             container_action = ContainerAction(action)
         except ValueError:
             return False, f"Invalid action: {action}"
-        
+
         return await client.execute_container_action(container_id, container_action)
     
     async def get_container_logs_live(
-        self, 
-        host: str, 
-        container_id: str, 
+        self,
+        host: str,
+        container_id: str,
         tail: int = 200
     ) -> List[dict]:
-        """Get live logs for a specific container."""
-        client = self.clients.get(host)
+        """Get live logs for a specific container.
+
+        If Swarm routing is enabled, logs are fetched through the
+        Swarm manager, eliminating the need for direct SSH access.
+        """
+        # Use routing client (may route through Swarm manager)
+        client = self._get_exec_client(host)
         if not client:
             return []
-        
+
         containers = self._containers_cache.get(host, [])
         container = next((c for c in containers if c.id == container_id), None)
-        
+
         logs = await client.get_container_logs(
             container_id=container_id,
             container_name=container.name if container else container_id,
@@ -257,5 +399,30 @@ class Collector:
             compose_project=container.compose_project if container else None,
             compose_service=container.compose_service if container else None,
         )
-        
+
         return [log.model_dump() for log in logs]
+
+    async def get_container_env(self, host: str, container_id: str) -> Optional[dict]:
+        """Get environment variables for a specific container by running printenv.
+
+        If Swarm routing is enabled, the command is executed through the
+        Swarm manager, eliminating the need for direct SSH access to the host.
+        """
+        # Use routing client (may route through Swarm manager)
+        client = self._get_exec_client(host)
+        if not client:
+            return None
+
+        success, output = await client.exec_command(container_id, ["printenv"])
+
+        if not success:
+            return {"error": output}
+
+        # Parse printenv output into key-value pairs
+        env_vars = {}
+        for line in output.strip().split('\n'):
+            if '=' in line:
+                key, _, value = line.partition('=')
+                env_vars[key] = value
+
+        return {"variables": env_vars}

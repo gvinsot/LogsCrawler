@@ -502,3 +502,256 @@ class DockerAPIClient:
             return stacks
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             return {}
+
+    async def exec_command(self, container_id: str, command: List[str]) -> Tuple[bool, str]:
+        """Execute a command inside a container using Docker exec API.
+
+        Args:
+            container_id: The container ID
+            command: Command as list of strings (e.g., ["printenv"])
+
+        Returns:
+            Tuple of (success, output/error)
+        """
+        # Step 1: Create exec instance
+        exec_config = {
+            "AttachStdout": True,
+            "AttachStderr": True,
+            "Cmd": command
+        }
+
+        data, status = await self._request(
+            "POST",
+            f"/containers/{container_id}/exec",
+            json=exec_config
+        )
+
+        if status != 201 or not data:
+            error_msg = data if isinstance(data, str) else json.dumps(data) if data else "Failed to create exec"
+            return False, error_msg
+
+        exec_id = data.get("Id")
+        if not exec_id:
+            return False, "No exec ID returned"
+
+        # Step 2: Start exec and get output
+        start_config = {
+            "Detach": False,
+            "Tty": False
+        }
+
+        session = await self._get_session()
+        url = f"{self._base_url}/exec/{exec_id}/start"
+
+        try:
+            async with session.post(url, json=start_config) as response:
+                if response.status != 200:
+                    return False, f"Exec start failed with status {response.status}"
+
+                # Read the output - Docker sends multiplexed stream
+                output = await response.read()
+
+                # Parse multiplexed stream (header: 8 bytes, then payload)
+                result = []
+                pos = 0
+                while pos < len(output):
+                    if pos + 8 > len(output):
+                        break
+                    # Header: 1 byte type, 3 bytes padding, 4 bytes size (big endian)
+                    size = int.from_bytes(output[pos+4:pos+8], 'big')
+                    pos += 8
+                    if pos + size > len(output):
+                        break
+                    chunk = output[pos:pos+size].decode('utf-8', errors='replace')
+                    result.append(chunk)
+                    pos += size
+
+                return True, ''.join(result)
+        except Exception as e:
+            logger.error("Exec command failed", container_id=container_id, error=str(e))
+            return False, str(e)
+
+    # ============== Swarm-specific methods ==============
+
+    async def get_swarm_nodes(self) -> List[Dict[str, Any]]:
+        """Get all nodes in the Docker Swarm.
+
+        Returns:
+            List of node info dicts with id, hostname, role, status, availability
+        """
+        data, status = await self._request("GET", "/nodes")
+
+        if status != 200 or not data:
+            return []
+
+        nodes = []
+        for node in data:
+            node_info = {
+                "id": node.get("ID", "")[:12],
+                "hostname": node.get("Description", {}).get("Hostname", "unknown"),
+                "role": node.get("Spec", {}).get("Role", "worker"),
+                "status": node.get("Status", {}).get("State", "unknown"),
+                "availability": node.get("Spec", {}).get("Availability", "unknown"),
+                "addr": node.get("Status", {}).get("Addr", ""),
+                "engine_version": node.get("Description", {}).get("Engine", {}).get("EngineVersion", ""),
+            }
+            nodes.append(node_info)
+
+        return nodes
+
+    async def get_swarm_services(self) -> List[Dict[str, Any]]:
+        """Get all services in the Docker Swarm.
+
+        Returns:
+            List of service info dicts
+        """
+        data, status = await self._request("GET", "/services")
+
+        if status != 200 or not data:
+            return []
+
+        services = []
+        for svc in data:
+            spec = svc.get("Spec", {})
+            service_info = {
+                "id": svc.get("ID", "")[:12],
+                "name": spec.get("Name", "unknown"),
+                "image": spec.get("TaskTemplate", {}).get("ContainerSpec", {}).get("Image", "unknown"),
+                "replicas": spec.get("Mode", {}).get("Replicated", {}).get("Replicas", 0),
+                "stack": spec.get("Labels", {}).get("com.docker.stack.namespace", ""),
+            }
+            services.append(service_info)
+
+        return services
+
+    async def get_swarm_tasks(self) -> List[Dict[str, Any]]:
+        """Get all tasks (container instances) across the Swarm.
+
+        This returns information about where each container is running,
+        enabling routing commands to the correct node.
+
+        Returns:
+            List of task info dicts with container_id, node_id, service, status
+        """
+        data, status = await self._request("GET", "/tasks")
+
+        if status != 200 or not data:
+            return []
+
+        tasks = []
+        for task in data:
+            task_status = task.get("Status", {})
+            container_status = task_status.get("ContainerStatus", {})
+
+            task_info = {
+                "id": task.get("ID", "")[:12],
+                "node_id": task.get("NodeID", ""),
+                "service_id": task.get("ServiceID", ""),
+                "container_id": container_status.get("ContainerID", "")[:12] if container_status.get("ContainerID") else None,
+                "state": task_status.get("State", "unknown"),
+                "desired_state": task.get("DesiredState", "unknown"),
+                "slot": task.get("Slot", 0),
+            }
+
+            # Only include running tasks with a container
+            if task_info["container_id"] and task_info["state"] == "running":
+                tasks.append(task_info)
+
+        return tasks
+
+    async def get_node_containers(self, node_id: str) -> List[ContainerInfo]:
+        """Get containers running on a specific Swarm node.
+
+        This uses tasks API to find containers on a node, then gets their details.
+        Useful for Swarm routing when you want to query containers on worker nodes.
+        """
+        tasks = await self.get_swarm_tasks()
+        node_tasks = [t for t in tasks if t["node_id"].startswith(node_id)]
+
+        containers = []
+        for task in node_tasks:
+            if task["container_id"]:
+                # Get container details
+                data, status = await self._request("GET", f"/containers/{task['container_id']}/json")
+                if status == 200 and data:
+                    try:
+                        labels = data.get("Config", {}).get("Labels", {}) or {}
+                        name = data.get("Name", "unknown").lstrip("/")
+
+                        container = ContainerInfo(
+                            id=task["container_id"],
+                            name=name,
+                            image=data.get("Config", {}).get("Image", "unknown"),
+                            status=ContainerStatus.RUNNING,
+                            created=datetime.fromisoformat(data.get("Created", "").replace("Z", "+00:00")),
+                            host=self.config.name,
+                            compose_project=labels.get("com.docker.stack.namespace"),
+                            compose_service=labels.get("com.docker.swarm.service.name"),
+                            ports={},
+                            labels=labels,
+                        )
+                        containers.append(container)
+                    except Exception as e:
+                        logger.error("Failed to parse swarm container", task_id=task["id"], error=str(e))
+
+        return containers
+
+    async def get_all_swarm_containers(self) -> Dict[str, List[ContainerInfo]]:
+        """Get all containers across all Swarm nodes, grouped by node hostname.
+
+        This is the main method for Swarm routing - it discovers all containers
+        in the swarm and their locations, so commands can be routed through
+        the manager instead of requiring direct access to worker nodes.
+
+        Returns:
+            Dict mapping node hostname to list of containers on that node
+        """
+        nodes = await self.get_swarm_nodes()
+        tasks = await self.get_swarm_tasks()
+
+        # Build node_id -> hostname mapping
+        node_hostnames = {n["id"]: n["hostname"] for n in nodes}
+
+        # Group tasks by node
+        containers_by_node: Dict[str, List[ContainerInfo]] = {}
+        for hostname in node_hostnames.values():
+            containers_by_node[hostname] = []
+
+        for task in tasks:
+            if not task["container_id"]:
+                continue
+
+            # Find node hostname
+            node_hostname = None
+            for node_id, hostname in node_hostnames.items():
+                if task["node_id"].startswith(node_id) or node_id.startswith(task["node_id"]):
+                    node_hostname = hostname
+                    break
+
+            if not node_hostname:
+                continue
+
+            # Get container details
+            data, status = await self._request("GET", f"/containers/{task['container_id']}/json")
+            if status == 200 and data:
+                try:
+                    labels = data.get("Config", {}).get("Labels", {}) or {}
+                    name = data.get("Name", "unknown").lstrip("/")
+
+                    container = ContainerInfo(
+                        id=task["container_id"],
+                        name=name,
+                        image=data.get("Config", {}).get("Image", "unknown"),
+                        status=ContainerStatus.RUNNING,
+                        created=datetime.fromisoformat(data.get("Created", "").replace("Z", "+00:00")),
+                        host=node_hostname,  # Use the actual node hostname
+                        compose_project=labels.get("com.docker.stack.namespace"),
+                        compose_service=labels.get("com.docker.swarm.service.name"),
+                        ports={},
+                        labels=labels,
+                    )
+                    containers_by_node[node_hostname].append(container)
+                except Exception as e:
+                    logger.error("Failed to parse swarm container", task_id=task["id"], error=str(e))
+
+        return containers_by_node

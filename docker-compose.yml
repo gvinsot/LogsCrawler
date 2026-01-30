@@ -1,9 +1,16 @@
 version: '3.8'
 
+# ============================================================================
+# LogsCrawler - Local Development / Single Host Deployment
+#
+# NO CONFIG FILE NEEDED - All configuration is via environment variables!
+# For Swarm deployments, use devops/docker-compose.swarm.yml instead.
+# ============================================================================
+
 services:
   # OpenSearch for log storage and search
   opensearch:
-    image: opensearchproject/opensearch:2.11.1
+    image: opensearchproject/opensearch:3.4.0
     container_name: logscrawler-opensearch
     environment:
       - discovery.type=single-node
@@ -26,30 +33,10 @@ services:
       - logscrawler-net
     healthcheck:
       test: ["CMD-SHELL", "curl -s http://localhost:9200 >/dev/null || exit 1"]
-      interval: 30s
+      interval: 10s
       timeout: 10s
-      retries: 5
+      retries: 20
 
-  # Ollama for AI-powered log search (optional)
-  # Uses GPU automatically if available (CUDA/ROCm)
-  ollama:
-    image: ollama/ollama:latest
-    container_name: logscrawler-ollama
-    volumes:
-      - ollama-data:/root/.ollama
-    ports:
-      - "11434:11434"
-    networks:
-      - logscrawler-net
-    # Uncomment for NVIDIA GPU support:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    restart: unless-stopped
 
   # LogsCrawler Backend & Frontend
   logscrawler:
@@ -62,25 +49,68 @@ services:
     ports:
       - "5000:8000"
     volumes:
-      # Mount SSH keys for host access (optional, for SSH mode)
-      - ~/.ssh:/root/.ssh:ro
-      # Mount config file
-      - ./config.yaml:/app/config.yaml:ro
-      # Mount Docker socket for direct Docker API access (mode: docker)
+      # Mount Docker socket for Docker API access
       - /var/run/docker.sock:/var/run/docker.sock
+      # Optional: Mount SSH keys for remote host access (SSH mode)
+      # - ~/.ssh:/root/.ssh:ro
     environment:
+      # ========== All configuration via environment variables ==========
       - LOGSCRAWLER_DEBUG=false
+
+      # OpenSearch configuration
       - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://opensearch:9200"]
-      - LOGSCRAWLER_OLLAMA_URL=http://ollama:11434
+      - LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX=logscrawler
+
+      # AI/Ollama configuration
+      - LOGSCRAWLER_AI__MODEL=llama3.2:latest
+      - LOGSCRAWLER_OLLAMA_URL=https://llm-dev.methodinfo.fr
+
+      # Collector settings
+      - LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS=30
+      - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS=15
+      - LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH=500
+      - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS=7
+
+      # Host configuration (JSON array)
+      # Local Docker mode - monitors containers on this host via Docker socket
+      - |
+        LOGSCRAWLER_HOSTS=[
+          {
+            "name": "local-docker",
+            "mode": "docker",
+            "docker_url": "unix:///var/run/docker.sock"
+          }
+        ]
+
+      # ========== Alternative configurations (uncomment as needed) ==========
+      #
+      # SSH mode - connect to remote hosts via SSH:
+      # - |
+      #   LOGSCRAWLER_HOSTS=[
+      #     {"name": "local-docker", "mode": "docker"},
+      #     {"name": "server-1", "mode": "ssh", "hostname": "192.168.1.10", "username": "deploy"},
+      #     {"name": "server-2", "mode": "ssh", "hostname": "192.168.1.11", "username": "deploy"}
+      #   ]
+      #
+      # Swarm mode with auto-discovery (discovers all Swarm nodes automatically):
+      # - |
+      #   LOGSCRAWLER_HOSTS=[
+      #     {
+      #       "name": "swarm-manager",
+      #       "mode": "docker",
+      #       "docker_url": "unix:///var/run/docker.sock",
+      #       "swarm_manager": true,
+      #       "swarm_routing": true,
+      #       "swarm_autodiscover": true
+      #     }
+      #   ]
+
     extra_hosts:
       # Allows container to reach the host machine via "host.docker.internal"
-      # On Linux, you may need to use your actual host IP instead
       - "host.docker.internal:host-gateway"
     depends_on:
       opensearch:
         condition: service_healthy
-      ollama:
-        condition: service_started
     networks:
       - logscrawler-net
     restart: unless-stopped

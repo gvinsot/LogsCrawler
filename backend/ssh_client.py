@@ -128,60 +128,87 @@ class SSHClient:
             return "", str(e), 1
     
     async def get_containers(self) -> List[ContainerInfo]:
-        """Get list of all Docker containers."""
-        cmd = """docker ps -a --format '{{json .}}'"""
-        stdout, stderr, code = await self.run_command(cmd)
-        
-        if code != 0:
-            logger.error("Failed to list containers", host=self.config.name, error=stderr)
+        """Get list of all Docker containers.
+
+        Optimized to use a single docker inspect command for all containers
+        instead of N separate commands per container.
+        """
+        # Get all container IDs first
+        id_cmd = "docker ps -aq"
+        id_stdout, _, id_code = await self.run_command(id_cmd)
+
+        if id_code != 0 or not id_stdout.strip():
             return []
-        
+
+        container_ids = id_stdout.strip().split("\n")
+        if not container_ids or container_ids == ['']:
+            return []
+
+        # Batch inspect all containers in one command (much faster than N commands)
+        # Using JSON array output for all containers at once
+        inspect_cmd = f"docker inspect {' '.join(container_ids)}"
+        inspect_stdout, inspect_stderr, inspect_code = await self.run_command(inspect_cmd)
+
+        if inspect_code != 0:
+            logger.error("Failed to inspect containers", host=self.config.name, error=inspect_stderr)
+            return []
+
         containers = []
-        for line in stdout.strip().split("\n"):
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                
-                # Get compose info from labels
-                label_cmd = f"docker inspect --format '{{{{json .Config.Labels}}}}' {data['ID']}"
-                label_out, _, _ = await self.run_command(label_cmd)
-                labels = json.loads(label_out.strip()) if label_out.strip() else {}
-                
-                # Parse status
-                status_str = data.get("State", "unknown").lower()
+        try:
+            all_data = json.loads(inspect_stdout)
+
+            for data in all_data:
                 try:
-                    status = ContainerStatus(status_str)
-                except ValueError:
-                    status = ContainerStatus.EXITED
-                
-                # Parse created time
-                created_cmd = f"docker inspect --format '{{{{.Created}}}}' {data['ID']}"
-                created_out, _, _ = await self.run_command(created_cmd)
-                created_str = created_out.strip()
-                try:
-                    # Handle Docker's ISO format with nanoseconds
-                    created = datetime.fromisoformat(created_str.replace("Z", "+00:00")[:26])
-                except:
-                    created = datetime.now()
-                
-                container = ContainerInfo(
-                    id=data["ID"],
-                    name=data["Names"],
-                    image=data["Image"],
-                    status=status,
-                    created=created,
-                    host=self.config.name,
-                    compose_project=labels.get("com.docker.compose.project"),
-                    compose_service=labels.get("com.docker.compose.service"),
-                    ports=self._parse_ports(data.get("Ports", "")),
-                    labels=labels,
-                )
-                containers.append(container)
-                
-            except Exception as e:
-                logger.error("Failed to parse container", host=self.config.name, error=str(e))
-                
+                    # Parse status from State
+                    state = data.get("State", {})
+                    status_str = state.get("Status", "unknown").lower()
+                    try:
+                        status = ContainerStatus(status_str)
+                    except ValueError:
+                        status = ContainerStatus.EXITED
+
+                    # Get labels from Config
+                    labels = data.get("Config", {}).get("Labels", {}) or {}
+
+                    # Parse created time
+                    created_str = data.get("Created", "")
+                    try:
+                        created = datetime.fromisoformat(created_str.replace("Z", "+00:00")[:26])
+                    except:
+                        created = datetime.now()
+
+                    # Parse name (remove leading /)
+                    name = data.get("Name", "/unknown").lstrip("/")
+
+                    # Parse ports from NetworkSettings
+                    ports = {}
+                    port_bindings = data.get("HostConfig", {}).get("PortBindings", {}) or {}
+                    for container_port, host_bindings in port_bindings.items():
+                        if host_bindings:
+                            for binding in host_bindings:
+                                host_port = f"{binding.get('HostIp', '')}:{binding.get('HostPort', '')}"
+                                ports[container_port] = host_port
+
+                    container = ContainerInfo(
+                        id=data["Id"][:12],
+                        name=name,
+                        image=data.get("Config", {}).get("Image", "unknown"),
+                        status=status,
+                        created=created,
+                        host=self.config.name,
+                        compose_project=labels.get("com.docker.compose.project"),
+                        compose_service=labels.get("com.docker.compose.service"),
+                        ports=ports,
+                        labels=labels,
+                    )
+                    containers.append(container)
+
+                except Exception as e:
+                    logger.error("Failed to parse container", host=self.config.name, error=str(e))
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse docker inspect output", host=self.config.name, error=str(e))
+
         return containers
     
     def _parse_ports(self, ports_str: str) -> Dict[str, str]:
@@ -511,5 +538,26 @@ class SSHClient:
                 stacks[stack_name] = services
             else:
                 stacks[stack_name] = []
-        
+
         return stacks
+
+    async def exec_command(self, container_id: str, command: List[str]) -> Tuple[bool, str]:
+        """Execute a command inside a container using docker exec.
+
+        Args:
+            container_id: The container ID
+            command: Command as list of strings (e.g., ["printenv"])
+
+        Returns:
+            Tuple of (success, output/error)
+        """
+        # Build command - properly quote each argument
+        cmd_args = ' '.join(f"'{arg}'" if ' ' in arg else arg for arg in command)
+        cmd = f"docker exec {container_id} {cmd_args}"
+
+        stdout, stderr, code = await self.run_command(cmd)
+
+        if code == 0:
+            return True, stdout
+        else:
+            return False, stderr or "Command failed"
