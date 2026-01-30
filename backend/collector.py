@@ -292,6 +292,8 @@ class Collector:
         # When refreshing, ensure swarm node list is up to date so Containers tab shows all nodes
         if refresh and self._swarm_autodiscover_enabled:
             await self._discover_swarm_nodes()
+            # Invalidate cache after discovering nodes to force fetching from all nodes
+            self._containers_cache_time = None
 
         # Use cache if available and not stale (30 seconds)
         if (
