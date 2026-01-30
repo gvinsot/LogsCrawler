@@ -62,57 +62,83 @@ A professional Docker container log aggregation and monitoring solution. Collect
 ### Prerequisites
 
 - Docker & Docker Compose
-- SSH key-based access to target Linux hosts
+- For SSH mode: SSH key-based access to target Linux hosts
 - Docker installed on target hosts
 
-### 1. Clone and Configure
+### 1. Clone and Start
 
 ```bash
 git clone https://github.com/yourusername/logscrawler.git
 cd logscrawler
+
+# Start with Docker Compose (monitors local Docker by default)
+docker-compose up -d
 ```
 
-Edit `config.yaml` to add your hosts:
+### 2. Access the Dashboard
 
-```yaml
-hosts:
-  - name: "production-1"
-    hostname: "192.168.1.10"
-    port: 22
-    username: "root"
-    # ssh_key_path: "~/.ssh/id_rsa"  # Optional
+Open http://localhost:5000 in your browser.
 
-  - name: "production-2"
-    hostname: "192.168.1.11"
-    port: 22
-    username: "deploy"
-    ssh_key_path: "~/.ssh/deploy_key"
-
-opensearch:
-  hosts:
-    - "http://localhost:9200"
-  index_prefix: "logscrawler"
-
-collector:
-  log_interval_seconds: 30      # How often to fetch logs
-  metrics_interval_seconds: 15  # How often to collect metrics
-  log_lines_per_fetch: 500      # Max lines per container per cycle
-  retention_days: 7             # Data retention period
-```
-
-### 2. Start with Docker Compose
+### 3. Check Configuration
 
 ```bash
-# Production
-docker-compose up -d
+# View current configuration
+curl http://localhost:5000/api/config
 
-# Development (with hot reload)
-docker-compose -f docker-compose.dev.yml up -d
+# Test connectivity to all hosts
+curl http://localhost:5000/api/config/test
 ```
 
-### 3. Access the Dashboard
+## Configuration
 
-Open http://localhost:8000 in your browser.
+All configuration is done via **environment variables** in `docker-compose.yml`. No config file needed!
+
+### Local Docker Monitoring (Default)
+
+The default configuration monitors containers on the local Docker host:
+
+```yaml
+environment:
+  - |
+    LOGSCRAWLER_HOSTS=[
+      {"name": "local-docker", "mode": "docker", "docker_url": "unix:///var/run/docker.sock"}
+    ]
+```
+
+### Docker Swarm with Auto-Discovery (Recommended)
+
+For Swarm clusters, configure only the manager - workers are discovered automatically:
+
+```yaml
+environment:
+  - |
+    LOGSCRAWLER_HOSTS=[
+      {
+        "name": "swarm-manager",
+        "mode": "docker",
+        "docker_url": "unix:///var/run/docker.sock",
+        "swarm_manager": true,
+        "swarm_routing": true,
+        "swarm_autodiscover": true
+      }
+    ]
+```
+
+### SSH Mode (Multiple Remote Hosts)
+
+For monitoring multiple remote hosts via SSH:
+
+```yaml
+environment:
+  - |
+    LOGSCRAWLER_HOSTS=[
+      {"name": "local", "mode": "docker"},
+      {"name": "server-1", "mode": "ssh", "hostname": "192.168.1.10", "username": "deploy"},
+      {"name": "server-2", "mode": "ssh", "hostname": "192.168.1.11", "username": "deploy"}
+    ]
+volumes:
+  - ~/.ssh:/root/.ssh:ro  # Mount SSH keys
+```
 
 ## Development Setup
 
@@ -144,11 +170,13 @@ logscrawler/
 │   ├── __init__.py
 │   ├── api.py              # FastAPI REST endpoints
 │   ├── collector.py        # Log/metrics collection service
-│   ├── config.py           # Configuration management
+│   ├── config.py           # Configuration management (env vars)
 │   ├── main.py             # Application entry point
 │   ├── models.py           # Pydantic data models
-│   ├── opensearch_client.py # OpenSearch operations
-│   └── ssh_client.py       # SSH/Docker operations
+│   ├── docker_client.py    # Docker API client
+│   ├── ssh_client.py       # SSH client for remote hosts
+│   ├── host_client.py      # Unified host client interface
+│   └── opensearch_client.py # OpenSearch operations
 ├── frontend/
 │   ├── index.html          # Main HTML page
 │   └── static/
@@ -156,9 +184,9 @@ logscrawler/
 │       │   └── style.css   # Styles (Deep Ocean theme)
 │       └── js/
 │           └── app.js      # Frontend JavaScript
-├── config.yaml             # Configuration file
-├── docker-compose.yml      # Production deployment
-├── docker-compose.dev.yml  # Development deployment
+├── devops/
+│   └── docker-compose.swarm.yml  # Docker Swarm deployment
+├── docker-compose.yml      # Local/single-host deployment
 ├── Dockerfile
 ├── requirements.txt
 └── README.md
@@ -220,27 +248,57 @@ logscrawler/
 | `/api/hosts` | GET | List configured hosts |
 | `/api/health` | GET | Health check |
 
-## Configuration
+## Environment Variables Reference
 
-### Environment Variables
+All configuration is done via environment variables prefixed with `LOGSCRAWLER_`.
+
+### Core Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LOGSCRAWLER_DEBUG` | Enable debug mode | `false` |
-| `LOGSCRAWLER_HOST` | Server bind host | `0.0.0.0` |
-| `LOGSCRAWLER_PORT` | Server bind port | `8000` |
-| `LOGSCRAWLER_CONFIG_PATH` | Config file path | `config.yaml` |
+| `LOGSCRAWLER_HOSTS` | JSON array of host configs | `[]` |
 
-### OpenSearch with Authentication
+### OpenSearch Settings
 
-```yaml
-opensearch:
-  hosts:
-    - "https://opensearch.example.com:9200"
-  index_prefix: "logscrawler"
-  username: "admin"
-  password: "your-secure-password"
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOGSCRAWLER_OPENSEARCH__HOSTS` | JSON array of OpenSearch URLs | `["http://localhost:9200"]` |
+| `LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX` | Index prefix | `logscrawler` |
+| `LOGSCRAWLER_OPENSEARCH__USERNAME` | Username (optional) | - |
+| `LOGSCRAWLER_OPENSEARCH__PASSWORD` | Password (optional) | - |
+
+### Collector Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS` | Log collection interval | `30` |
+| `LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS` | Metrics collection interval | `15` |
+| `LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH` | Lines per container per fetch | `500` |
+| `LOGSCRAWLER_COLLECTOR__RETENTION_DAYS` | Data retention period | `7` |
+
+### AI Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOGSCRAWLER_AI__MODEL` | Ollama model name | `llama3.2:latest` |
+| `LOGSCRAWLER_OLLAMA_URL` | Ollama API URL | - |
+
+### Host Configuration Options
+
+Each host in `LOGSCRAWLER_HOSTS` supports these fields:
+
+| Field | Description | Required |
+|-------|-------------|----------|
+| `name` | Display name for the host | Yes |
+| `mode` | Connection mode: `docker`, `ssh`, or `local` | Yes |
+| `hostname` | IP or hostname (for SSH mode) | For SSH |
+| `port` | SSH port | No (default: 22) |
+| `username` | SSH username | For SSH |
+| `docker_url` | Docker API URL (for docker mode) | No |
+| `swarm_manager` | Is this a Swarm manager? | No |
+| `swarm_routing` | Route commands through manager | No |
+| `swarm_autodiscover` | Auto-discover Swarm nodes | No |
 
 ## Troubleshooting
 

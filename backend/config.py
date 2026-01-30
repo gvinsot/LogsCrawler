@@ -1,12 +1,21 @@
-"""Configuration management for LogsCrawler."""
+"""Configuration management for LogsCrawler.
+
+All configuration is done via environment variables. No config file required!
+
+Environment variables:
+- LOGSCRAWLER_HOSTS: JSON array of host configs
+- LOGSCRAWLER_OPENSEARCH__HOSTS: JSON array of OpenSearch URLs
+- LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX: Index prefix string
+- LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS: Log collection interval
+- LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS: Metrics collection interval
+- LOGSCRAWLER_AI__MODEL: AI model name
+"""
 
 import json
 import os
-from pathlib import Path
 from typing import List, Optional
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings
-import yaml
 
 
 class HostConfig(BaseModel):
@@ -72,67 +81,50 @@ class Settings(BaseSettings):
     """Application settings."""
     app_name: str = "LogsCrawler"
     debug: bool = False
-    
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
-    
-    # Paths
-    config_path: str = "config.yaml"
-    
+
     # OpenSearch
     opensearch: OpenSearchConfig = OpenSearchConfig()
-    
+
     # Collector
     collector: CollectorConfig = CollectorConfig()
-    
+
     # AI
     ai: AIConfig = AIConfig()
-    
-    # Hosts (loaded from config file)
+
+    # Hosts (configured via LOGSCRAWLER_HOSTS env var)
     hosts: List[HostConfig] = []
-    
+
     class Config:
         env_prefix = "LOGSCRAWLER_"
         env_nested_delimiter = "__"
 
 
-def load_config(config_path: str = "config.yaml") -> Settings:
-    """Load configuration from YAML file and environment variables.
+def load_config() -> Settings:
+    """Load configuration from environment variables.
 
-    Priority (highest to lowest):
-    1. Environment variables (LOGSCRAWLER_*)
-    2. Config file (config.yaml)
-    3. Default values
+    All configuration is done via environment variables prefixed with LOGSCRAWLER_.
 
-    Environment variable format:
+    Required:
     - LOGSCRAWLER_HOSTS: JSON array of host configs
+
+    Optional:
     - LOGSCRAWLER_OPENSEARCH__HOSTS: JSON array of OpenSearch URLs
+    - LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX: Index prefix
     - LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS: integer
+    - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS: integer
     - LOGSCRAWLER_AI__MODEL: string
+
+    Example LOGSCRAWLER_HOSTS:
+    [{"name": "local", "mode": "docker", "docker_url": "unix:///var/run/docker.sock"}]
     """
     settings = Settings()
 
-    # Load from config file if it exists (and no LOGSCRAWLER_HOSTS env var)
+    # Load hosts from environment variable (JSON array)
     hosts_env = os.environ.get("LOGSCRAWLER_HOSTS")
-    config_file = Path(config_path)
-
-    if not hosts_env and config_file.exists():
-        with open(config_file, "r") as f:
-            yaml_config = yaml.safe_load(f)
-
-        if yaml_config:
-            if "hosts" in yaml_config:
-                settings.hosts = [HostConfig(**h) for h in yaml_config["hosts"]]
-            if "opensearch" in yaml_config:
-                settings.opensearch = OpenSearchConfig(**yaml_config["opensearch"])
-            if "collector" in yaml_config:
-                settings.collector = CollectorConfig(**yaml_config["collector"])
-            if "ai" in yaml_config:
-                settings.ai = AIConfig(**yaml_config["ai"])
-
-    # Override with environment variables
-    # Hosts (JSON array)
     if hosts_env:
         try:
             hosts_list = json.loads(hosts_env)

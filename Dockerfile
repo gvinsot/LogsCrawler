@@ -1,9 +1,13 @@
 FROM python:3.11-slim
 
+# All configuration is via environment variables - no config file needed!
+# See docker-compose.yml for example configuration.
+
 WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
+    curl \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
@@ -14,7 +18,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
-COPY config.yaml .
 
 # Create non-root user
 RUN useradd -m -s /bin/bash appuser && chown -R appuser:appuser /app
