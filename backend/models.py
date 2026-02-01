@@ -132,6 +132,12 @@ class TimeSeriesPoint(BaseModel):
     value: float
 
 
+class TimeSeriesByHost(BaseModel):
+    """Time series data grouped by host."""
+    host: str
+    data: List[TimeSeriesPoint]
+
+
 class ContainerAction(str, Enum):
     """Container action enum."""
     START = "start"

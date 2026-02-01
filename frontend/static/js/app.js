@@ -647,7 +647,9 @@ async function loadDashboard() {
         loadErrorsChart(),
         loadHttpChart(),
         loadCpuChart(),
-        loadMemoryChart()
+        loadGpuChart(),
+        loadMemoryChart(),
+        loadVramChart()
     ]);
 }
 
@@ -741,79 +743,144 @@ async function loadHttpChart() {
     });
 }
 
+// Color palette for different hosts
+const hostColors = [
+    '#00d4aa', // teal
+    '#f59e0b', // amber
+    '#8b5cf6', // purple
+    '#ef4444', // red
+    '#3b82f6', // blue
+    '#ec4899', // pink
+    '#14b8a6', // cyan
+    '#84cc16', // lime
+];
+
+function getHostColor(index) {
+    return hostColors[index % hostColors.length];
+}
+
 async function loadCpuChart() {
-    const [cpuData, gpuData] = await Promise.all([
-        apiGet('/dashboard/cpu-timeseries?hours=24&interval=15m'),
-        apiGet('/dashboard/gpu-timeseries?hours=24&interval=15m')
-    ]);
-    
-    if (!cpuData) return;
+    const data = await apiGet('/dashboard/cpu-timeseries-by-host?hours=24&interval=15m');
+    if (!data || !data.length) return;
     
     const ctx = document.getElementById('cpu-chart').getContext('2d');
-    
     if (charts.cpu) charts.cpu.destroy();
     
-    const datasets = [
-        {
-            label: 'CPU %',
-            data: cpuData.map(p => p.value),
-            borderColor: '#00d4aa',
-            backgroundColor: 'rgba(0, 212, 170, 0.1)',
-            fill: true,
-            tension: 0.3
-        }
-    ];
+    // Get all unique timestamps from first host (they should be aligned)
+    const labels = data[0].data.map(p => formatTime(p.timestamp));
     
-    // Always add GPU line if we have data points (even if all zeros)
-    // This allows users to see GPU is being tracked
-    if (gpuData && gpuData.length) {
-        // Map GPU data to CPU timestamps for alignment
-        const gpuValues = cpuData.map((cpuPoint, idx) => {
-            const gpuPoint = gpuData[idx];
-            return gpuPoint ? (gpuPoint.value || 0) : 0;
-        });
-        
-        datasets.push({
-            label: 'GPU %',
-            data: gpuValues,
-            borderColor: '#f59e0b',
-            backgroundColor: 'rgba(245, 158, 11, 0.1)',
-            fill: true,
-            tension: 0.3
-        });
-    }
+    // Create a dataset for each host
+    const datasets = data.map((hostData, idx) => ({
+        label: hostData.host,
+        data: hostData.data.map(p => p.value),
+        borderColor: getHostColor(idx),
+        backgroundColor: 'transparent',
+        fill: false,
+        tension: 0.3,
+        borderWidth: 2
+    }));
     
     charts.cpu = new Chart(ctx, {
         type: 'line',
-        data: {
-            labels: cpuData.map(p => formatTime(p.timestamp)),
-            datasets: datasets
-        },
+        data: { labels, datasets },
+        options: getChartOptions(true)
+    });
+}
+
+async function loadGpuChart() {
+    const data = await apiGet('/dashboard/gpu-timeseries-by-host?hours=24&interval=15m');
+    if (!data || !data.length) {
+        // Hide chart if no GPU data
+        const ctx = document.getElementById('gpu-chart').getContext('2d');
+        if (charts.gpu) charts.gpu.destroy();
+        charts.gpu = new Chart(ctx, {
+            type: 'line',
+            data: { labels: [], datasets: [] },
+            options: { ...getChartOptions(true), plugins: { ...getChartOptions(true).plugins, title: { display: true, text: 'No GPU data available', color: '#6e7681' } } }
+        });
+        return;
+    }
+    
+    const ctx = document.getElementById('gpu-chart').getContext('2d');
+    if (charts.gpu) charts.gpu.destroy();
+    
+    const labels = data[0].data.map(p => formatTime(p.timestamp));
+    
+    const datasets = data.map((hostData, idx) => ({
+        label: hostData.host,
+        data: hostData.data.map(p => p.value),
+        borderColor: getHostColor(idx),
+        backgroundColor: 'transparent',
+        fill: false,
+        tension: 0.3,
+        borderWidth: 2
+    }));
+    
+    charts.gpu = new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets },
         options: getChartOptions(true)
     });
 }
 
 async function loadMemoryChart() {
-    const data = await apiGet('/dashboard/memory-timeseries?hours=24&interval=15m');
-    if (!data) return;
+    const data = await apiGet('/dashboard/memory-timeseries-by-host?hours=24&interval=15m');
+    if (!data || !data.length) return;
     
     const ctx = document.getElementById('memory-chart').getContext('2d');
-    
     if (charts.memory) charts.memory.destroy();
+    
+    const labels = data[0].data.map(p => formatTime(p.timestamp));
+    
+    const datasets = data.map((hostData, idx) => ({
+        label: hostData.host,
+        data: hostData.data.map(p => p.value),
+        borderColor: getHostColor(idx),
+        backgroundColor: 'transparent',
+        fill: false,
+        tension: 0.3,
+        borderWidth: 2
+    }));
     
     charts.memory = new Chart(ctx, {
         type: 'line',
-        data: {
-            labels: data.map(p => formatTime(p.timestamp)),
-            datasets: [{
-                label: 'Memory %',
-                data: data.map(p => p.value),
-                borderColor: '#8b5cf6',
-                backgroundColor: 'rgba(139, 92, 246, 0.1)',
-                fill: true,
-                tension: 0.3
-            }]
-        },
+        data: { labels, datasets },
+        options: getChartOptions(true)
+    });
+}
+
+async function loadVramChart() {
+    const data = await apiGet('/dashboard/vram-timeseries-by-host?hours=24&interval=15m');
+    if (!data || !data.length) {
+        // Hide chart if no VRAM data
+        const ctx = document.getElementById('vram-chart').getContext('2d');
+        if (charts.vram) charts.vram.destroy();
+        charts.vram = new Chart(ctx, {
+            type: 'line',
+            data: { labels: [], datasets: [] },
+            options: { ...getChartOptions(true), plugins: { ...getChartOptions(true).plugins, title: { display: true, text: 'No VRAM data available', color: '#6e7681' } } }
+        });
+        return;
+    }
+    
+    const ctx = document.getElementById('vram-chart').getContext('2d');
+    if (charts.vram) charts.vram.destroy();
+    
+    const labels = data[0].data.map(p => formatTime(p.timestamp));
+    
+    const datasets = data.map((hostData, idx) => ({
+        label: hostData.host,
+        data: hostData.data.map(p => p.value),
+        borderColor: getHostColor(idx),
+        backgroundColor: 'transparent',
+        fill: false,
+        tension: 0.3,
+        borderWidth: 2
+    }));
+    
+    charts.vram = new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets },
         options: getChartOptions(true)
     });
 }

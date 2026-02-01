@@ -641,6 +641,134 @@ class OpenSearchClient:
             logger.error("Failed to get resource timeseries", error=str(e))
             return []
     
+    async def get_resource_timeseries_by_host(self, metric: str, hours: int = 24, interval: str = "15m") -> List[Dict]:
+        """Get resource usage time series grouped by host."""
+        from .models import TimeSeriesByHost, TimeSeriesPoint
+        
+        now = datetime.utcnow()
+        start = now - timedelta(hours=hours)
+        
+        body = {
+            "query": {
+                "range": {"timestamp": {"gte": start.isoformat()}}
+            },
+            "size": 0,
+            "aggs": {
+                "by_host": {
+                    "terms": {
+                        "field": "host",
+                        "size": 50
+                    },
+                    "aggs": {
+                        "over_time": {
+                            "date_histogram": {
+                                "field": "timestamp",
+                                "fixed_interval": interval,
+                            },
+                            "aggs": {
+                                "avg_value": {"avg": {"field": metric}}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.host_metrics_index, body=body)
+            host_buckets = response.get("aggregations", {}).get("by_host", {}).get("buckets", [])
+            
+            result = []
+            for host_bucket in host_buckets:
+                host = host_bucket["key"]
+                time_buckets = host_bucket.get("over_time", {}).get("buckets", [])
+                
+                data = [
+                    TimeSeriesPoint(
+                        timestamp=datetime.fromisoformat(bucket["key_as_string"].replace("Z", "+00:00")),
+                        value=round(bucket["avg_value"]["value"] or 0, 2)
+                    )
+                    for bucket in time_buckets
+                ]
+                
+                result.append(TimeSeriesByHost(host=host, data=data))
+            
+            return result
+        except Exception as e:
+            logger.error("Failed to get resource timeseries by host", metric=metric, error=str(e))
+            return []
+    
+    async def get_vram_percent_timeseries_by_host(self, hours: int = 24, interval: str = "15m") -> List[Dict]:
+        """Get VRAM usage percentage time series grouped by host.
+        
+        Calculates VRAM % as (gpu_memory_used_mb / gpu_memory_total_mb) * 100.
+        """
+        from .models import TimeSeriesByHost, TimeSeriesPoint
+        
+        now = datetime.utcnow()
+        start = now - timedelta(hours=hours)
+        
+        body = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"range": {"timestamp": {"gte": start.isoformat()}}},
+                        {"exists": {"field": "gpu_memory_total_mb"}},
+                        {"range": {"gpu_memory_total_mb": {"gt": 0}}}
+                    ]
+                }
+            },
+            "size": 0,
+            "aggs": {
+                "by_host": {
+                    "terms": {
+                        "field": "host",
+                        "size": 50
+                    },
+                    "aggs": {
+                        "over_time": {
+                            "date_histogram": {
+                                "field": "timestamp",
+                                "fixed_interval": interval,
+                            },
+                            "aggs": {
+                                "avg_used": {"avg": {"field": "gpu_memory_used_mb"}},
+                                "avg_total": {"avg": {"field": "gpu_memory_total_mb"}}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.host_metrics_index, body=body)
+            host_buckets = response.get("aggregations", {}).get("by_host", {}).get("buckets", [])
+            
+            result = []
+            for host_bucket in host_buckets:
+                host = host_bucket["key"]
+                time_buckets = host_bucket.get("over_time", {}).get("buckets", [])
+                
+                data = []
+                for bucket in time_buckets:
+                    used = bucket.get("avg_used", {}).get("value") or 0
+                    total = bucket.get("avg_total", {}).get("value") or 0
+                    vram_percent = (used / total * 100) if total > 0 else 0
+                    
+                    data.append(TimeSeriesPoint(
+                        timestamp=datetime.fromisoformat(bucket["key_as_string"].replace("Z", "+00:00")),
+                        value=round(vram_percent, 2)
+                    ))
+                
+                if data:
+                    result.append(TimeSeriesByHost(host=host, data=data))
+            
+            return result
+        except Exception as e:
+            logger.error("Failed to get VRAM timeseries by host", error=str(e))
+            return []
+    
     async def count_similar_logs(self, message: str, container_name: str = "", hours: int = 24) -> int:
         """Count similar log messages in the last N hours.
         

@@ -96,25 +96,13 @@
                     <div class="stat-card">
                         <div class="stat-icon running">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <polygon points="5 3 19 12 5 21 5 3"/>
-                            </svg>
-                        </div>
-                        <div class="stat-content">
-                            <span class="stat-value" id="running-containers">-</span>
-                            <span class="stat-label">Running Containers</span>
-                        </div>
-                    </div>
-                    
-                    <div class="stat-card">
-                        <div class="stat-icon hosts">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
                                 <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
                             </svg>
                         </div>
                         <div class="stat-content">
-                            <span class="stat-value" id="total-hosts">-</span>
-                            <span class="stat-label">Hosts</span>
+                            <span class="stat-value"><span id="running-containers">-</span> / <span id="total-hosts">-</span></span>
+                            <span class="stat-label">Containers / Hosts</span>
                         </div>
                     </div>
                     
@@ -215,12 +203,20 @@
                         <canvas id="http-chart"></canvas>
                     </div>
                     <div class="chart-card">
-                        <h3>CPU % & GPU % (24h)</h3>
+                        <h3>CPU % (24h)</h3>
                         <canvas id="cpu-chart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>GPU % (24h)</h3>
+                        <canvas id="gpu-chart"></canvas>
                     </div>
                     <div class="chart-card">
                         <h3>RAM % (24h)</h3>
                         <canvas id="memory-chart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>VRAM % (24h)</h3>
+                        <canvas id="vram-chart"></canvas>
                     </div>
                 </div>
             </section>

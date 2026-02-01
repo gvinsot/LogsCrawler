@@ -15,7 +15,7 @@ from .collector import Collector
 from .config import load_config, Settings
 from .models import (
     ActionRequest, ActionResult, ContainerInfo, ContainerStatus,
-    DashboardStats, LogSearchQuery, LogSearchResult, TimeSeriesPoint
+    DashboardStats, LogSearchQuery, LogSearchResult, TimeSeriesPoint, TimeSeriesByHost
 )
 from .opensearch_client import OpenSearchClient
 from .github_service import GitHubService, StackDeployer
@@ -172,6 +172,43 @@ async def get_memory_timeseries(
 ):
     """Get memory usage time series."""
     return await opensearch.get_resource_timeseries("memory_percent", hours=hours, interval=interval)
+
+
+@app.get("/api/dashboard/cpu-timeseries-by-host", response_model=List[TimeSeriesByHost])
+async def get_cpu_timeseries_by_host(
+    hours: int = Query(default=24, ge=1, le=168),
+    interval: str = Query(default="15m")
+):
+    """Get CPU usage time series grouped by host."""
+    return await opensearch.get_resource_timeseries_by_host("cpu_percent", hours=hours, interval=interval)
+
+
+@app.get("/api/dashboard/gpu-timeseries-by-host", response_model=List[TimeSeriesByHost])
+async def get_gpu_timeseries_by_host(
+    hours: int = Query(default=24, ge=1, le=168),
+    interval: str = Query(default="15m")
+):
+    """Get GPU usage time series grouped by host."""
+    return await opensearch.get_resource_timeseries_by_host("gpu_percent", hours=hours, interval=interval)
+
+
+@app.get("/api/dashboard/memory-timeseries-by-host", response_model=List[TimeSeriesByHost])
+async def get_memory_timeseries_by_host(
+    hours: int = Query(default=24, ge=1, le=168),
+    interval: str = Query(default="15m")
+):
+    """Get memory usage time series grouped by host."""
+    return await opensearch.get_resource_timeseries_by_host("memory_percent", hours=hours, interval=interval)
+
+
+@app.get("/api/dashboard/vram-timeseries-by-host", response_model=List[TimeSeriesByHost])
+async def get_vram_timeseries_by_host(
+    hours: int = Query(default=24, ge=1, le=168),
+    interval: str = Query(default="15m")
+):
+    """Get VRAM usage time series grouped by host (percentage of total)."""
+    # Use gpu_memory_used_mb / gpu_memory_total_mb * 100
+    return await opensearch.get_vram_percent_timeseries_by_host(hours=hours, interval=interval)
 
 
 # ============== Containers ==============
