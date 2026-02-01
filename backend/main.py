@@ -1,9 +1,26 @@
 """Main entry point for LogsCrawler."""
 
+import logging
 import uvicorn
 import structlog
 
 from .config import load_config
+
+
+class EndpointFilter(logging.Filter):
+    """Filter out noisy endpoints from access logs."""
+
+    # Endpoints to exclude from logging (high-frequency polling)
+    EXCLUDED_PATHS = [
+        "/api/agent/actions",
+        "/api/health",
+    ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Check if the log message contains any excluded path
+        message = record.getMessage()
+        return not any(path in message for path in self.EXCLUDED_PATHS)
+
 
 # Configure structured logging
 structlog.configure(
@@ -28,7 +45,10 @@ structlog.configure(
 def main():
     """Run the LogsCrawler server."""
     settings = load_config()
-    
+
+    # Add filter to uvicorn access logger to exclude noisy endpoints
+    logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
     uvicorn.run(
         "backend.api:app",
         host=settings.host,
