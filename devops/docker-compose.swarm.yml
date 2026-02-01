@@ -56,6 +56,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+    # Run as root to access Docker socket for Swarm API queries
+    user: root
     volumes:
       # SSH keys for git clone/build operations only
       - /root/.ssh:/gildas/.ssh:ro
