@@ -161,7 +161,10 @@ class StackDeployer:
             self._ssh_client = None
 
     async def _ensure_repo_cloned(self, repo_name: str, ssh_url: str) -> tuple[bool, str]:
-        """Ensure the repository is cloned on the host.
+        """Ensure the repository is cloned and updated on the host.
+
+        If the repo exists, it will be updated with git fetch + reset to match remote.
+        Local .env and config files are preserved (only tracked files are reset).
 
         Args:
             repo_name: Name of the repository
@@ -174,7 +177,7 @@ class StackDeployer:
         repo_path = f"{repos_path}/{repo_name}"
 
         # Check if repo exists
-        check_cmd = f"test -d {repo_path} && echo 'exists' || echo 'missing'"
+        check_cmd = f"test -d {repo_path}/.git && echo 'exists' || echo 'missing'"
         success, output = await self._run_command(check_cmd)
 
         if not success:
@@ -191,16 +194,23 @@ class StackDeployer:
 
             return True, f"Repository cloned successfully"
         else:
-            # Pull latest changes
-            logger.info("Pulling latest changes", repo=repo_name)
-            pull_cmd = f"cd {repo_path} && git pull"
-            success, output = await self._run_command(pull_cmd)
+            # Repository exists - add to safe.directory and force update
+            logger.info("Updating repository", repo=repo_name)
+            
+            # Add repo to git safe.directory to avoid ownership issues
+            safe_dir_cmd = f"git config --global --add safe.directory {repo_path}"
+            await self._run_command(safe_dir_cmd)
+            
+            # Fetch latest and reset to origin (preserves untracked files like .env)
+            update_cmd = f"cd {repo_path} && git fetch origin && git reset --hard origin/$(git rev-parse --abbrev-ref HEAD)"
+            success, output = await self._run_command(update_cmd)
 
             if not success:
                 # Non-fatal, continue with existing code
-                logger.warning("Failed to pull latest", repo=repo_name, error=output)
+                logger.warning("Failed to update repo", repo=repo_name, error=output)
+                return True, f"Repository exists (update failed: {output})"
 
-            return True, "Repository already exists"
+            return True, "Repository updated successfully"
 
     async def _run_command(self, command: str) -> tuple[bool, str]:
         """Run a shell command on the host.
