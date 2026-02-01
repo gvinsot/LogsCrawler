@@ -122,6 +122,8 @@ class DashboardStats(BaseModel):
     avg_cpu_percent: float
     avg_memory_percent: float
     avg_gpu_percent: Optional[float] = None
+    avg_vram_used_mb: Optional[float] = None
+    avg_vram_total_mb: Optional[float] = None
 
 
 class TimeSeriesPoint(BaseModel):
