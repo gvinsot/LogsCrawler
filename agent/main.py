@@ -112,17 +112,25 @@ class Agent:
         self._running = False
         self.action_poller.stop()
 
-        # Cancel all tasks
-        for task in self._tasks:
-            task.cancel()
+        # Cancel all tasks if they exist
+        if self._tasks:
+            for task in self._tasks:
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
 
-        # Wait for tasks to complete
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-
-        # Close connections
-        await self.docker.close()
-        await self.opensearch.close()
-        await self.action_poller.close()
+        # Close connections (always, even if init failed)
+        try:
+            await self.docker.close()
+        except Exception:
+            pass
+        try:
+            await self.opensearch.close()
+        except Exception:
+            pass
+        try:
+            await self.action_poller.close()
+        except Exception:
+            pass
 
         logger.info("Agent stopped")
 
