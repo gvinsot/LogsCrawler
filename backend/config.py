@@ -126,16 +126,22 @@ def load_config() -> Settings:
     """Load configuration from environment variables.
 
     All configuration is done via environment variables prefixed with LOGSCRAWLER_.
+    Pydantic-settings handles most env vars automatically via env_nested_delimiter.
 
     Required:
     - LOGSCRAWLER_HOSTS: JSON array of host configs
 
-    Optional:
+    Optional (auto-loaded by pydantic-settings):
     - LOGSCRAWLER_OPENSEARCH__HOSTS: JSON array of OpenSearch URLs
     - LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX: Index prefix
+    - LOGSCRAWLER_OPENSEARCH__USERNAME: OpenSearch username
+    - LOGSCRAWLER_OPENSEARCH__PASSWORD: OpenSearch password
     - LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS: integer
     - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS: integer
+    - LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH: integer
+    - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS: integer
     - LOGSCRAWLER_AI__MODEL: string
+    - LOGSCRAWLER_GITHUB__*: GitHub configuration
 
     Example LOGSCRAWLER_HOSTS:
     [{"name": "local", "mode": "docker", "docker_url": "unix:///var/run/docker.sock"}]
@@ -143,6 +149,7 @@ def load_config() -> Settings:
     settings = Settings()
 
     # Load hosts from environment variable (JSON array)
+    # This needs special handling because it's a complex nested structure
     hosts_env = os.environ.get("LOGSCRAWLER_HOSTS")
     if hosts_env:
         try:
@@ -151,8 +158,10 @@ def load_config() -> Settings:
                 settings.hosts = [HostConfig(**h) for h in hosts_list]
         except json.JSONDecodeError as e:
             print(f"Warning: Failed to parse LOGSCRAWLER_HOSTS: {e}")
+        except Exception as e:
+            print(f"Warning: Invalid host configuration: {e}")
 
-    # OpenSearch
+    # OpenSearch hosts need special handling (JSON array or single string)
     opensearch_hosts_env = os.environ.get("LOGSCRAWLER_OPENSEARCH__HOSTS")
     if opensearch_hosts_env:
         try:
@@ -160,46 +169,41 @@ def load_config() -> Settings:
             if isinstance(hosts_list, list):
                 settings.opensearch.hosts = hosts_list
         except json.JSONDecodeError:
+            # Single host string
             settings.opensearch.hosts = [opensearch_hosts_env]
 
-    if os.environ.get("LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX"):
-        settings.opensearch.index_prefix = os.environ["LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX"]
-    if os.environ.get("LOGSCRAWLER_OPENSEARCH__USERNAME"):
-        settings.opensearch.username = os.environ["LOGSCRAWLER_OPENSEARCH__USERNAME"]
-    if os.environ.get("LOGSCRAWLER_OPENSEARCH__PASSWORD"):
-        settings.opensearch.password = os.environ["LOGSCRAWLER_OPENSEARCH__PASSWORD"]
+    # Helper function to load env vars with type conversion
+    def load_env(obj, attr: str, env_var: str, converter=str):
+        value = os.environ.get(env_var)
+        if value:
+            try:
+                setattr(obj, attr, converter(value))
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Failed to parse {env_var}: {e}")
 
-    # Collector
-    if os.environ.get("LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS"):
-        settings.collector.log_interval_seconds = int(os.environ["LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS"])
-    if os.environ.get("LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS"):
-        settings.collector.metrics_interval_seconds = int(os.environ["LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS"])
-    if os.environ.get("LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH"):
-        settings.collector.log_lines_per_fetch = int(os.environ["LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH"])
-    if os.environ.get("LOGSCRAWLER_COLLECTOR__RETENTION_DAYS"):
-        settings.collector.retention_days = int(os.environ["LOGSCRAWLER_COLLECTOR__RETENTION_DAYS"])
+    # OpenSearch settings
+    load_env(settings.opensearch, "index_prefix", "LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX")
+    load_env(settings.opensearch, "username", "LOGSCRAWLER_OPENSEARCH__USERNAME")
+    load_env(settings.opensearch, "password", "LOGSCRAWLER_OPENSEARCH__PASSWORD")
 
-    # AI
-    if os.environ.get("LOGSCRAWLER_AI__MODEL"):
-        settings.ai.model = os.environ["LOGSCRAWLER_AI__MODEL"]
+    # Collector settings
+    load_env(settings.collector, "log_interval_seconds", "LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS", int)
+    load_env(settings.collector, "metrics_interval_seconds", "LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS", int)
+    load_env(settings.collector, "log_lines_per_fetch", "LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH", int)
+    load_env(settings.collector, "retention_days", "LOGSCRAWLER_COLLECTOR__RETENTION_DAYS", int)
 
-    # GitHub
-    if os.environ.get("LOGSCRAWLER_GITHUB__TOKEN"):
-        settings.github.token = os.environ["LOGSCRAWLER_GITHUB__TOKEN"]
-    if os.environ.get("LOGSCRAWLER_GITHUB__USERNAME"):
-        settings.github.username = os.environ["LOGSCRAWLER_GITHUB__USERNAME"]
-    if os.environ.get("LOGSCRAWLER_GITHUB__REPOS_PATH"):
-        settings.github.repos_path = os.environ["LOGSCRAWLER_GITHUB__REPOS_PATH"]
-    if os.environ.get("LOGSCRAWLER_GITHUB__SCRIPTS_PATH"):
-        settings.github.scripts_path = os.environ["LOGSCRAWLER_GITHUB__SCRIPTS_PATH"]
-    if os.environ.get("LOGSCRAWLER_GITHUB__SSH_HOST"):
-        settings.github.ssh_host = os.environ["LOGSCRAWLER_GITHUB__SSH_HOST"]
-    if os.environ.get("LOGSCRAWLER_GITHUB__SSH_USER"):
-        settings.github.ssh_user = os.environ["LOGSCRAWLER_GITHUB__SSH_USER"]
-    if os.environ.get("LOGSCRAWLER_GITHUB__SSH_PORT"):
-        settings.github.ssh_port = int(os.environ["LOGSCRAWLER_GITHUB__SSH_PORT"])
-    if os.environ.get("LOGSCRAWLER_GITHUB__SSH_KEY_PATH"):
-        settings.github.ssh_key_path = os.environ["LOGSCRAWLER_GITHUB__SSH_KEY_PATH"]
+    # AI settings
+    load_env(settings.ai, "model", "LOGSCRAWLER_AI__MODEL")
+
+    # GitHub settings
+    load_env(settings.github, "token", "LOGSCRAWLER_GITHUB__TOKEN")
+    load_env(settings.github, "username", "LOGSCRAWLER_GITHUB__USERNAME")
+    load_env(settings.github, "repos_path", "LOGSCRAWLER_GITHUB__REPOS_PATH")
+    load_env(settings.github, "scripts_path", "LOGSCRAWLER_GITHUB__SCRIPTS_PATH")
+    load_env(settings.github, "ssh_host", "LOGSCRAWLER_GITHUB__SSH_HOST")
+    load_env(settings.github, "ssh_user", "LOGSCRAWLER_GITHUB__SSH_USER")
+    load_env(settings.github, "ssh_port", "LOGSCRAWLER_GITHUB__SSH_PORT", int)
+    load_env(settings.github, "ssh_key_path", "LOGSCRAWLER_GITHUB__SSH_KEY_PATH")
 
     return settings
 

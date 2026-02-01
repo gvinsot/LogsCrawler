@@ -15,6 +15,7 @@ from .models import (
     ContainerInfo, ContainerStats, ContainerStatus, 
     HostMetrics, LogEntry, ContainerAction
 )
+from . import utils
 
 logger = structlog.get_logger()
 
@@ -277,39 +278,11 @@ class SSHClient:
     
     def _parse_memory(self, mem_str: str) -> Tuple[float, float]:
         """Parse memory usage string like '100MiB / 1GiB'."""
-        parts = mem_str.split(" / ")
-        if len(parts) != 2:
-            return 0.0, 0.0
-        return self._parse_size_mb(parts[0]), self._parse_size_mb(parts[1])
-    
-    def _parse_size_mb(self, size_str: str) -> float:
-        """Convert size string to MB."""
-        size_str = size_str.strip().upper()
-        multipliers = {
-            "B": 1 / (1024 * 1024),
-            "KB": 1 / 1024,
-            "KIB": 1 / 1024,
-            "MB": 1,
-            "MIB": 1,
-            "GB": 1024,
-            "GIB": 1024,
-            "TB": 1024 * 1024,
-            "TIB": 1024 * 1024,
-        }
-        for suffix, mult in multipliers.items():
-            if size_str.endswith(suffix):
-                try:
-                    return float(size_str[:-len(suffix)].strip()) * mult
-                except:
-                    return 0.0
-        return 0.0
+        return utils.parse_memory_string(mem_str)
     
     def _parse_io(self, io_str: str) -> Tuple[int, int]:
         """Parse I/O string like '100MB / 50MB'."""
-        parts = io_str.split(" / ")
-        if len(parts) != 2:
-            return 0, 0
-        return int(self._parse_size_mb(parts[0]) * 1024 * 1024), int(self._parse_size_mb(parts[1]) * 1024 * 1024)
+        return utils.parse_io_string(io_str)
     
     async def get_host_metrics(self) -> HostMetrics:
         """Get host-level resource metrics."""
@@ -335,50 +308,7 @@ class SSHClient:
         disk_percent = float(disk_parts[4].replace("%", "")) if len(disk_parts) > 4 else 0.0
         
         # GPU (AMD rocm-smi first, then NVIDIA nvidia-smi)
-        gpu_percent = None
-        gpu_mem_used = None
-        gpu_mem_total = None
-        
-        # Try AMD GPU first (rocm-smi)
-        rocm_cmd = "rocm-smi --showuse --csv 2>/dev/null | tail -1"
-        rocm_out, _, rocm_code = await self.run_command(rocm_cmd)
-        if rocm_out.strip() and not rocm_out.startswith("device"):
-            parts = [p.strip() for p in rocm_out.strip().split(",")]
-            if len(parts) >= 2:
-                try:
-                    gpu_percent = float(parts[1].replace('%', '').strip())
-                    # Get memory info
-                    mem_cmd = "rocm-smi --showmeminfo vram 2>/dev/null"
-                    mem_out, _, _ = await self.run_command(mem_cmd)
-                    for line in mem_out.split("\n"):
-                        if "VRAM Total" in line:
-                            try:
-                                bytes_val = int(line.split(":")[-1].strip())
-                                gpu_mem_total = bytes_val / (1024 * 1024)
-                            except ValueError:
-                                pass
-                        elif "VRAM Used" in line:
-                            try:
-                                bytes_val = int(line.split(":")[-1].strip())
-                                gpu_mem_used = bytes_val / (1024 * 1024)
-                            except ValueError:
-                                pass
-                except (ValueError, IndexError):
-                    pass
-        
-        # Fallback to NVIDIA GPU
-        if gpu_percent is None:
-            gpu_cmd = "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null || echo ''"
-            gpu_out, _, code = await self.run_command(gpu_cmd)
-            if gpu_out.strip():
-                gpu_parts = gpu_out.strip().split(", ")
-                if len(gpu_parts) >= 3:
-                    try:
-                        gpu_percent = float(gpu_parts[0])
-                        gpu_mem_used = float(gpu_parts[1])
-                        gpu_mem_total = float(gpu_parts[2])
-                    except ValueError:
-                        pass
+        gpu_percent, gpu_mem_used, gpu_mem_total = await self._get_gpu_metrics()
         
         return HostMetrics(
             host=self.config.name,
@@ -394,6 +324,28 @@ class SSHClient:
             gpu_memory_used_mb=gpu_mem_used,
             gpu_memory_total_mb=gpu_mem_total,
         )
+    
+    async def _get_gpu_metrics(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """Get GPU metrics using rocm-smi (AMD) or nvidia-smi (NVIDIA)."""
+        # Try AMD GPU first (rocm-smi with CSV format - includes all info in one call)
+        rocm_cmd = "rocm-smi --showuse --showmeminfo vram --csv 2>/dev/null"
+        rocm_out, rocm_err, rocm_code = await self.run_command(rocm_cmd)
+        logger.debug("rocm-smi output", returncode=rocm_code, stdout=rocm_out, stderr=rocm_err)
+        
+        if rocm_code == 0 and rocm_out.strip():
+            gpu_percent, gpu_mem_used, gpu_mem_total = utils.parse_rocm_smi_csv(rocm_out)
+            if gpu_percent is not None or gpu_mem_used is not None:
+                return gpu_percent, gpu_mem_used, gpu_mem_total
+        
+        # Fallback to NVIDIA GPU
+        nvidia_cmd = "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null"
+        nvidia_out, _, nvidia_code = await self.run_command(nvidia_cmd)
+        logger.debug("nvidia-smi output", returncode=nvidia_code, stdout=nvidia_out)
+        
+        if nvidia_code == 0 and nvidia_out.strip():
+            return utils.parse_nvidia_smi_csv(nvidia_out)
+        
+        return None, None, None
     
     async def get_container_logs(
         self, 
@@ -453,45 +405,15 @@ class SSHClient:
         compose_service: Optional[str],
     ) -> Optional[LogEntry]:
         """Parse a log line with timestamp."""
-        # Filter out known non-critical warnings from external libraries
-        # This warning comes from Go libraries parsing cgroup v2 "max" values
-        # Check both in raw line and in structured log format (msg=...)
-        if ("failed to parse CPU allowed micro secs" in line and 
-            ("parsing \"max\"" in line or "parsing \\\"max\\\"" in line)):
+        # Filter out known noise
+        if utils.should_filter_log_line(line):
             return None
         
-        # Docker log format: 2024-01-15T10:30:00.123456789Z message
-        timestamp_pattern = r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z?)\s+'
-        match = re.match(timestamp_pattern, line)
+        # Extract timestamp and message
+        timestamp, message = utils.extract_timestamp_and_message(line)
         
-        if match:
-            timestamp_str = match.group(1)
-            message = line[match.end():]
-            try:
-                timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00")[:26])
-            except:
-                timestamp = datetime.utcnow()
-        else:
-            timestamp = datetime.utcnow()
-            message = line
-        
-        # Try to detect log level
-        level = self._detect_log_level(message)
-        
-        # Try to detect HTTP status
-        http_status = self._detect_http_status(message)
-        
-        # Try to parse JSON
-        parsed_fields = {}
-        if message.strip().startswith("{"):
-            try:
-                parsed_fields = json.loads(message.strip())
-                if "level" in parsed_fields:
-                    level = parsed_fields["level"].upper()
-                if "status" in parsed_fields and isinstance(parsed_fields["status"], int):
-                    http_status = parsed_fields["status"]
-            except:
-                pass
+        # Parse log level, HTTP status, and structured fields
+        level, http_status, parsed_fields = utils.parse_log_message(message)
         
         return LogEntry(
             timestamp=timestamp,
@@ -506,32 +428,6 @@ class SSHClient:
             http_status=http_status,
             parsed_fields=parsed_fields,
         )
-    
-    def _detect_log_level(self, message: str) -> Optional[str]:
-        """Detect log level from message."""
-        msg_upper = message.upper()
-        levels = ["ERROR", "WARN", "WARNING", "INFO", "DEBUG", "CRITICAL", "FATAL"]
-        for level in levels:
-            if level in msg_upper:
-                return level.replace("WARNING", "WARN")
-        return None
-    
-    def _detect_http_status(self, message: str) -> Optional[int]:
-        """Detect HTTP status code from message."""
-        # Common patterns: "HTTP/1.1" 200, status=200, status_code=200, [200], " 200 "
-        patterns = [
-            r'HTTP/\d\.\d["\s]+(\d{3})',
-            r'status[_\s]*(?:code)?[=:\s]+(\d{3})',
-            r'\[(\d{3})\]',
-            r'\s(\d{3})\s',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, message)
-            if match:
-                status = int(match.group(1))
-                if 100 <= status < 600:
-                    return status
-        return None
     
     async def execute_container_action(self, container_id: str, action: ContainerAction) -> Tuple[bool, str]:
         """Execute an action on a container."""

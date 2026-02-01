@@ -4,6 +4,7 @@ import asyncio
 import aiohttp
 import json
 import re
+import subprocess
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import quote
@@ -15,6 +16,7 @@ from .models import (
     ContainerInfo, ContainerStats, ContainerStatus,
     HostMetrics, LogEntry, ContainerAction
 )
+from . import utils
 
 logger = structlog.get_logger()
 
@@ -325,9 +327,7 @@ class DockerAPIClient:
     
     async def _get_gpu_metrics(self) -> tuple:
         """Try to get GPU metrics using nvidia-smi or rocm-smi."""
-        import subprocess
-        
-        # Try AMD GPU first (rocm-smi)
+        # Try AMD GPU first (rocm-smi with CSV format - includes all info in one call)
         try:
             result = subprocess.run(
                 ["rocm-smi", "--showuse", "--showmeminfo", "vram", "--csv"],
@@ -335,26 +335,17 @@ class DockerAPIClient:
                 text=True,
                 timeout=5
             )
+            logger.debug("rocm-smi output", returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
             if result.returncode == 0 and result.stdout.strip():
-                # Parse rocm-smi CSV output
-                lines = result.stdout.strip().split("\n")
-                # Find the data line (skip headers)
-                for line in lines:
-                    if line.startswith("card") or line.startswith("GPU"):
-                        continue
-                    parts = [p.strip() for p in line.split(",")]
-                    # rocm-smi output varies, try to extract GPU usage %
-                    # Format is typically: device, GPU use %, GPU memory use %, ...
-                    if len(parts) >= 2:
-                        try:
-                            gpu_use = float(parts[1].replace('%', '').strip())
-                            # Try to get memory info from --showmeminfo
-                            mem_used, mem_total = await self._get_rocm_memory()
-                            return gpu_use, mem_used, mem_total
-                        except (ValueError, IndexError):
-                            pass
-        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-            pass
+                gpu_percent, gpu_mem_used, gpu_mem_total = utils.parse_rocm_smi_csv(result.stdout)
+                if gpu_percent is not None or gpu_mem_used is not None:
+                    return gpu_percent, gpu_mem_used, gpu_mem_total
+        except FileNotFoundError:
+            logger.debug("rocm-smi not found, trying nvidia-smi")
+        except subprocess.TimeoutExpired:
+            logger.warning("rocm-smi command timed out")
+        except Exception as e:
+            logger.warning("rocm-smi failed", error=str(e))
         
         # Fallback to NVIDIA GPU (nvidia-smi)
         try:
@@ -364,47 +355,17 @@ class DockerAPIClient:
                 text=True,
                 timeout=5
             )
+            logger.debug("nvidia-smi output", returncode=result.returncode, stdout=result.stdout)
             if result.returncode == 0 and result.stdout.strip():
-                parts = result.stdout.strip().split(", ")
-                if len(parts) >= 3:
-                    return float(parts[0]), float(parts[1]), float(parts[2])
-        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-            pass
+                return utils.parse_nvidia_smi_csv(result.stdout)
+        except FileNotFoundError:
+            logger.debug("nvidia-smi not found")
+        except subprocess.TimeoutExpired:
+            logger.warning("nvidia-smi command timed out")
+        except Exception as e:
+            logger.warning("nvidia-smi failed", error=str(e))
         
         return None, None, None
-    
-    async def _get_rocm_memory(self) -> tuple:
-        """Get AMD GPU memory usage via rocm-smi."""
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["rocm-smi", "--showmeminfo", "vram"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                # Parse output like "GPU[0] : VRAM Total Memory (B): 17163091968"
-                # and "GPU[0] : VRAM Used Memory (B): 1234567890"
-                total_mb = None
-                used_mb = None
-                for line in result.stdout.split("\n"):
-                    if "VRAM Total" in line:
-                        try:
-                            bytes_val = int(line.split(":")[-1].strip())
-                            total_mb = bytes_val / (1024 * 1024)
-                        except ValueError:
-                            pass
-                    elif "VRAM Used" in line:
-                        try:
-                            bytes_val = int(line.split(":")[-1].strip())
-                            used_mb = bytes_val / (1024 * 1024)
-                        except ValueError:
-                            pass
-                return used_mb, total_mb
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-        return None, None
     
     async def get_container_logs(
         self,
@@ -536,49 +497,15 @@ class DockerAPIClient:
         stream: str,
     ) -> Optional[LogEntry]:
         """Parse a log line with timestamp."""
-        # Filter out known non-critical warnings from external libraries
-        # This warning comes from Go libraries parsing cgroup v2 "max" values
-        # Check both in raw line and in structured log format (msg=...)
-        if ("failed to parse CPU allowed micro secs" in line and 
-            ("parsing \"max\"" in line or "parsing \\\"max\\\"" in line)):
+        # Filter out known noise
+        if utils.should_filter_log_line(line):
             return None
         
-        # Docker timestamp format: 2024-01-15T10:30:00.123456789Z
-        timestamp_pattern = r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.?\d*Z?)\s+'
-        match = re.match(timestamp_pattern, line)
+        # Extract timestamp and message
+        timestamp, message = utils.extract_timestamp_and_message(line)
         
-        if match:
-            timestamp_str = match.group(1)
-            message = line[match.end():]
-            try:
-                # Handle various timestamp formats
-                ts = timestamp_str.rstrip('Z')
-                if '.' in ts:
-                    ts = ts[:26]  # Truncate nanoseconds
-                timestamp = datetime.fromisoformat(ts)
-            except:
-                timestamp = datetime.utcnow()
-        else:
-            timestamp = datetime.utcnow()
-            message = line
-        
-        # Detect log level
-        level = self._detect_log_level(message)
-        
-        # Detect HTTP status
-        http_status = self._detect_http_status(message)
-        
-        # Try to parse JSON
-        parsed_fields = {}
-        if message.strip().startswith("{"):
-            try:
-                parsed_fields = json.loads(message.strip())
-                if "level" in parsed_fields:
-                    level = str(parsed_fields["level"]).upper()
-                if "status" in parsed_fields and isinstance(parsed_fields["status"], int):
-                    http_status = parsed_fields["status"]
-            except:
-                pass
+        # Parse log level, HTTP status, and structured fields
+        level, http_status, parsed_fields = utils.parse_log_message(message)
         
         return LogEntry(
             timestamp=timestamp,
@@ -593,31 +520,6 @@ class DockerAPIClient:
             http_status=http_status,
             parsed_fields=parsed_fields,
         )
-    
-    def _detect_log_level(self, message: str) -> Optional[str]:
-        """Detect log level from message."""
-        msg_upper = message.upper()
-        levels = ["ERROR", "WARN", "WARNING", "INFO", "DEBUG", "CRITICAL", "FATAL"]
-        for level in levels:
-            if level in msg_upper:
-                return level.replace("WARNING", "WARN")
-        return None
-    
-    def _detect_http_status(self, message: str) -> Optional[int]:
-        """Detect HTTP status code from message."""
-        patterns = [
-            r'HTTP/\d\.\d["\s]+(\d{3})',
-            r'status[_\s]*(?:code)?[=:\s]+(\d{3})',
-            r'\[(\d{3})\]',
-            r'\s(\d{3})\s',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, message)
-            if match:
-                status = int(match.group(1))
-                if 100 <= status < 600:
-                    return status
-        return None
     
     async def execute_container_action(self, container_id: str, action: ContainerAction) -> Tuple[bool, str]:
         """Execute an action on a container."""
