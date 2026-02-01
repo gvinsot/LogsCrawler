@@ -69,8 +69,25 @@ class Agent:
             opensearch_hosts=self.config.opensearch.hosts,
         )
 
-        # Initialize OpenSearch indices
-        await self.opensearch.initialize()
+        # Initialize OpenSearch with retry (wait for DNS/network to be ready)
+        max_retries = 30
+        retry_delay = 2
+        for attempt in range(max_retries):
+            try:
+                await self.opensearch.initialize()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        "OpenSearch not ready, retrying...",
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        error=str(e),
+                    )
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error("Failed to connect to OpenSearch after retries", error=str(e))
+                    raise
 
         self._running = True
 
