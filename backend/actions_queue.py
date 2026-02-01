@@ -48,7 +48,7 @@ class Action(BaseModel):
 
 
 class AgentInfo(BaseModel):
-    """Agent information from heartbeat."""
+    """Agent information tracked via action polling."""
     agent_id: str
     last_seen: datetime
     status: str = "healthy"
@@ -97,6 +97,13 @@ class ActionsQueue:
         async with self._lock:
             pending = []
             now = datetime.utcnow()
+
+            # Update agent last_seen on every poll (replaces heartbeat)
+            self._agents[agent_id] = AgentInfo(
+                agent_id=agent_id,
+                last_seen=now,
+                status="healthy",
+            )
 
             for action in list(self._actions.values()):
                 if action.agent_id != agent_id:
@@ -173,15 +180,6 @@ class ActionsQueue:
 
         return self._actions.get(action_id)
 
-    async def update_agent_heartbeat(self, agent_id: str, status: str = "healthy"):
-        """Update agent heartbeat."""
-        async with self._lock:
-            self._agents[agent_id] = AgentInfo(
-                agent_id=agent_id,
-                last_seen=datetime.utcnow(),
-                status=status,
-            )
-
     async def get_agents(self) -> List[AgentInfo]:
         """Get all known agents."""
         return list(self._agents.values())
@@ -191,7 +189,7 @@ class ActionsQueue:
         return self._agents.get(agent_id)
 
     async def is_agent_online(self, agent_id: str, timeout_seconds: int = 30) -> bool:
-        """Check if an agent is online (recent heartbeat)."""
+        """Check if an agent is online (recent action poll)."""
         agent = self._agents.get(agent_id)
         if not agent:
             return False

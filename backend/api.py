@@ -877,19 +877,6 @@ async def post_agent_result(
     return {"status": "ok", "action_id": action_id}
 
 
-@app.post("/api/agent/heartbeat")
-async def agent_heartbeat(
-    agent_id: str = Query(..., description="Agent identifier"),
-    status: str = Query(default="healthy", description="Agent status"),
-):
-    """Receive heartbeat from an agent.
-
-    Agents send periodic heartbeats to indicate they are alive.
-    """
-    await actions_queue.update_agent_heartbeat(agent_id, status)
-    return {"status": "ok"}
-
-
 @app.get("/api/agents")
 async def get_agents():
     """Get list of known agents and their status."""

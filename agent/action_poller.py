@@ -85,24 +85,6 @@ class ActionPoller:
         except Exception as e:
             logger.error("Failed to send action result", action_id=action_id, error=str(e))
 
-    async def send_heartbeat(self):
-        """Send heartbeat to backend."""
-        session = await self._get_session()
-        url = f"{self.backend_url}/api/agent/heartbeat"
-
-        payload = {
-            "agent_id": self.agent_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "status": "healthy",
-        }
-
-        try:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5)) as response:
-                if response.status != 200:
-                    logger.debug("Heartbeat failed", status=response.status)
-        except Exception as e:
-            logger.debug("Heartbeat failed", error=str(e))
-
     async def execute_action(self, action: Dict[str, Any]) -> Tuple[bool, str]:
         """Execute an action and return result."""
         action_type = action.get("type")
@@ -260,8 +242,6 @@ class ActionPoller:
         self._running = True
         logger.info("Action poller started", agent_id=self.agent_id, interval=self.poll_interval)
 
-        heartbeat_counter = 0
-
         while self._running:
             try:
                 # Poll for actions
@@ -271,12 +251,6 @@ class ActionPoller:
                     action_id = action.get("id")
                     success, output = await self.execute_action(action)
                     await self.send_result(action_id, success, output)
-
-                # Send heartbeat every 10 iterations (20 seconds with 2s interval)
-                heartbeat_counter += 1
-                if heartbeat_counter >= 10:
-                    await self.send_heartbeat()
-                    heartbeat_counter = 0
 
             except Exception as e:
                 logger.error("Error in action poller loop", error=str(e))

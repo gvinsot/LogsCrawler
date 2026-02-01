@@ -47,7 +47,9 @@ services:
           memory: 1G
 
   # ==========================================================================
-  # LogsCrawler Backend - API Server (NO Docker access needed)
+  # LogsCrawler Backend - API Server
+  # Docker socket mounted read-only for Swarm API queries (list containers/services)
+  # Actual container operations (start/stop/exec) go through agents
   # ==========================================================================
   backend:
     image: registry.methodinfo.fr/logscrawler:latest
@@ -57,6 +59,8 @@ services:
     volumes:
       # SSH keys for git clone/build operations only
       - /root/.ssh:/gildas/.ssh:ro
+      # Docker socket for Swarm API queries (read-only)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - LOGSCRAWLER_DEBUG=false
 
@@ -82,8 +86,9 @@ services:
       - LOGSCRAWLER_GITHUB__SSH_HOST=server-b
       - LOGSCRAWLER_GITHUB__SSH_USER=root
 
-      # Empty hosts config - agents handle all collection
-      - LOGSCRAWLER_HOSTS=[]
+      # Swarm manager config - queries Swarm API to list all containers/services
+      # Collection is disabled (agents handle it), this is only for listing
+      - LOGSCRAWLER_HOSTS=[{"name":"swarm-manager","mode":"docker","docker_url":"unix:///var/run/docker.sock","swarm_manager":true,"swarm_autodiscover":true}]
     networks:
       - proxy
       - internal
