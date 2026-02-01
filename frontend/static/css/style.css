@@ -762,6 +762,7 @@ body {
     white-space: nowrap;
     min-width: 70px;
     justify-content: flex-end;
+    color: var(--status-success);
 }
 
 .stat-mini:last-child {

@@ -642,14 +642,14 @@ async function loadDashboard() {
         }
     }
     
-    // Load charts
+    // Load charts (with error handling for each)
     await Promise.all([
-        loadErrorsChart(),
-        loadHttpChart(),
-        loadCpuChart(),
-        loadGpuChart(),
-        loadMemoryChart(),
-        loadVramChart()
+        loadErrorsChart().catch(e => console.error('Failed to load errors chart:', e)),
+        loadHttpChart().catch(e => console.error('Failed to load http chart:', e)),
+        loadCpuChart().catch(e => console.error('Failed to load cpu chart:', e)),
+        loadGpuChart().catch(e => console.error('Failed to load gpu chart:', e)),
+        loadMemoryChart().catch(e => console.error('Failed to load memory chart:', e)),
+        loadVramChart().catch(e => console.error('Failed to load vram chart:', e))
     ]);
 }
 
@@ -761,7 +761,7 @@ function getHostColor(index) {
 
 async function loadCpuChart() {
     const data = await apiGet('/dashboard/cpu-timeseries-by-host?hours=24&interval=15m');
-    if (!data || !data.length) return;
+    if (!data || !data.length || !data[0].data) return;
     
     const ctx = document.getElementById('cpu-chart').getContext('2d');
     if (charts.cpu) charts.cpu.destroy();
@@ -789,8 +789,8 @@ async function loadCpuChart() {
 
 async function loadGpuChart() {
     const data = await apiGet('/dashboard/gpu-timeseries-by-host?hours=24&interval=15m');
-    if (!data || !data.length) {
-        // Hide chart if no GPU data
+    if (!data || !data.length || !data[0]?.data) {
+        // Show empty chart if no GPU data
         const ctx = document.getElementById('gpu-chart').getContext('2d');
         if (charts.gpu) charts.gpu.destroy();
         charts.gpu = new Chart(ctx, {
@@ -825,7 +825,7 @@ async function loadGpuChart() {
 
 async function loadMemoryChart() {
     const data = await apiGet('/dashboard/memory-timeseries-by-host?hours=24&interval=15m');
-    if (!data || !data.length) return;
+    if (!data || !data.length || !data[0].data) return;
     
     const ctx = document.getElementById('memory-chart').getContext('2d');
     if (charts.memory) charts.memory.destroy();
@@ -851,7 +851,7 @@ async function loadMemoryChart() {
 
 async function loadVramChart() {
     const data = await apiGet('/dashboard/vram-timeseries-by-host?hours=24&interval=15m');
-    if (!data || !data.length) {
+    if (!data || !data.length || !data[0]?.data) {
         // Hide chart if no VRAM data
         const ctx = document.getElementById('vram-chart').getContext('2d');
         if (charts.vram) charts.vram.destroy();
