@@ -139,6 +139,8 @@ services:
       dockerfile: Dockerfile.agent
     # Run as root to access Docker socket
     user: root
+    privileged: true
+    pid: host
     volumes:
       # Mount Docker socket for LOCAL container access only
       - /var/run/docker.sock:/var/run/docker.sock:ro
