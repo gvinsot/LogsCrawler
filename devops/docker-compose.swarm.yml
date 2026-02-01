@@ -59,8 +59,12 @@ services:
     # Run as root to access Docker socket for Swarm API queries
     user: root
     volumes:
-      # SSH keys for git clone/build operations only
-      - /root/.ssh:/gildas/.ssh:ro
+      # SSH keys for git clone operations (gildas's keys for GitHub access)
+      - /home/gildas/.ssh:/root/.ssh:ro
+      # Mount gildas's repos directory for git operations
+      - /home/gildas/repos:/home/gildas/repos
+      # Mount gildas's scripts directory for deployment
+      - /home/gildas/PrivateNetwork:/home/gildas/PrivateNetwork:ro
       # Docker socket for Swarm API queries (read-only)
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
@@ -81,12 +85,12 @@ services:
       - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS=7
 
       # GitHub integration for Stacks tab
+      # No SSH_HOST configured = commands run locally in container
+      # Repos are mounted from /home/gildas/repos on the host
       - LOGSCRAWLER_GITHUB__TOKEN=${LOGSCRAWLER_GITHUB__TOKEN}
       - LOGSCRAWLER_GITHUB__USERNAME=gvinsot
-      - LOGSCRAWLER_GITHUB__REPOS_PATH=~/repos
-      - LOGSCRAWLER_GITHUB__SCRIPTS_PATH=~/PrivateNetwork
-      - LOGSCRAWLER_GITHUB__SSH_HOST=server-b
-      - LOGSCRAWLER_GITHUB__SSH_USER=root
+      - LOGSCRAWLER_GITHUB__REPOS_PATH=/home/gildas/repos
+      - LOGSCRAWLER_GITHUB__SCRIPTS_PATH=/home/gildas/PrivateNetwork
 
       # Swarm manager config - queries Swarm API to list all containers/services
       # Collection is disabled (agents handle it), this is only for listing

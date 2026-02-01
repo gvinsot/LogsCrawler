@@ -8,6 +8,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    git \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
