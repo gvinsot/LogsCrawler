@@ -1,5 +1,6 @@
 """FastAPI REST API for LogsCrawler."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -36,10 +37,29 @@ async def lifespan(app: FastAPI):
     
     # Startup
     logger.info("Starting LogsCrawler API")
-    
+
     settings = load_config()
     opensearch = OpenSearchClient(settings.opensearch)
-    await opensearch.initialize()
+
+    # Initialize OpenSearch with retry (wait for DNS/service to be ready)
+    max_retries = 30
+    retry_delay = 2
+    for attempt in range(max_retries):
+        try:
+            await opensearch.initialize()
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    "OpenSearch not ready, retrying...",
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    error=str(e),
+                )
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error("Failed to connect to OpenSearch after retries", error=str(e))
+                raise
     
     collector = Collector(settings, opensearch)
     await collector.start()
