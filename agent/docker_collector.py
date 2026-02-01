@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 import structlog
 
+from . import utils
+
 logger = structlog.get_logger()
 
 
@@ -211,7 +213,7 @@ class DockerCollector:
 
         memory_percent = (memory_used_mb / memory_total_mb * 100) if memory_total_mb > 0 else 0
 
-        gpu_percent, gpu_mem_used, gpu_mem_total = self._get_gpu_metrics()
+        gpu_percent, gpu_mem_used, gpu_mem_total = utils.get_gpu_metrics()
 
         return {
             "host": self.host_name,
@@ -227,67 +229,6 @@ class DockerCollector:
             "gpu_memory_used_mb": gpu_mem_used,
             "gpu_memory_total_mb": gpu_mem_total,
         }
-
-    def _get_gpu_metrics(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        """Try to get GPU metrics using nvidia-smi or rocm-smi."""
-        # Try AMD GPU first
-        try:
-            result = subprocess.run(
-                ["rocm-smi", "--showuse", "--showmeminfo", "vram", "--csv"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            logger.debug("rocm-smi output", returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split("\n")
-                # Expected CSV format:
-                # device,GPU use (%),VRAM Total Memory (B),VRAM Total Used Memory (B)
-                # card0,0,1073741824,81498112
-                for line in lines:
-                    # Skip header line containing "device" or empty lines
-                    line_lower = line.lower()
-                    if "device" in line_lower or "gpu use" in line_lower or not line.strip():
-                        continue
-                    # Data lines start with "card0", "card1", etc.
-                    if line_lower.startswith("card"):
-                        parts = [p.strip() for p in line.split(",")]
-                        logger.debug("rocm-smi CSV parts", parts=parts)
-                        # parts[0]=device, parts[1]=GPU use (%), parts[2]=VRAM Total (B), parts[3]=VRAM Used (B)
-                        if len(parts) >= 4:
-                            try:
-                                gpu_use = float(parts[1].replace('%', '').strip())
-                                vram_total_bytes = float(parts[2].strip())
-                                vram_used_bytes = float(parts[3].strip())
-                                mem_total = vram_total_bytes / (1024 * 1024)  # Convert to MB
-                                mem_used = vram_used_bytes / (1024 * 1024)    # Convert to MB
-                                logger.info("AMD GPU metrics collected", gpu_percent=gpu_use, mem_used_mb=mem_used, mem_total_mb=mem_total)
-                                return gpu_use, mem_used, mem_total
-                            except (ValueError, IndexError) as e:
-                                logger.warning("Failed to parse rocm-smi CSV line", line=line, error=str(e))
-        except FileNotFoundError:
-            logger.debug("rocm-smi not found, trying nvidia-smi")
-        except subprocess.TimeoutExpired:
-            logger.warning("rocm-smi command timed out")
-        except Exception as e:
-            logger.warning("rocm-smi failed", error=str(e))
-
-        # Fallback to NVIDIA GPU
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                parts = result.stdout.strip().split(", ")
-                if len(parts) >= 3:
-                    return float(parts[0]), float(parts[1]), float(parts[2])
-        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-            pass
-
-        return None, None, None
 
     async def get_container_logs(
         self,
@@ -399,41 +340,15 @@ class DockerCollector:
         stream: str,
     ) -> Optional[Dict[str, Any]]:
         """Parse a log line with timestamp."""
-        # Filter out known non-critical warnings
-        if ("failed to parse CPU allowed micro secs" in line and
-            ("parsing \"max\"" in line or "parsing \\\"max\\\"" in line)):
+        # Filter out known noise
+        if utils.should_filter_log_line(line):
             return None
 
-        timestamp_pattern = r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.?\d*Z?)\s+'
-        match = re.match(timestamp_pattern, line)
-
-        if match:
-            timestamp_str = match.group(1)
-            message = line[match.end():]
-            try:
-                ts = timestamp_str.rstrip('Z')
-                if '.' in ts:
-                    ts = ts[:26]
-                timestamp = datetime.fromisoformat(ts)
-            except:
-                timestamp = datetime.utcnow()
-        else:
-            timestamp = datetime.utcnow()
-            message = line
-
-        level = self._detect_log_level(message)
-        http_status = self._detect_http_status(message)
-
-        parsed_fields = {}
-        if message.strip().startswith("{"):
-            try:
-                parsed_fields = json.loads(message.strip())
-                if "level" in parsed_fields:
-                    level = str(parsed_fields["level"]).upper()
-                if "status" in parsed_fields and isinstance(parsed_fields["status"], int):
-                    http_status = parsed_fields["status"]
-            except:
-                pass
+        # Extract timestamp and message
+        timestamp, message = utils.extract_timestamp_and_message(line)
+        
+        # Parse log level, HTTP status, and structured fields
+        level, http_status, parsed_fields = utils.parse_log_message(message)
 
         return {
             "timestamp": timestamp,
@@ -448,32 +363,6 @@ class DockerCollector:
             "http_status": http_status,
             "parsed_fields": parsed_fields,
         }
-
-    def _detect_log_level(self, message: str) -> Optional[str]:
-        """Detect log level from message."""
-        msg_upper = message.upper()
-        levels = ["ERROR", "WARN", "WARNING", "INFO", "DEBUG", "CRITICAL", "FATAL"]
-        for level in levels:
-            if level in msg_upper:
-                return level.replace("WARNING", "WARN")
-        return None
-
-    def _detect_http_status(self, message: str) -> Optional[int]:
-        """Detect HTTP status code from message."""
-        patterns = [
-            r'HTTP/\d\.\d["\s]+(\d{3})',
-            r'status[=:\s]+(\d{3})',
-            r'\s(\d{3})\s+\d+\s*$',
-            r'"status":\s*(\d{3})',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, message, re.IGNORECASE)
-            if match:
-                status = int(match.group(1))
-                if 100 <= status <= 599:
-                    return status
-        return None
 
     async def collect_all_logs(self, tail: int = 500) -> List[Dict[str, Any]]:
         """Collect logs from all running containers."""

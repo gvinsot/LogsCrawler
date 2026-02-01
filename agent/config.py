@@ -59,19 +59,21 @@ def load_agent_config() -> AgentSettings:
     """
     settings = AgentSettings()
 
-    # Agent ID
-    if os.environ.get("AGENT_AGENT_ID"):
-        settings.agent_id = os.environ["AGENT_AGENT_ID"]
+    # Helper function to load env vars with type conversion and error handling
+    def load_env(obj, attr: str, env_var: str, converter=str):
+        value = os.environ.get(env_var)
+        if value:
+            try:
+                setattr(obj, attr, converter(value))
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Failed to parse {env_var}: {e}")
 
-    # Backend URL
-    if os.environ.get("AGENT_BACKEND_URL"):
-        settings.backend_url = os.environ["AGENT_BACKEND_URL"]
+    # Agent settings
+    load_env(settings, "agent_id", "AGENT_AGENT_ID")
+    load_env(settings, "backend_url", "AGENT_BACKEND_URL")
+    load_env(settings, "docker_url", "AGENT_DOCKER_URL")
 
-    # Docker URL
-    if os.environ.get("AGENT_DOCKER_URL"):
-        settings.docker_url = os.environ["AGENT_DOCKER_URL"]
-
-    # OpenSearch
+    # OpenSearch - hosts needs special handling (JSON array or single string)
     opensearch_hosts = os.environ.get("AGENT_OPENSEARCH__HOSTS")
     if opensearch_hosts:
         try:
@@ -81,19 +83,14 @@ def load_agent_config() -> AgentSettings:
         except json.JSONDecodeError:
             settings.opensearch.hosts = [opensearch_hosts]
 
-    if os.environ.get("AGENT_OPENSEARCH__INDEX_PREFIX"):
-        settings.opensearch.index_prefix = os.environ["AGENT_OPENSEARCH__INDEX_PREFIX"]
-    if os.environ.get("AGENT_OPENSEARCH__USERNAME"):
-        settings.opensearch.username = os.environ["AGENT_OPENSEARCH__USERNAME"]
-    if os.environ.get("AGENT_OPENSEARCH__PASSWORD"):
-        settings.opensearch.password = os.environ["AGENT_OPENSEARCH__PASSWORD"]
+    load_env(settings.opensearch, "index_prefix", "AGENT_OPENSEARCH__INDEX_PREFIX")
+    load_env(settings.opensearch, "username", "AGENT_OPENSEARCH__USERNAME")
+    load_env(settings.opensearch, "password", "AGENT_OPENSEARCH__PASSWORD")
 
     # Intervals
-    if os.environ.get("AGENT_LOG_INTERVAL"):
-        settings.log_interval = int(os.environ["AGENT_LOG_INTERVAL"])
-    if os.environ.get("AGENT_METRICS_INTERVAL"):
-        settings.metrics_interval = int(os.environ["AGENT_METRICS_INTERVAL"])
-    if os.environ.get("AGENT_ACTION_POLL_INTERVAL"):
-        settings.action_poll_interval = int(os.environ["AGENT_ACTION_POLL_INTERVAL"])
+    load_env(settings, "log_interval", "AGENT_LOG_INTERVAL", int)
+    load_env(settings, "metrics_interval", "AGENT_METRICS_INTERVAL", int)
+    load_env(settings, "action_poll_interval", "AGENT_ACTION_POLL_INTERVAL", int)
+    load_env(settings, "log_lines_per_fetch", "AGENT_LOG_LINES_PER_FETCH", int)
 
     return settings
