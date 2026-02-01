@@ -87,7 +87,7 @@ services:
       # Repos are in /home/gildas/repos on the mounted home directory
       - LOGSCRAWLER_GITHUB__TOKEN=${LOGSCRAWLER_GITHUB__TOKEN}
       - LOGSCRAWLER_GITHUB__USERNAME=gvinsot
-      - LOGSCRAWLER_GITHUB__REPOS_PATH=/home/gildas/repos
+      - LOGSCRAWLER_GITHUB__REPOS_PATH=/home/gildas
       - LOGSCRAWLER_GITHUB__SCRIPTS_PATH=/home/gildas/PrivateNetwork
 
       # Swarm manager config - queries Swarm API to list all containers/services
