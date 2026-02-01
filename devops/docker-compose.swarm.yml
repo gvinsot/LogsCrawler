@@ -60,8 +60,8 @@ services:
     environment:
       - LOGSCRAWLER_DEBUG=false
 
-      # OpenSearch configuration
-      - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://opensearch:9200"]
+      # OpenSearch configuration (use stack-prefixed name)
+      - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://logscrawler_opensearch:9200"]
       - LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX=logscrawler
 
       # AI/Ollama configuration
@@ -139,11 +139,11 @@ services:
       # Agent ID: use node hostname (set by Swarm)
       - AGENT_AGENT_ID={{.Node.Hostname}}
 
-      # Backend URL for polling actions
-      - AGENT_BACKEND_URL=http://backend:8000
+      # Backend URL for polling actions (use stack-prefixed name)
+      - AGENT_BACKEND_URL=http://logscrawler_backend:8000
 
-      # OpenSearch configuration
-      - AGENT_OPENSEARCH__HOSTS=["http://opensearch:9200"]
+      # OpenSearch configuration (use stack-prefixed name)
+      - AGENT_OPENSEARCH__HOSTS=["http://logscrawler_opensearch:9200"]
       - AGENT_OPENSEARCH__INDEX_PREFIX=logscrawler
 
       # Docker socket path (inside container)
