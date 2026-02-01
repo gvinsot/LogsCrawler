@@ -3,7 +3,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install system dependencies for GPU monitoring and host command execution
+# nsenter is required to execute commands on the host system
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    procps \
+    util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY agent/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -15,6 +22,7 @@ ENV AGENT_AGENT_ID=agent-default
 ENV AGENT_BACKEND_URL=http://localhost:8000
 ENV AGENT_OPENSEARCH__HOSTS=["http://localhost:9200"]
 ENV AGENT_DOCKER_URL=unix:///var/run/docker.sock
+ENV AGENT_LOG_LEVEL=INFO
 
 # Run the agent
 CMD ["python", "-m", "agent.main"]

@@ -7,6 +7,8 @@ This agent runs on each host and:
 """
 
 import asyncio
+import logging
+import os
 import signal
 import sys
 
@@ -16,6 +18,13 @@ from .config import load_agent_config
 from .docker_collector import DockerCollector
 from .opensearch_writer import OpenSearchWriter
 from .action_poller import ActionPoller
+
+# Configure logging level from environment (default: INFO)
+log_level = os.environ.get("AGENT_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    format="%(message)s",
+    level=getattr(logging, log_level, logging.INFO),
+)
 
 # Configure structured logging
 structlog.configure(
@@ -168,11 +177,26 @@ class Agent:
                 for stats in container_stats:
                     await self.opensearch.index_container_stats(stats)
 
-                logger.debug(
-                    "Collected metrics",
-                    host_cpu=host_metrics.get("cpu_percent"),
-                    containers=len(container_stats),
-                )
+                # Log GPU status for visibility
+                gpu_percent = host_metrics.get("gpu_percent")
+                gpu_mem_used = host_metrics.get("gpu_memory_used_mb")
+                gpu_mem_total = host_metrics.get("gpu_memory_total_mb")
+                
+                if gpu_percent is not None or gpu_mem_used is not None:
+                    logger.info(
+                        "Collected metrics with GPU",
+                        host_cpu=host_metrics.get("cpu_percent"),
+                        gpu_percent=gpu_percent,
+                        gpu_mem_used_mb=round(gpu_mem_used, 2) if gpu_mem_used else None,
+                        gpu_mem_total_mb=round(gpu_mem_total, 2) if gpu_mem_total else None,
+                        containers=len(container_stats),
+                    )
+                else:
+                    logger.debug(
+                        "Collected metrics (no GPU data)",
+                        host_cpu=host_metrics.get("cpu_percent"),
+                        containers=len(container_stats),
+                    )
 
             except Exception as e:
                 logger.error("Metrics collection error", error=str(e))

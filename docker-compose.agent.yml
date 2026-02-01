@@ -18,6 +18,9 @@ services:
       dockerfile: Dockerfile.agent
     container_name: logscrawler-agent
     restart: unless-stopped
+    # Required for executing commands on host (GPU monitoring)
+    privileged: true
+    pid: host
     volumes:
       # Mount Docker socket for container access
       - /var/run/docker.sock:/var/run/docker.sock:ro
