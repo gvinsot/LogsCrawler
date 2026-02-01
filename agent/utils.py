@@ -244,11 +244,7 @@ def parse_log_message(message: str) -> Tuple[Optional[str], Optional[int], Dict[
 # ============== GPU Metrics ==============
 
 def run_host_command(cmd: List[str], timeout: int = 5) -> subprocess.CompletedProcess:
-    """Execute a command on the host system.
-    
-    When running inside a container with pid=host and privileged mode,
-    uses nsenter to execute commands in the host's namespace.
-    When running directly on the host, executes the command normally.
+    """Execute a command with timeout.
     
     Args:
         cmd: Command and arguments as a list
@@ -256,26 +252,12 @@ def run_host_command(cmd: List[str], timeout: int = 5) -> subprocess.CompletedPr
         
     Returns:
         CompletedProcess with stdout, stderr, and returncode
-    """
-    import os
-    
-    # Check if we're running in a container by looking for /.dockerenv
-    in_container = os.path.exists("/.dockerenv")
-    
-    if in_container:
-        # Use nsenter to run command in host's namespace
-        # -t 1: target PID 1 (init process on host)
-        # -m: enter mount namespace
-        # -u: enter UTS namespace  
-        # -i: enter IPC namespace
-        # -n: enter network namespace
-        full_cmd = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--"] + cmd
-        logger.debug("Running host command via nsenter", cmd=cmd)
-    else:
-        full_cmd = cmd
         
+    Raises:
+        FileNotFoundError: If the command binary is not found
+    """
     return subprocess.run(
-        full_cmd,
+        cmd,
         capture_output=True,
         text=True,
         timeout=timeout

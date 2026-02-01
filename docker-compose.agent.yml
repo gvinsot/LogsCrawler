@@ -18,13 +18,19 @@ services:
       dockerfile: Dockerfile.agent
     container_name: logscrawler-agent
     restart: unless-stopped
-    # Required for executing commands on host (GPU monitoring)
+    # Privileged mode for GPU device access
     privileged: true
-    pid: host
     volumes:
       # Mount Docker socket for container access
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # System and GPU device access for monitoring
+      - /sys:/sys:ro
+      - /dev/dri:/dev/dri:ro
+      - /dev/kfd:/dev/kfd:ro
     environment:
+      # AMD GPU visibility
+      - AMD_VISIBLE_DEVICES=all
+      
       # Unique agent ID (use hostname or custom name)
       - AGENT_AGENT_ID=${AGENT_ID:-$(hostname)}
 
