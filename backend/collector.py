@@ -227,6 +227,11 @@ class Collector:
                 # Get the timestamp of the last log we received for this container
                 last_timestamp = self._last_log_timestamp.get(container_key)
                 
+                # Extract task_id for Swarm containers (needed for remote log fetching)
+                task_id = None
+                if container.labels:
+                    task_id = container.labels.get("com.docker.swarm.task.id")
+                
                 # Fetch logs:
                 # - If we have a last timestamp: get ALL logs since that timestamp (no tail limit)
                 # - If first fetch: use tail to limit initial load
@@ -237,6 +242,7 @@ class Collector:
                     tail=self.settings.collector.log_lines_per_fetch if last_timestamp is None else None,
                     compose_project=container.compose_project,
                     compose_service=container.compose_service,
+                    task_id=task_id,
                 )
                 
                 if logs:
@@ -410,6 +416,36 @@ class Collector:
         # Fall back to direct client
         return self.clients.get(host)
 
+    async def _find_task_id_for_container(self, container_id: str) -> Optional[str]:
+        """Find task ID for a container by querying Swarm tasks API.
+
+        This is a fallback when the container is not found in the cache.
+        It queries the Swarm manager directly to find the task ID.
+        """
+        if not self._swarm_routing_enabled or not self._swarm_manager_host:
+            return None
+
+        manager_client = self.clients.get(self._swarm_manager_host)
+        if not manager_client or not hasattr(manager_client, 'get_swarm_tasks'):
+            return None
+
+        try:
+            tasks = await manager_client.get_swarm_tasks()
+            for task in tasks:
+                task_container_id = task.get("container_id", "")
+                if task_container_id and (
+                    task_container_id.startswith(container_id) or
+                    container_id.startswith(task_container_id)
+                ):
+                    logger.debug("Found task_id via Swarm API fallback",
+                                container_id=container_id, task_id=task["id"])
+                    return task["id"]
+        except Exception as e:
+            logger.error("Failed to find task ID via Swarm API",
+                        container_id=container_id, error=str(e))
+
+        return None
+
     async def _find_container(self, host: str, container_id: str, refresh_on_miss: bool = True) -> Optional[ContainerInfo]:
         """Find a container by ID, with prefix matching and optional cache refresh.
         
@@ -521,11 +557,16 @@ class Collector:
             return []
 
         container = await self._find_container(host, container_id)
-        
+
         # Extract task_id from labels if this is a Swarm container
         task_id = None
         if container and container.labels:
             task_id = container.labels.get("com.docker.swarm.task.id")
+
+        # Fallback: if container not found in cache, try to find task_id directly
+        # from Swarm API. This handles cases where the cache is stale or empty.
+        if not task_id and self._swarm_routing_enabled:
+            task_id = await self._find_task_id_for_container(container_id)
 
         logs = await client.get_container_logs(
             container_id=container.id if container else container_id,

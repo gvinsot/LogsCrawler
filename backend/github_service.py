@@ -218,7 +218,15 @@ class StackDeployer:
             # First, try to use SSH if configured (for executing on host from container)
             ssh_client = await self._get_ssh_client()
             if ssh_client:
-                return await ssh_client.run_shell_command(command)
+                try:
+                    return await ssh_client.run_shell_command(command)
+                except OSError as e:
+                    # Handle DNS/network resolution errors
+                    if e.errno == -2 or "Name or service not known" in str(e):
+                        error_msg = f"SSH host '{self.config.ssh_host}' cannot be resolved. Check LOGSCRAWLER_GITHUB__SSH_HOST configuration."
+                        logger.error("SSH host resolution failed", host=self.config.ssh_host, error=str(e))
+                        return False, error_msg
+                    raise
             
             # Fallback: use the host client if available
             if self.host_client and hasattr(self.host_client, 'run_shell_command'):
