@@ -879,6 +879,39 @@ async def deploy_stack(
     return result
 
 
+@app.get("/api/stacks/{repo_name}/env")
+async def get_stack_env(repo_name: str):
+    """Get the .env file content for a stack."""
+    if not github_service.is_configured():
+        raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    deployer = StackDeployer(settings.github, None)
+    success, content = await deployer.get_env_file(repo_name)
+    
+    if not success:
+        raise HTTPException(status_code=500, detail=content)
+    
+    return {"content": content, "repo": repo_name}
+
+
+@app.put("/api/stacks/{repo_name}/env")
+async def save_stack_env(repo_name: str, request: Request):
+    """Save the .env file content for a stack."""
+    if not github_service.is_configured():
+        raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    body = await request.json()
+    content = body.get("content", "")
+    
+    deployer = StackDeployer(settings.github, None)
+    success, message = await deployer.save_env_file(repo_name, content)
+    
+    if not success:
+        raise HTTPException(status_code=500, detail=message)
+    
+    return {"success": True, "message": message, "repo": repo_name}
+
+
 # ============== Agent API ==============
 # These endpoints are used by agents running on remote hosts
 

@@ -160,6 +160,24 @@ class StackDeployer:
             await self._ssh_client.close()
             self._ssh_client = None
 
+    async def _ensure_git_configured(self) -> None:
+        """Ensure git is configured with user name and email."""
+        if self.config.username:
+            await self._run_command(f"git config --global user.name '{self.config.username}'")
+        if self.config.useremail:
+            await self._run_command(f"git config --global user.email '{self.config.useremail}'")
+
+    async def _ensure_docker_login(self) -> None:
+        """Ensure docker is logged in to the registry."""
+        if self.config.registry_url and self.config.registry_username and self.config.registry_password:
+            # Use echo to pipe password to avoid it showing in command history
+            login_cmd = f"echo '{self.config.registry_password}' | docker login {self.config.registry_url} -u '{self.config.registry_username}' --password-stdin"
+            success, output = await self._run_command(login_cmd)
+            if success:
+                logger.info("Docker login successful", registry=self.config.registry_url)
+            else:
+                logger.warning("Docker login failed", registry=self.config.registry_url, error=output)
+
     async def _ensure_repo_cloned(self, repo_name: str, ssh_url: str) -> tuple[bool, str]:
         """Ensure the repository is cloned and updated on the host.
 
@@ -173,6 +191,9 @@ class StackDeployer:
         Returns:
             Tuple of (success, message)
         """
+        # Ensure git is configured before any git operations
+        await self._ensure_git_configured()
+        
         repos_path = self.config.repos_path
         repo_path = f"{repos_path}/{repo_name}"
 
@@ -279,6 +300,9 @@ class StackDeployer:
         }
 
         try:
+            # Ensure docker is logged in to registry
+            await self._ensure_docker_login()
+            
             # Ensure repo is cloned
             clone_success, clone_msg = await self._ensure_repo_cloned(repo_name, ssh_url)
             if not clone_success:
@@ -354,3 +378,64 @@ class StackDeployer:
         result["duration_seconds"] = (end_time - start_time).total_seconds()
 
         return result
+
+    async def get_env_file(self, repo_name: str) -> tuple[bool, str]:
+        """Get the content of the .env file for a repository.
+
+        Args:
+            repo_name: Name of the repository
+
+        Returns:
+            Tuple of (success, content_or_error)
+        """
+        repos_path = self.config.repos_path
+        env_path = f"{repos_path}/{repo_name}/devops/.env"
+
+        # Check if file exists
+        check_cmd = f"test -f {env_path} && echo 'exists' || echo 'missing'"
+        success, output = await self._run_command(check_cmd)
+
+        if not success:
+            return False, f"Failed to check .env file: {output}"
+
+        if "missing" in output:
+            return True, ""  # Return empty content if file doesn't exist
+
+        # Read the file content
+        read_cmd = f"cat {env_path}"
+        success, output = await self._run_command(read_cmd)
+
+        if not success:
+            return False, f"Failed to read .env file: {output}"
+
+        return True, output
+
+    async def save_env_file(self, repo_name: str, content: str) -> tuple[bool, str]:
+        """Save the content of the .env file for a repository.
+
+        Args:
+            repo_name: Name of the repository
+            content: The content to write to the .env file
+
+        Returns:
+            Tuple of (success, message)
+        """
+        repos_path = self.config.repos_path
+        env_path = f"{repos_path}/{repo_name}/devops/.env"
+        devops_dir = f"{repos_path}/{repo_name}/devops"
+
+        # Ensure devops directory exists
+        mkdir_cmd = f"mkdir -p {devops_dir}"
+        await self._run_command(mkdir_cmd)
+
+        # Write the content using a heredoc to handle special characters
+        # Escape single quotes in content
+        escaped_content = content.replace("'", "'\\''")
+        write_cmd = f"cat > {env_path} << 'ENVEOF'\n{content}\nENVEOF"
+
+        success, output = await self._run_command(write_cmd)
+
+        if not success:
+            return False, f"Failed to write .env file: {output}"
+
+        return True, "File saved successfully"

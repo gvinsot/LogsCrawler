@@ -87,10 +87,15 @@ services:
       # SSH to host as gildas user for build/deploy (gildas has docker/git credentials)
       - LOGSCRAWLER_GITHUB__TOKEN=${LOGSCRAWLER_GITHUB__TOKEN}
       - LOGSCRAWLER_GITHUB__USERNAME=gvinsot
+      - LOGSCRAWLER_GITHUB__USEREMAIL=gildas.music@gmail.com
       - LOGSCRAWLER_GITHUB__REPOS_PATH=/home/gildas
       - LOGSCRAWLER_GITHUB__SCRIPTS_PATH=/home/gildas/PrivateNetwork
       - LOGSCRAWLER_GITHUB__SSH_HOST=dockerhost
       - LOGSCRAWLER_GITHUB__SSH_USER=gildas
+      # Docker registry for build/push operations
+      - LOGSCRAWLER_GITHUB__REGISTRY_URL=registry.methodinfo.fr
+      - LOGSCRAWLER_GITHUB__REGISTRY_USERNAME=${LOGSCRAWLER_REGISTRY_USERNAME}
+      - LOGSCRAWLER_GITHUB__REGISTRY_PASSWORD=${LOGSCRAWLER_REGISTRY_PASSWORD}
 
       # Swarm manager config - queries Swarm API to list all containers/services
       # Collection is disabled (agents handle it), this is only for listing

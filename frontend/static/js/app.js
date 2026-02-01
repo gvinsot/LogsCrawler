@@ -612,6 +612,42 @@ async function apiPost(endpoint, data) {
     }
 }
 
+async function apiPut(endpoint, data) {
+    try {
+        const response = await fetch(`${API_BASE}${endpoint}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+        return await response.json();
+    } catch (error) {
+        console.error(`API Error (${endpoint}):`, error);
+        throw error;
+    }
+}
+
+function showNotification(type, message) {
+    // Remove any existing notification
+    const existing = document.querySelector('.notification');
+    if (existing) existing.remove();
+    
+    const notification = document.createElement('div');
+    notification.className = `notification notification-${type}`;
+    notification.innerHTML = `
+        <span class="notification-message">${escapeHtml(message)}</span>
+        <button class="notification-close" onclick="this.parentElement.remove()">&times;</button>
+    `;
+    
+    document.body.appendChild(notification);
+    
+    // Auto-remove after 5 seconds
+    setTimeout(() => notification.remove(), 5000);
+}
+
 // ============== Dashboard ==============
 
 async function loadDashboard() {
@@ -1975,6 +2011,13 @@ function renderStacksList() {
                 </div>
             </div>
             <div class="stack-actions">
+                <button class="btn btn-ghost" onclick="editStackEnv('${escapeHtml(repo.name)}')" title="Edit .env file">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                    Env
+                </button>
                 <button class="btn btn-secondary" onclick="buildStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="build-${escapeHtml(repo.name)}">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
@@ -2100,6 +2143,70 @@ function showStackOutput(action, repoName, result) {
 
 function closeStackOutputModal() {
     document.getElementById('stack-output-modal').classList.remove('active');
+}
+
+// ============== Stack Env Editor ==============
+
+async function editStackEnv(repoName) {
+    const modal = document.getElementById('stack-env-modal');
+    const title = document.getElementById('stack-env-title');
+    const textarea = document.getElementById('stack-env-content');
+    const saveBtn = document.getElementById('stack-env-save');
+    
+    title.textContent = `Edit .env: ${repoName}`;
+    textarea.value = 'Loading...';
+    textarea.disabled = true;
+    saveBtn.dataset.repo = repoName;
+    
+    modal.classList.add('active');
+    
+    try {
+        const data = await apiGet(`/stacks/${encodeURIComponent(repoName)}/env`);
+        textarea.value = data.content || '';
+        textarea.disabled = false;
+        textarea.focus();
+    } catch (e) {
+        textarea.value = `Error loading .env file: ${e.message || 'Unknown error'}`;
+    }
+}
+
+async function saveStackEnv() {
+    const modal = document.getElementById('stack-env-modal');
+    const textarea = document.getElementById('stack-env-content');
+    const saveBtn = document.getElementById('stack-env-save');
+    const repoName = saveBtn.dataset.repo;
+    
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = '<span class="btn-loading"></span> Saving...';
+    
+    try {
+        const result = await apiPut(`/stacks/${encodeURIComponent(repoName)}/env`, {
+            content: textarea.value
+        });
+        
+        if (result.success) {
+            showNotification('success', 'File saved successfully');
+            closeStackEnvModal();
+        } else {
+            showNotification('error', result.message || 'Failed to save file');
+        }
+    } catch (e) {
+        showNotification('error', e.message || 'Failed to save file');
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                <polyline points="17 21 17 13 7 13 7 21"/>
+                <polyline points="7 3 7 8 15 8"/>
+            </svg>
+            Save
+        `;
+    }
+}
+
+function closeStackEnvModal() {
+    document.getElementById('stack-env-modal').classList.remove('active');
 }
 
 function formatRelativeTime(isoString) {

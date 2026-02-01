@@ -81,6 +81,7 @@ class GitHubConfig(BaseModel):
     """GitHub integration configuration."""
     token: Optional[str] = None
     username: Optional[str] = None
+    useremail: Optional[str] = None
     # Path where repos are cloned on the host
     repos_path: str = "~/repos"
     # Path to deployment scripts
@@ -91,6 +92,10 @@ class GitHubConfig(BaseModel):
     ssh_user: str = "root"
     ssh_port: int = 22
     ssh_key_path: Optional[str] = None
+    # Docker registry configuration for push operations
+    registry_url: Optional[str] = None
+    registry_username: Optional[str] = None
+    registry_password: Optional[str] = None
 
 
 class Settings(BaseSettings):
@@ -198,12 +203,16 @@ def load_config() -> Settings:
     # GitHub settings
     load_env(settings.github, "token", "LOGSCRAWLER_GITHUB__TOKEN")
     load_env(settings.github, "username", "LOGSCRAWLER_GITHUB__USERNAME")
+    load_env(settings.github, "useremail", "LOGSCRAWLER_GITHUB__USEREMAIL")
     load_env(settings.github, "repos_path", "LOGSCRAWLER_GITHUB__REPOS_PATH")
     load_env(settings.github, "scripts_path", "LOGSCRAWLER_GITHUB__SCRIPTS_PATH")
     load_env(settings.github, "ssh_host", "LOGSCRAWLER_GITHUB__SSH_HOST")
     load_env(settings.github, "ssh_user", "LOGSCRAWLER_GITHUB__SSH_USER")
     load_env(settings.github, "ssh_port", "LOGSCRAWLER_GITHUB__SSH_PORT", int)
     load_env(settings.github, "ssh_key_path", "LOGSCRAWLER_GITHUB__SSH_KEY_PATH")
+    load_env(settings.github, "registry_url", "LOGSCRAWLER_GITHUB__REGISTRY_URL")
+    load_env(settings.github, "registry_username", "LOGSCRAWLER_GITHUB__REGISTRY_USERNAME")
+    load_env(settings.github, "registry_password", "LOGSCRAWLER_GITHUB__REGISTRY_PASSWORD")
 
     return settings
 

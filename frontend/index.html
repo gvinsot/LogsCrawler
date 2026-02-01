@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css?v=10">
+    <link rel="stylesheet" href="/static/css/style.css?v=11">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -397,6 +397,31 @@
                         </div>
                         <div class="modal-footer">
                             <button class="btn btn-secondary" onclick="closeStackOutputModal()">Close</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Env editor modal -->
+                <div id="stack-env-modal" class="modal">
+                    <div class="modal-content modal-lg">
+                        <div class="modal-header">
+                            <h2 id="stack-env-title">Edit .env</h2>
+                            <button class="modal-close" onclick="closeStackEnvModal()">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="env-help-text">Edit the environment variables for this stack. Each line should be in KEY=VALUE format.</p>
+                            <textarea id="stack-env-content" class="env-editor" placeholder="# Environment variables&#10;KEY=value&#10;ANOTHER_KEY=another_value" spellcheck="false"></textarea>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary" onclick="closeStackEnvModal()">Cancel</button>
+                            <button class="btn btn-primary" id="stack-env-save" onclick="saveStackEnv()">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                                    <polyline points="17 21 17 13 7 13 7 21"/>
+                                    <polyline points="7 3 7 8 15 8"/>
+                                </svg>
+                                Save
+                            </button>
                         </div>
                     </div>
                 </div>
