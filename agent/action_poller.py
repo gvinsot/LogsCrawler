@@ -3,7 +3,7 @@
 import asyncio
 import subprocess
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 import structlog
@@ -286,7 +286,3 @@ class ActionPoller:
     def stop(self):
         """Stop the polling loop."""
         self._running = False
-
-
-# Type hint fix
-from typing import Tuple
