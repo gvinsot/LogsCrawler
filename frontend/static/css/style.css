@@ -1984,11 +1984,12 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 16px 20px;
+    padding: 8px 12px;
     background: var(--bg-card);
     border: 1px solid var(--border-color);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     transition: var(--transition);
+    gap: 12px;
 }
 
 .stack-item:hover {
@@ -2004,12 +2005,12 @@ body {
 .stack-name {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 4px;
+    gap: 6px;
+    margin-bottom: 2px;
 }
 
 .stack-name a {
-    font-size: 1.1rem;
+    font-size: 0.95rem;
     font-weight: 600;
     color: var(--text-primary);
     text-decoration: none;
@@ -2037,10 +2038,16 @@ body {
     color: var(--text-secondary);
 }
 
+.stack-badge.deployed {
+    background: rgba(34, 197, 94, 0.2);
+    color: var(--status-success);
+    font-family: var(--font-mono);
+}
+
 .stack-description {
-    font-size: 0.875rem;
+    font-size: 0.8rem;
     color: var(--text-secondary);
-    margin-bottom: 8px;
+    margin-bottom: 4px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2048,8 +2055,8 @@ body {
 
 .stack-meta {
     display: flex;
-    gap: 16px;
-    font-size: 0.75rem;
+    gap: 12px;
+    font-size: 0.7rem;
     color: var(--text-muted);
 }
 
@@ -2061,7 +2068,7 @@ body {
 
 .stack-actions {
     display: flex;
-    gap: 8px;
+    gap: 4px;
     flex-shrink: 0;
 }
 

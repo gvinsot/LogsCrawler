@@ -1925,6 +1925,7 @@ function exportLogs() {
 // ============== Stacks (GitHub Integration) ==============
 
 let stacksRepos = [];
+let stacksDeployedTags = {};
 
 async function loadStacks() {
     // Check GitHub status
@@ -1962,13 +1963,19 @@ async function refreshStacks() {
     const listEl = document.getElementById('stacks-list');
     listEl.innerHTML = '<div class="loading-placeholder">Loading starred repositories...</div>';
     
-    const data = await apiGet('/stacks/repos');
-    if (!data || !data.repos) {
+    // Load repos and deployed tags in parallel
+    const [reposData, tagsData] = await Promise.all([
+        apiGet('/stacks/repos'),
+        apiGet('/stacks/deployed-tags')
+    ]);
+    
+    if (!reposData || !reposData.repos) {
         listEl.innerHTML = '<div class="error-placeholder">Failed to load repositories</div>';
         return;
     }
     
-    stacksRepos = data.repos;
+    stacksRepos = reposData.repos;
+    stacksDeployedTags = (tagsData && tagsData.tags) ? tagsData.tags : {};
     
     if (stacksRepos.length === 0) {
         listEl.innerHTML = '<div class="empty-placeholder">No starred repositories found</div>';
@@ -1982,13 +1989,16 @@ function renderStacksList() {
     const listEl = document.getElementById('stacks-list');
     const version = document.getElementById('stack-version')?.value || '1.0';
     
-    listEl.innerHTML = stacksRepos.map(repo => `
+    listEl.innerHTML = stacksRepos.map(repo => {
+        const deployedTag = stacksDeployedTags[repo.name];
+        return `
         <div class="stack-item" data-repo="${escapeHtml(repo.name)}">
             <div class="stack-info">
                 <div class="stack-name">
                     <a href="${escapeHtml(repo.html_url)}" target="_blank" rel="noopener">
                         ${escapeHtml(repo.name)}
                     </a>
+                    ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : ''}
                     ${repo.private ? '<span class="stack-badge private">Private</span>' : ''}
                     ${repo.language ? `<span class="stack-badge lang">${escapeHtml(repo.language)}</span>` : ''}
                 </div>
@@ -2038,7 +2048,8 @@ function renderStacksList() {
                 </button>
             </div>
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 async function buildStack(repoName, sshUrl) {

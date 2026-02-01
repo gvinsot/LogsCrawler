@@ -912,7 +912,29 @@ async def save_stack_env(repo_name: str, request: Request):
     return {"success": True, "message": message, "repo": repo_name}
 
 
-# ============== Agent API ==============
+@app.get("/api/stacks/deployed-tags")
+async def get_stacks_deployed_tags():
+    """Get deployed image tags for all stacks from Docker Swarm."""
+    if not github_service.is_configured():
+        raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    # Get list of starred repos
+    repos = await github_service.get_starred_repos()
+    
+    deployer = StackDeployer(settings.github, None)
+    tags = {}
+    
+    # Query tag for each repo
+    for repo in repos:
+        repo_name = repo["name"]
+        success, tag = await deployer.get_deployed_stack_tag(repo_name)
+        if success and tag:
+            tags[repo_name] = tag
+    
+    return {"tags": tags}
+
+
+# ============== Agent API ==
 # These endpoints are used by agents running on remote hosts
 
 @app.get("/api/agent/actions")

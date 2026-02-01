@@ -481,3 +481,31 @@ class StackDeployer:
             return False, f"Failed to write .env file: {output}"
 
         return True, "File saved successfully"
+
+    async def get_deployed_stack_tag(self, repo_name: str) -> tuple[bool, Optional[str]]:
+        """Get the deployed image tag for a stack from Docker Swarm.
+
+        Args:
+            repo_name: Name of the repository (stack name = repo_name.lower())
+
+        Returns:
+            Tuple of (success, tag_or_none)
+        """
+        stack_name = repo_name.lower()
+
+        # Get the image of the first service in the stack
+        # Format: docker service ls --filter name=stackname_ --format '{{.Image}}' | head -1
+        cmd = f"docker service ls --filter 'name={stack_name}_' --format '{{{{.Image}}}}' | head -1"
+        success, output = await self._run_command(cmd)
+
+        if not success or not output.strip():
+            return False, None
+
+        image = output.strip()
+        # Extract tag from image (e.g., "registry.example.com/app:1.2.3" -> "1.2.3")
+        if ':' in image:
+            tag = image.split(':')[-1]
+        else:
+            tag = "latest"
+
+        return True, tag
