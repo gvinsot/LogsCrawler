@@ -61,7 +61,7 @@ services:
       - LOGSCRAWLER_DEBUG=false
 
       # OpenSearch configuration (use stack-prefixed name)
-      - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://logscrawler_opensearch:9200"]
+      - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://opensearch:9200"]
       - LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX=logscrawler
 
       # AI/Ollama configuration
@@ -188,5 +188,4 @@ networks:
     external: true
   internal:
     driver: overlay
-    internal: true
     attachable: true
