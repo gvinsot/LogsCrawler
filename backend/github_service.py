@@ -182,7 +182,8 @@ class StackDeployer:
         """Ensure the repository is cloned and updated on the host.
 
         If the repo exists, it will be updated with git fetch + reset to match remote.
-        Local .env and config files are preserved (only tracked files are reset).
+        If a directory exists but is not a git repo, it will be backed up, cloned,
+        and config files (.env, etc.) will be restored.
 
         Args:
             repo_name: Name of the repository
@@ -196,16 +197,21 @@ class StackDeployer:
         
         repos_path = self.config.repos_path
         repo_path = f"{repos_path}/{repo_name}"
+        backup_path = f"{repo_path}.backup.{int(__import__('time').time())}"
 
-        # Check if repo exists
-        check_cmd = f"test -d {repo_path}/.git && echo 'exists' || echo 'missing'"
-        success, output = await self._run_command(check_cmd)
+        # Check if directory exists
+        check_dir_cmd = f"test -d {repo_path} && echo 'dir_exists' || echo 'dir_missing'"
+        success, dir_output = await self._run_command(check_dir_cmd)
 
         if not success:
-            return False, f"Failed to check repo existence: {output}"
+            return False, f"Failed to check directory existence: {dir_output}"
 
-        if "missing" in output:
-            # Clone the repo
+        # Check if it's a valid git repo
+        check_git_cmd = f"test -d {repo_path}/.git && echo 'is_git' || echo 'not_git'"
+        success, git_output = await self._run_command(check_git_cmd)
+
+        if "dir_missing" in dir_output:
+            # Directory doesn't exist - simple clone
             logger.info("Cloning repository", repo=repo_name, path=repo_path)
             clone_cmd = f"mkdir -p {repos_path} && cd {repos_path} && git clone {ssh_url}"
             success, output = await self._run_command(clone_cmd)
@@ -213,9 +219,45 @@ class StackDeployer:
             if not success:
                 return False, f"Failed to clone repository: {output}"
 
-            return True, f"Repository cloned successfully"
+            return True, "Repository cloned successfully"
+
+        elif "not_git" in git_output:
+            # Directory exists but is not a git repo - backup, clone, restore configs
+            logger.info("Directory exists but not a git repo, backing up and cloning", 
+                       repo=repo_name, backup=backup_path)
+            
+            # 1. Rename existing directory to backup
+            rename_cmd = f"mv {repo_path} {backup_path}"
+            success, output = await self._run_command(rename_cmd)
+            if not success:
+                return False, f"Failed to backup existing directory: {output}"
+            
+            # 2. Clone the repo
+            clone_cmd = f"cd {repos_path} && git clone {ssh_url}"
+            success, output = await self._run_command(clone_cmd)
+            if not success:
+                # Restore backup if clone failed
+                await self._run_command(f"mv {backup_path} {repo_path}")
+                return False, f"Failed to clone repository: {output}"
+            
+            # 3. Copy config files from backup (devops/.env, .env, etc.)
+            restore_cmd = f"""
+                if [ -f {backup_path}/devops/.env ]; then
+                    mkdir -p {repo_path}/devops && cp {backup_path}/devops/.env {repo_path}/devops/.env
+                fi
+                if [ -f {backup_path}/.env ]; then
+                    cp {backup_path}/.env {repo_path}/.env
+                fi
+            """
+            await self._run_command(restore_cmd)
+            
+            # 4. Remove backup
+            await self._run_command(f"rm -rf {backup_path}")
+            
+            return True, "Repository cloned (config files restored from backup)"
+
         else:
-            # Repository exists - add to safe.directory and force update
+            # Valid git repository - add to safe.directory and force update
             logger.info("Updating repository", repo=repo_name)
             
             # Add repo to git safe.directory to avoid ownership issues
