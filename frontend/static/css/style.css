@@ -395,7 +395,8 @@ body {
 /* Dashboard View */
 #dashboard-view.active {
     flex-direction: column;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 #dashboard-view .view-header {
@@ -410,10 +411,10 @@ body {
 .charts-grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    grid-template-rows: 1fr 1fr;
+    grid-template-rows: repeat(3, minmax(280px, 1fr));
     gap: 16px;
-    flex: 1;
-    min-height: 0;
+    flex-shrink: 0;
+    padding-bottom: 16px;
 }
 
 .chart-card {
@@ -423,7 +424,7 @@ body {
     padding: 16px;
     display: flex;
     flex-direction: column;
-    min-height: 0;
+    min-height: 250px;
     overflow: hidden;
 }
 
@@ -437,9 +438,9 @@ body {
 
 .chart-card canvas {
     flex: 1;
-    min-height: 0;
+    min-height: 180px;
     width: 100% !important;
-    height: auto !important;
+    max-height: 100%;
 }
 
 /* Containers View */
