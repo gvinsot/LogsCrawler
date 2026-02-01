@@ -238,21 +238,39 @@ class DockerCollector:
                 text=True,
                 timeout=5
             )
+            logger.debug("rocm-smi output", returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
             if result.returncode == 0 and result.stdout.strip():
                 lines = result.stdout.strip().split("\n")
+                # Expected CSV format:
+                # device,GPU use (%),VRAM Total Memory (B),VRAM Total Used Memory (B)
+                # card0,0,1073741824,81498112
                 for line in lines:
-                    if line.startswith("card") or line.startswith("GPU"):
+                    # Skip header line containing "device" or empty lines
+                    line_lower = line.lower()
+                    if "device" in line_lower or "gpu use" in line_lower or not line.strip():
                         continue
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 2:
-                        try:
-                            gpu_use = float(parts[1].replace('%', '').strip())
-                            mem_used, mem_total = self._get_rocm_memory()
-                            return gpu_use, mem_used, mem_total
-                        except (ValueError, IndexError):
-                            pass
-        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-            pass
+                    # Data lines start with "card0", "card1", etc.
+                    if line_lower.startswith("card"):
+                        parts = [p.strip() for p in line.split(",")]
+                        logger.debug("rocm-smi CSV parts", parts=parts)
+                        # parts[0]=device, parts[1]=GPU use (%), parts[2]=VRAM Total (B), parts[3]=VRAM Used (B)
+                        if len(parts) >= 4:
+                            try:
+                                gpu_use = float(parts[1].replace('%', '').strip())
+                                vram_total_bytes = float(parts[2].strip())
+                                vram_used_bytes = float(parts[3].strip())
+                                mem_total = vram_total_bytes / (1024 * 1024)  # Convert to MB
+                                mem_used = vram_used_bytes / (1024 * 1024)    # Convert to MB
+                                logger.info("AMD GPU metrics collected", gpu_percent=gpu_use, mem_used_mb=mem_used, mem_total_mb=mem_total)
+                                return gpu_use, mem_used, mem_total
+                            except (ValueError, IndexError) as e:
+                                logger.warning("Failed to parse rocm-smi CSV line", line=line, error=str(e))
+        except FileNotFoundError:
+            logger.debug("rocm-smi not found, trying nvidia-smi")
+        except subprocess.TimeoutExpired:
+            logger.warning("rocm-smi command timed out")
+        except Exception as e:
+            logger.warning("rocm-smi failed", error=str(e))
 
         # Fallback to NVIDIA GPU
         try:
@@ -280,26 +298,67 @@ class DockerCollector:
                 text=True,
                 timeout=5
             )
+            logger.debug("rocm-smi memory output", returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
             if result.returncode == 0:
                 total_mb = None
                 used_mb = None
                 for line in result.stdout.split("\n"):
-                    if "VRAM Total" in line:
+                    line_upper = line.upper()
+                    # Handle various output formats
+                    if "TOTAL" in line_upper and "VRAM" in line_upper:
                         try:
-                            bytes_val = int(line.split(":")[-1].strip())
-                            total_mb = bytes_val / (1024 * 1024)
-                        except ValueError:
-                            pass
-                    elif "VRAM Used" in line:
+                            # Extract numeric value (could be in bytes, KB, MB, GB)
+                            value_str = line.split(":")[-1].strip()
+                            total_mb = self._parse_memory_value(value_str)
+                            logger.debug("Parsed VRAM Total", raw=value_str, mb=total_mb)
+                        except Exception as e:
+                            logger.warning("Failed to parse VRAM Total", line=line, error=str(e))
+                    elif "USED" in line_upper and "VRAM" in line_upper:
                         try:
-                            bytes_val = int(line.split(":")[-1].strip())
-                            used_mb = bytes_val / (1024 * 1024)
-                        except ValueError:
-                            pass
-                return used_mb, total_mb
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+                            value_str = line.split(":")[-1].strip()
+                            used_mb = self._parse_memory_value(value_str)
+                            logger.debug("Parsed VRAM Used", raw=value_str, mb=used_mb)
+                        except Exception as e:
+                            logger.warning("Failed to parse VRAM Used", line=line, error=str(e))
+                
+                if total_mb is not None or used_mb is not None:
+                    return used_mb, total_mb
+        except FileNotFoundError:
+            logger.debug("rocm-smi not found for memory query")
+        except subprocess.TimeoutExpired:
+            logger.warning("rocm-smi memory command timed out")
+        except Exception as e:
+            logger.warning("rocm-smi memory query failed", error=str(e))
         return None, None
+
+    def _parse_memory_value(self, value_str: str) -> Optional[float]:
+        """Parse memory value from rocm-smi, handling different units."""
+        value_str = value_str.strip().upper()
+        
+        # Remove any units and get numeric value
+        import re
+        match = re.match(r'([\d.]+)\s*(B|KB|MB|GB|TB|BYTES)?', value_str, re.IGNORECASE)
+        if match:
+            value = float(match.group(1))
+            unit = (match.group(2) or 'B').upper()
+            
+            # Convert to MB
+            if unit in ('B', 'BYTES'):
+                return value / (1024 * 1024)
+            elif unit == 'KB':
+                return value / 1024
+            elif unit == 'MB':
+                return value
+            elif unit == 'GB':
+                return value * 1024
+            elif unit == 'TB':
+                return value * 1024 * 1024
+        
+        # Try as raw bytes if no unit found
+        try:
+            return float(value_str) / (1024 * 1024)
+        except ValueError:
+            return None
 
     async def get_container_logs(
         self,

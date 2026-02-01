@@ -632,14 +632,6 @@ async function loadDashboard() {
         } else {
             document.getElementById('gpu-stat-card').style.display = 'none';
         }
-
-        // Show VRAM stats if available
-        if (stats.avg_vram_used_mb != null && stats.avg_vram_total_mb != null) {
-            document.getElementById('vram-stat-card').style.display = '';
-            document.getElementById('avg-vram').textContent = `${formatMemory(stats.avg_vram_used_mb)} / ${formatMemory(stats.avg_vram_total_mb)}`;
-        } else {
-            document.getElementById('vram-stat-card').style.display = 'none';
-        }
     }
     
     // Load charts
@@ -1039,19 +1031,11 @@ async function loadContainers(forceRefresh = false) {
         // Get GPU usage from host metrics (only in host view, not stack view)
         let topLevelGpuDisplay = '';
         let topLevelGpuClass = '';
-        let topLevelVramDisplay = '';
         if (!isStackView && hostMetrics && hostMetrics[topLevel]) {
             const gpuPercent = hostMetrics[topLevel].gpu_percent;
-            const gpuMemUsed = hostMetrics[topLevel].gpu_memory_used_mb;
-            const gpuMemTotal = hostMetrics[topLevel].gpu_memory_total_mb;
             if (gpuPercent != null) {
                 topLevelGpuClass = gpuPercent >= 80 ? 'gpu-critical' : (gpuPercent >= 50 ? 'gpu-warning' : '');
                 topLevelGpuDisplay = `${gpuPercent.toFixed(1)}%`;
-            }
-            if (gpuMemUsed != null && gpuMemTotal != null && gpuMemTotal > 0) {
-                const vramPercent = (gpuMemUsed / gpuMemTotal) * 100;
-                const vramClass = vramPercent >= 80 ? 'gpu-critical' : (vramPercent >= 50 ? 'gpu-warning' : '');
-                topLevelVramDisplay = `<span class="group-stat group-gpu ${vramClass}" title="VRAM usage">🖼️ ${formatMemory(gpuMemUsed)} / ${formatMemory(gpuMemTotal)}</span>`;
             }
         }
         
@@ -1067,10 +1051,9 @@ async function loadContainers(forceRefresh = false) {
                     ${topLevelIcon}
                     ${escapeHtml(topLevel)}
                     <span class="group-count">${containerCount} containers</span>
-                    ${topLevelMemoryDisplay ? `<span class="group-stat group-memory" title="RAM - Total memory usage">💾 ${topLevelMemoryDisplay}</span>` : ''}
-                    ${topLevelCpuDisplay ? `<span class="group-stat group-cpu ${topLevelCpuClass}" title="CPU - Max usage">⚡ ${topLevelCpuDisplay}</span>` : ''}
-                    ${topLevelGpuDisplay ? `<span class="group-stat group-gpu ${topLevelGpuClass}" title="GPU - Compute usage">🎮 ${topLevelGpuDisplay}</span>` : ''}
-                    ${topLevelVramDisplay}
+                    ${topLevelMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${topLevelMemoryDisplay}</span>` : ''}
+                    ${topLevelCpuDisplay ? `<span class="group-stat group-cpu ${topLevelCpuClass}" title="Max CPU usage">⚡ ${topLevelCpuDisplay}</span>` : ''}
+                    ${topLevelGpuDisplay ? `<span class="group-stat group-gpu ${topLevelGpuClass}" title="GPU usage">🎮 ${topLevelGpuDisplay}</span>` : ''}
                 </span>
                 ${isStackView && topLevel !== '_standalone' ? `
                 <div class="host-header-actions" onclick="event.stopPropagation();">
@@ -1146,7 +1129,7 @@ async function loadContainers(forceRefresh = false) {
                         </div>
                         ${c.status === 'running' ? `
                         <div class="container-stats-mini">
-                            <span class="stat-mini" title="CPU %">
+                            <span class="stat-mini" title="CPU Usage">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
                                     <rect x="4" y="4" width="16" height="16" rx="2"/>
                                     <rect x="9" y="9" width="6" height="6"/>
@@ -1154,7 +1137,7 @@ async function loadContainers(forceRefresh = false) {
                                 </svg>
                                 ${cpuDisplay}
                             </span>
-                            <span class="stat-mini" title="RAM">
+                            <span class="stat-mini" title="Memory Usage">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
                                     <path d="M2 20h20M6 16V8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8"/>
                                 </svg>

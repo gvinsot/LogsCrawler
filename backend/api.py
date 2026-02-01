@@ -1,6 +1,5 @@
 """FastAPI REST API for LogsCrawler."""
 
-import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -19,7 +18,6 @@ from .models import (
 )
 from .opensearch_client import OpenSearchClient
 from .github_service import GitHubService, StackDeployer
-from .actions_queue import actions_queue, ActionType, ActionStatus
 
 logger = structlog.get_logger()
 
@@ -37,29 +35,10 @@ async def lifespan(app: FastAPI):
     
     # Startup
     logger.info("Starting LogsCrawler API")
-
+    
     settings = load_config()
     opensearch = OpenSearchClient(settings.opensearch)
-
-    # Initialize OpenSearch with retry (wait for DNS/service to be ready)
-    max_retries = 30
-    retry_delay = 2
-    for attempt in range(max_retries):
-        try:
-            await opensearch.initialize()
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(
-                    "OpenSearch not ready, retrying...",
-                    attempt=attempt + 1,
-                    max_retries=max_retries,
-                    error=str(e),
-                )
-                await asyncio.sleep(retry_delay)
-            else:
-                logger.error("Failed to connect to OpenSearch after retries", error=str(e))
-                raise
+    await opensearch.initialize()
     
     collector = Collector(settings, opensearch)
     await collector.start()
@@ -840,137 +819,6 @@ async def deploy_stack(
     result["host"] = host_name
     
     return result
-
-
-# ============== Agent API ==============
-# These endpoints are used by agents running on remote hosts
-
-@app.get("/api/agent/actions")
-async def get_agent_actions(agent_id: str = Query(..., description="Agent identifier")):
-    """Get pending actions for an agent.
-
-    Agents poll this endpoint to receive actions to execute.
-    Actions are marked as in_progress when returned.
-    """
-    actions = await actions_queue.get_pending_actions(agent_id)
-    return {
-        "agent_id": agent_id,
-        "actions": [action.model_dump() for action in actions],
-    }
-
-
-@app.post("/api/agent/result")
-async def post_agent_result(
-    agent_id: str = Query(..., description="Agent identifier"),
-    action_id: str = Query(..., description="Action ID"),
-    success: bool = Query(..., description="Whether action succeeded"),
-    output: str = Query(default="", description="Action output"),
-):
-    """Report action result from an agent.
-
-    Agents call this after executing an action to report the result.
-    """
-    action = await actions_queue.complete_action(action_id, success, output)
-    if not action:
-        raise HTTPException(status_code=404, detail="Action not found")
-
-    return {"status": "ok", "action_id": action_id}
-
-
-@app.get("/api/agents")
-async def get_agents():
-    """Get list of known agents and their status."""
-    agents = await actions_queue.get_agents()
-    result = []
-    for agent in agents:
-        is_online = await actions_queue.is_agent_online(agent.agent_id)
-        result.append({
-            "agent_id": agent.agent_id,
-            "last_seen": agent.last_seen.isoformat(),
-            "status": agent.status,
-            "online": is_online,
-        })
-    return {"agents": result}
-
-
-@app.post("/api/agent/action")
-async def create_agent_action(
-    agent_id: str = Query(..., description="Target agent identifier"),
-    action_type: str = Query(..., description="Action type (container_action, exec, get_logs, get_env)"),
-    container_id: Optional[str] = Query(default=None, description="Container ID for container actions"),
-    action: Optional[str] = Query(default=None, description="Container action (start, stop, restart, etc.)"),
-    command: Optional[str] = Query(default=None, description="Command to execute (for exec action)"),
-    tail: Optional[int] = Query(default=100, description="Number of log lines (for get_logs action)"),
-    wait: bool = Query(default=True, description="Wait for action to complete"),
-    timeout: float = Query(default=30.0, description="Timeout in seconds when waiting"),
-):
-    """Create an action for an agent to execute.
-
-    This is the main endpoint for the frontend/API to request actions on remote hosts.
-    The action is queued and the agent will pick it up on next poll.
-
-    If wait=True, the endpoint blocks until the action completes or times out.
-    """
-    # Validate action type
-    try:
-        action_type_enum = ActionType(action_type)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid action type: {action_type}")
-
-    # Build payload based on action type
-    payload = {}
-    if action_type_enum == ActionType.CONTAINER_ACTION:
-        if not container_id or not action:
-            raise HTTPException(status_code=400, detail="container_id and action required for container_action")
-        payload = {"container_id": container_id, "action": action}
-
-    elif action_type_enum == ActionType.EXEC:
-        if not container_id or not command:
-            raise HTTPException(status_code=400, detail="container_id and command required for exec")
-        # Parse command string into list
-        import shlex
-        try:
-            cmd_list = shlex.split(command)
-        except ValueError:
-            cmd_list = command.split()
-        payload = {"container_id": container_id, "command": cmd_list}
-
-    elif action_type_enum == ActionType.GET_LOGS:
-        if not container_id:
-            raise HTTPException(status_code=400, detail="container_id required for get_logs")
-        payload = {"container_id": container_id, "tail": tail}
-
-    elif action_type_enum == ActionType.GET_ENV:
-        if not container_id:
-            raise HTTPException(status_code=400, detail="container_id required for get_env")
-        payload = {"container_id": container_id}
-
-    # Create the action
-    action_obj = await actions_queue.create_action(agent_id, action_type_enum, payload)
-
-    if not wait:
-        return {
-            "action_id": action_obj.id,
-            "status": action_obj.status,
-            "message": "Action queued",
-        }
-
-    # Wait for action to complete
-    completed_action = await actions_queue.wait_for_action(action_obj.id, timeout=timeout)
-
-    if not completed_action:
-        return {
-            "action_id": action_obj.id,
-            "status": "timeout",
-            "message": "Action timed out waiting for agent",
-        }
-
-    return {
-        "action_id": completed_action.id,
-        "status": completed_action.status,
-        "success": completed_action.success,
-        "result": completed_action.result,
-    }
 
 
 # Serve static files (frontend)

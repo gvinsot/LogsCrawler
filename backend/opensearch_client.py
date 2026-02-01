@@ -450,23 +450,19 @@ class OpenSearchClient:
                 "avg_cpu": {"avg": {"field": "cpu_percent"}},
                 "avg_memory": {"avg": {"field": "memory_percent"}},
                 "avg_gpu": {"avg": {"field": "gpu_percent"}},
-                "avg_vram_used": {"avg": {"field": "gpu_memory_used_mb"}},
-                "avg_vram_total": {"avg": {"field": "gpu_memory_total_mb"}},
             }
         }
-
+        
         try:
             metrics_response = await self._client.search(index=self.host_metrics_index, body=metrics_body)
             metrics_aggs = metrics_response.get("aggregations", {})
             avg_cpu = metrics_aggs.get("avg_cpu", {}).get("value", 0) or 0
             avg_memory = metrics_aggs.get("avg_memory", {}).get("value", 0) or 0
             avg_gpu = metrics_aggs.get("avg_gpu", {}).get("value")  # Keep None if no GPU data
-            avg_vram_used = metrics_aggs.get("avg_vram_used", {}).get("value")
-            avg_vram_total = metrics_aggs.get("avg_vram_total", {}).get("value")
         except:
             avg_cpu = avg_memory = 0
-            avg_gpu = avg_vram_used = avg_vram_total = None
-
+            avg_gpu = None
+        
         return DashboardStats(
             total_containers=0,  # Will be filled by API
             running_containers=0,
@@ -479,8 +475,6 @@ class OpenSearchClient:
             avg_cpu_percent=round(avg_cpu, 2),
             avg_memory_percent=round(avg_memory, 2),
             avg_gpu_percent=round(avg_gpu, 2) if avg_gpu is not None else None,
-            avg_vram_used_mb=round(avg_vram_used, 1) if avg_vram_used is not None else None,
-            avg_vram_total_mb=round(avg_vram_total, 1) if avg_vram_total is not None else None,
         )
     
     async def get_error_timeseries(self, hours: int = 24, interval: str = "1h") -> List[TimeSeriesPoint]:

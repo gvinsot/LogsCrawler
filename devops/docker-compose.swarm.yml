@@ -1,22 +1,16 @@
 version: '3.9'
 
 # ============================================================================
-# LogsCrawler - Docker Swarm Deployment (Agent-Based Architecture)
+# LogsCrawler - Docker Swarm Deployment
 # Deploy with: docker stack deploy -c docker-compose.swarm.yml logscrawler
 #
-# Architecture:
-# - Backend: API server (read-only from OpenSearch, action queue)
-# - Agent: Deployed on EVERY node (global mode), collects logs/metrics locally
-# - OpenSearch: Storage for logs and metrics
-#
-# Security: Backend has NO access to Docker sockets. Agents run locally on
-# each node and push data directly to OpenSearch.
+# NO CONFIG FILE NEEDED - All configuration is via environment variables!
+# The Swarm manager is configured with auto-discovery, so worker nodes
+# are detected automatically.
 # ============================================================================
 
 services:
-  # ==========================================================================
-  # OpenSearch - Log and metrics storage
-  # ==========================================================================
+  # OpenSearch for log storage and search
   opensearch:
     image: opensearchproject/opensearch:3.4.0
     environment:
@@ -46,27 +40,24 @@ services:
         reservations:
           memory: 1G
 
-  # ==========================================================================
-  # LogsCrawler Backend - API Server
-  # Docker socket mounted read-only for Swarm API queries (list containers/services)
-  # Actual container operations (start/stop/exec) go through agents
-  # ==========================================================================
-  backend:
+  # LogsCrawler Backend & Frontend
+  logscrawler:
     image: registry.methodinfo.fr/logscrawler:latest
     build:
       context: ..
       dockerfile: Dockerfile
-    # Run as root to access Docker socket for Swarm API queries
+    # Run as root to access Docker socket
     user: root
     volumes:
-      # SSH keys for git clone/build operations only
+      # Mount Docker socket for Swarm API access (required for auto-discovery)
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount SSH keys for git clone/build operations on host
       - /root/.ssh:/gildas/.ssh:ro
-      # Docker socket for Swarm API queries (read-only)
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
+      # ========== All configuration via environment variables ==========
       - LOGSCRAWLER_DEBUG=false
 
-      # OpenSearch configuration (use stack-prefixed name)
+      # OpenSearch configuration
       - LOGSCRAWLER_OPENSEARCH__HOSTS=["http://opensearch:9200"]
       - LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX=logscrawler
 
@@ -74,23 +65,34 @@ services:
       - LOGSCRAWLER_AI__MODEL=llama3.2:latest
       - LOGSCRAWLER_OLLAMA_URL=https://llm-dev.methodinfo.fr
 
-      # Collector settings (disabled - agents handle collection)
-      # Set very high intervals to effectively disable backend collection
-      - LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS=999999
-      - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS=999999
+      # Collector settings
+      - LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS=30
+      - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS=15
+      - LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH=500
       - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS=7
-
+      
       # GitHub integration for Stacks tab
       - LOGSCRAWLER_GITHUB__TOKEN=${LOGSCRAWLER_GITHUB__TOKEN}
       - LOGSCRAWLER_GITHUB__USERNAME=gvinsot
       - LOGSCRAWLER_GITHUB__REPOS_PATH=~/repos
       - LOGSCRAWLER_GITHUB__SCRIPTS_PATH=~/PrivateNetwork
+      # SSH config for running git/build commands on the Docker host (not in container)
       - LOGSCRAWLER_GITHUB__SSH_HOST=server-b
       - LOGSCRAWLER_GITHUB__SSH_USER=root
-
-      # Swarm manager config - queries Swarm API to list all containers/services
-      # Collection is disabled (agents handle it), this is only for listing
-      - LOGSCRAWLER_HOSTS=[{"name":"swarm-manager","mode":"docker","docker_url":"unix:///var/run/docker.sock","swarm_manager":true,"swarm_autodiscover":true}]
+      
+      # Host configuration (JSON array)
+      # Using Swarm auto-discovery: only configure the manager, workers are discovered!
+      - |
+        LOGSCRAWLER_HOSTS=[
+          {
+            "name": "server-b",
+            "mode": "docker",
+            "docker_url": "unix:///var/run/docker.sock",
+            "swarm_manager": true,
+            "swarm_routing": true,
+            "swarm_autodiscover": true
+          }
+        ]
     networks:
       - proxy
       - internal
@@ -128,58 +130,6 @@ services:
         constraints:
           - node.hostname == server-b
 
-  # ==========================================================================
-  # LogsCrawler Agent - Deployed on EVERY node (global mode)
-  # Collects Docker logs/metrics locally and pushes to OpenSearch
-  # ==========================================================================
-  agent:
-    image: registry.methodinfo.fr/logscrawler-agent:latest
-    build:
-      context: ..
-      dockerfile: Dockerfile.agent
-    # Run as root to access Docker socket
-    user: root
-    volumes:
-      # Mount Docker socket for LOCAL container access only
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    environment:
-      # Agent ID: use node hostname (set by Swarm)
-      - AGENT_AGENT_ID={{.Node.Hostname}}
-
-      # Backend URL for polling actions (use stack-prefixed name)
-      - AGENT_BACKEND_URL=http://backend:8000
-
-      # OpenSearch configuration (use stack-prefixed name)
-      - AGENT_OPENSEARCH__HOSTS=["http://opensearch:9200"]
-      - AGENT_OPENSEARCH__INDEX_PREFIX=logscrawler
-
-      # Docker socket path (inside container)
-      - AGENT_DOCKER_URL=unix:///var/run/docker.sock
-
-      # Collection intervals
-      - AGENT_LOG_INTERVAL=30
-      - AGENT_METRICS_INTERVAL=15
-      - AGENT_ACTION_POLL_INTERVAL=2
-
-      # Initial log lines to fetch
-      - AGENT_LOG_LINES_PER_FETCH=500
-    networks:
-      - internal
-    depends_on:
-      - opensearch
-      - backend
-    deploy:
-      # Deploy on ALL nodes in the Swarm
-      mode: global
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 64M
-
 # ============================================================================
 # Volumes
 # ============================================================================
@@ -195,4 +145,5 @@ networks:
     external: true
   internal:
     driver: overlay
+    internal: true
     attachable: true
