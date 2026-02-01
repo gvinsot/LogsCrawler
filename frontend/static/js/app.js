@@ -1148,6 +1148,51 @@ async function loadContainers(forceRefresh = false) {
             const serviceCpuClass = serviceMaxCpu >= 80 ? 'cpu-critical' : (serviceMaxCpu >= 50 ? 'cpu-warning' : '');
             const serviceCpuDisplay = serviceMaxCpu > 0 ? `${serviceMaxCpu.toFixed(1)}%` : '';
             
+            // Calculate service GPU stats from host metrics
+            let serviceGpuDisplay = '';
+            let serviceGpuClass = '';
+            let serviceVramDisplay = '';
+            if (hostMetrics) {
+                // Collect unique hosts for this service's containers
+                const serviceHosts = new Set();
+                for (const c of containers) {
+                    if (c.host) serviceHosts.add(c.host);
+                }
+                
+                // Aggregate GPU metrics: max GPU%, sum VRAM
+                let maxGpuPercent = null;
+                let totalVramUsed = 0;
+                let totalVramTotal = 0;
+                let hasVramData = false;
+                
+                for (const host of serviceHosts) {
+                    if (hostMetrics[host]) {
+                        const gpuPercent = hostMetrics[host].gpu_percent;
+                        const gpuMemUsed = hostMetrics[host].gpu_memory_used_mb;
+                        const gpuMemTotal = hostMetrics[host].gpu_memory_total_mb;
+                        
+                        if (gpuPercent != null) {
+                            maxGpuPercent = maxGpuPercent != null ? Math.max(maxGpuPercent, gpuPercent) : gpuPercent;
+                        }
+                        if (gpuMemUsed != null && gpuMemTotal != null) {
+                            totalVramUsed += gpuMemUsed;
+                            totalVramTotal += gpuMemTotal;
+                            hasVramData = true;
+                        }
+                    }
+                }
+                
+                if (maxGpuPercent != null) {
+                    serviceGpuClass = maxGpuPercent >= 80 ? 'gpu-critical' : (maxGpuPercent >= 50 ? 'gpu-warning' : '');
+                    serviceGpuDisplay = `${maxGpuPercent.toFixed(1)}%`;
+                }
+                if (hasVramData && totalVramTotal > 0) {
+                    const vramPercent = (totalVramUsed / totalVramTotal) * 100;
+                    const vramClass = vramPercent >= 80 ? 'gpu-critical' : (vramPercent >= 50 ? 'gpu-warning' : '');
+                    serviceVramDisplay = `<span class="group-stat group-gpu ${vramClass}" title="VRAM usage">🖼️ ${formatMemory(totalVramUsed)} / ${formatMemory(totalVramTotal)}</span>`;
+                }
+            }
+            
             topLevelHtml += `
                 <div class="${serviceGroupClass}" data-host="${escapeHtml(topLevel)}" data-project="${escapeHtml(service)}">
                     <div class="compose-header" onclick="toggleComposeGroup(event, this)">
@@ -1161,6 +1206,8 @@ async function loadContainers(forceRefresh = false) {
                         <span class="group-count">${containers.length}</span>
                         ${serviceMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${serviceMemoryDisplay}</span>` : ''}
                         ${serviceCpuDisplay ? `<span class="group-stat group-cpu ${serviceCpuClass}" title="Max CPU usage">⚡ ${serviceCpuDisplay}</span>` : ''}
+                        ${serviceGpuDisplay ? `<span class="group-stat group-gpu ${serviceGpuClass}" title="GPU - Max compute usage">🎮 ${serviceGpuDisplay}</span>` : ''}
+                        ${serviceVramDisplay}
                     </div>
                     <div class="compose-content">
                         <div class="container-list">

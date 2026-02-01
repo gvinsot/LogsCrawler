@@ -586,7 +586,7 @@ body {
 }
 
 .group-gpu {
-    color: #fb923c;
+    color: var(--status-success);
 }
 
 .group-gpu.gpu-warning {
