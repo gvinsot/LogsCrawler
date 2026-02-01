@@ -286,7 +286,7 @@ def get_gpu_metrics() -> Tuple[Optional[float], Optional[float], Optional[float]
             timeout=5
         )
         gpu_tool_found = True
-        logger.info("rocm-smi executed", returncode=result.returncode, 
+        logger.debug("rocm-smi executed", returncode=result.returncode, 
                    stdout_preview=result.stdout[:200] if result.stdout else "(empty)", 
                    stderr_preview=result.stderr[:100] if result.stderr else "(empty)")
         
@@ -306,7 +306,7 @@ def get_gpu_metrics() -> Tuple[Optional[float], Optional[float], Optional[float]
                           stderr=result.stderr[:200] if result.stderr else "no error output")
             
     except FileNotFoundError:
-        logger.info("rocm-smi not found in PATH, trying nvidia-smi")
+        logger.debug("rocm-smi not found in PATH, trying nvidia-smi")
     except subprocess.TimeoutExpired:
         rocm_error = "Command timed out after 5 seconds"
         logger.warning("rocm-smi command timed out after 5 seconds")
@@ -321,13 +321,13 @@ def get_gpu_metrics() -> Tuple[Optional[float], Optional[float], Optional[float]
             timeout=5
         )
         gpu_tool_found = True
-        logger.info("nvidia-smi executed", returncode=result.returncode,
+        logger.debug("nvidia-smi executed", returncode=result.returncode,
                    stdout_preview=result.stdout[:200] if result.stdout else "(empty)")
         
         if result.returncode == 0 and result.stdout.strip():
             gpu_percent, mem_used, mem_total = parse_nvidia_smi_csv(result.stdout)
             if gpu_percent is not None:
-                logger.info("NVIDIA GPU metrics collected", gpu_percent=gpu_percent, mem_used_mb=mem_used, mem_total_mb=mem_total)
+                logger.debug("NVIDIA GPU metrics collected", gpu_percent=gpu_percent, mem_used_mb=mem_used, mem_total_mb=mem_total)
                 return gpu_percent, mem_used, mem_total
             else:
                 nvidia_error = f"Parsing failed - stdout: {result.stdout[:200]}"
@@ -344,7 +344,7 @@ def get_gpu_metrics() -> Tuple[Optional[float], Optional[float], Optional[float]
         if not gpu_tool_found:
             logger.warning("No GPU monitoring tools found - neither rocm-smi nor nvidia-smi are available in PATH")
         else:
-            logger.info("nvidia-smi not found in PATH")
+            logger.debug("nvidia-smi not found in PATH")
     except subprocess.TimeoutExpired:
         nvidia_error = "Command timed out after 5 seconds"
         logger.warning("nvidia-smi command timed out after 5 seconds")

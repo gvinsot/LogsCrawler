@@ -240,7 +240,7 @@ class ActionPoller:
     async def run(self):
         """Main polling loop."""
         self._running = True
-        logger.info("Action poller started", agent_id=self.agent_id, interval=self.poll_interval)
+        logger.debug("Action poller started", agent_id=self.agent_id, interval=self.poll_interval)
 
         while self._running:
             try:

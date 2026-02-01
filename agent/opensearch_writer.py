@@ -38,7 +38,7 @@ class OpenSearchWriter:
         await self._ensure_logs_index()
         await self._ensure_metrics_index()
         await self._ensure_host_metrics_index()
-        logger.info("OpenSearch writer initialized")
+        logger.debug("OpenSearch writer initialized")
 
     async def _ensure_logs_index(self):
         """Create logs index if it doesn't exist."""

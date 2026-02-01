@@ -1055,6 +1055,50 @@ async function loadContainers(forceRefresh = false) {
             }
         }
         
+        // For stack view: aggregate GPU metrics from all hosts that have containers in this stack
+        if (isStackView && hostMetrics) {
+            // Collect unique hosts that have containers in this stack
+            const hostsInStack = new Set();
+            for (const containers of Object.values(services)) {
+                for (const c of containers) {
+                    if (c.host) hostsInStack.add(c.host);
+                }
+            }
+            
+            // Aggregate GPU metrics: max GPU%, sum VRAM used, sum VRAM total
+            let maxGpuPercent = null;
+            let totalVramUsed = 0;
+            let totalVramTotal = 0;
+            let hasVramData = false;
+            
+            for (const host of hostsInStack) {
+                if (hostMetrics[host]) {
+                    const gpuPercent = hostMetrics[host].gpu_percent;
+                    const gpuMemUsed = hostMetrics[host].gpu_memory_used_mb;
+                    const gpuMemTotal = hostMetrics[host].gpu_memory_total_mb;
+                    
+                    if (gpuPercent != null) {
+                        maxGpuPercent = maxGpuPercent != null ? Math.max(maxGpuPercent, gpuPercent) : gpuPercent;
+                    }
+                    if (gpuMemUsed != null && gpuMemTotal != null) {
+                        totalVramUsed += gpuMemUsed;
+                        totalVramTotal += gpuMemTotal;
+                        hasVramData = true;
+                    }
+                }
+            }
+            
+            if (maxGpuPercent != null) {
+                topLevelGpuClass = maxGpuPercent >= 80 ? 'gpu-critical' : (maxGpuPercent >= 50 ? 'gpu-warning' : '');
+                topLevelGpuDisplay = `${maxGpuPercent.toFixed(1)}%`;
+            }
+            if (hasVramData && totalVramTotal > 0) {
+                const vramPercent = (totalVramUsed / totalVramTotal) * 100;
+                const vramClass = vramPercent >= 80 ? 'gpu-critical' : (vramPercent >= 50 ? 'gpu-warning' : '');
+                topLevelVramDisplay = `<span class="group-stat group-gpu ${vramClass}" title="VRAM usage (${hostsInStack.size} host${hostsInStack.size > 1 ? 's' : ''})">🖼️ ${formatMemory(totalVramUsed)} / ${formatMemory(totalVramTotal)}</span>`;
+            }
+        }
+        
         // Get the first host from containers in this stack (for stack removal)
         const firstHost = Object.values(services)[0]?.[0]?.host || '';
         

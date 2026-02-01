@@ -19,12 +19,17 @@ from .docker_collector import DockerCollector
 from .opensearch_writer import OpenSearchWriter
 from .action_poller import ActionPoller
 
-# Configure logging level from environment (default: INFO)
-log_level = os.environ.get("AGENT_LOG_LEVEL", "INFO").upper()
+# Configure logging level from environment (default: WARNING for less noise)
+log_level = os.environ.get("AGENT_LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(
     format="%(message)s",
-    level=getattr(logging, log_level, logging.INFO),
+    level=getattr(logging, log_level, logging.WARNING),
 )
+
+# Silence noisy HTTP client logs
+logging.getLogger("opensearchpy").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("elastic_transport").setLevel(logging.WARNING)
 
 # Configure structured logging
 structlog.configure(
@@ -107,17 +112,17 @@ class Agent:
             asyncio.create_task(self.action_poller.run()),
         ]
 
-        logger.info("Agent started successfully")
+        logger.debug("Agent started successfully")
 
         # Wait for all tasks
         try:
             await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:
-            logger.info("Agent tasks cancelled")
+            logger.debug("Agent tasks cancelled")
 
     async def stop(self):
         """Stop the agent gracefully."""
-        logger.info("Stopping agent...")
+        logger.debug("Stopping agent...")
         self._running = False
         self.action_poller.stop()
 
@@ -141,11 +146,11 @@ class Agent:
         except Exception:
             pass
 
-        logger.info("Agent stopped")
+        logger.debug("Agent stopped")
 
     async def _log_collection_loop(self):
         """Periodically collect logs from all containers."""
-        logger.info("Log collection loop started", interval=self.config.log_interval)
+        logger.debug("Log collection loop started", interval=self.config.log_interval)
 
         while self._running:
             try:
@@ -164,7 +169,7 @@ class Agent:
 
     async def _metrics_collection_loop(self):
         """Periodically collect metrics from host and containers."""
-        logger.info("Metrics collection loop started", interval=self.config.metrics_interval)
+        logger.debug("Metrics collection loop started", interval=self.config.metrics_interval)
 
         while self._running:
             try:
@@ -177,13 +182,13 @@ class Agent:
                 for stats in container_stats:
                     await self.opensearch.index_container_stats(stats)
 
-                # Log GPU status for visibility
+                # Log GPU status for visibility (DEBUG level)
                 gpu_percent = host_metrics.get("gpu_percent")
                 gpu_mem_used = host_metrics.get("gpu_memory_used_mb")
                 gpu_mem_total = host_metrics.get("gpu_memory_total_mb")
                 
                 if gpu_percent is not None or gpu_mem_used is not None:
-                    logger.info(
+                    logger.debug(
                         "Collected metrics with GPU",
                         host_cpu=host_metrics.get("cpu_percent"),
                         gpu_percent=gpu_percent,
@@ -212,7 +217,7 @@ async def main():
     loop = asyncio.get_event_loop()
 
     def signal_handler():
-        logger.info("Received shutdown signal")
+        logger.debug("Received shutdown signal")
         asyncio.create_task(agent.stop())
 
     # Handle SIGINT and SIGTERM
