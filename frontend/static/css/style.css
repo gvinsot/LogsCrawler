@@ -2366,7 +2366,7 @@ body {
 
     /* Main content - full width with scroll */
     .main-content {
-        padding: 70px 12px 12px;
+        padding: 60px 10px 10px;
         width: 100%;
         overflow-y: auto;
         overflow-x: hidden;
@@ -2393,9 +2393,9 @@ body {
     .stats-grid {
         display: flex;
         overflow-x: auto;
-        gap: 12px;
-        margin-bottom: 20px;
-        padding-bottom: 8px;
+        gap: 10px;
+        margin-bottom: 12px;
+        padding-bottom: 6px;
         -webkit-overflow-scrolling: touch;
         scroll-snap-type: x mandatory;
     }
@@ -2428,19 +2428,25 @@ body {
     .charts-grid {
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 8px;
         flex: none;
         overflow-y: auto;
-        padding-bottom: 16px;
+        padding-bottom: 12px;
     }
 
     .chart-card {
-        min-height: 220px;
+        min-height: 180px;
         flex: none;
+        padding: 12px;
+    }
+
+    .chart-card h3 {
+        font-size: 0.8rem;
+        margin-bottom: 8px;
     }
 
     .chart-card canvas {
-        max-height: 180px !important;
+        max-height: 140px !important;
     }
 
     /* Container view */
@@ -2848,11 +2854,17 @@ body {
     }
 
     .chart-card {
-        min-height: 200px;
+        min-height: 160px;
+        padding: 10px;
+    }
+
+    .chart-card h3 {
+        font-size: 0.75rem;
+        margin-bottom: 6px;
     }
 
     .chart-card canvas {
-        max-height: 160px !important;
+        max-height: 120px !important;
     }
 
     .container-stats-mini {

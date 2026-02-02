@@ -75,7 +75,7 @@ services:
 
       # AI/Ollama configuration
       - LOGSCRAWLER_AI__MODEL=llama3.2:latest
-      - LOGSCRAWLER_OLLAMA_URL=https://llm-dev.methodinfo.fr
+      - LOGSCRAWLER_OLLAMA_URL=http://ollama-dev-service:11434
 
       # Collector settings (disabled - agents handle collection)
       # Set very high intervals to effectively disable backend collection

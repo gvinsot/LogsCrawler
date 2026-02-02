@@ -851,6 +851,40 @@ class OpenSearchClient:
             logger.error("Failed to count similar logs", error=str(e))
             return 0
     
+    async def get_available_metadata(self) -> Dict[str, Any]:
+        """Get available hosts, containers, compose projects and log levels for AI context."""
+        body = {
+            "size": 0,
+            "aggs": {
+                "hosts": {"terms": {"field": "host", "size": 50}},
+                "containers": {"terms": {"field": "container_name", "size": 200}},
+                "compose_projects": {"terms": {"field": "compose_project", "size": 50}},
+                "compose_services": {"terms": {"field": "compose_service", "size": 200}},
+                "levels": {"terms": {"field": "level", "size": 10}},
+            }
+        }
+        
+        try:
+            response = await self._client.search(index=self.logs_index, body=body)
+            aggs = response.get("aggregations", {})
+            
+            return {
+                "hosts": [b["key"] for b in aggs.get("hosts", {}).get("buckets", [])],
+                "containers": [b["key"] for b in aggs.get("containers", {}).get("buckets", [])],
+                "compose_projects": [b["key"] for b in aggs.get("compose_projects", {}).get("buckets", [])],
+                "compose_services": [b["key"] for b in aggs.get("compose_services", {}).get("buckets", [])],
+                "levels": [b["key"] for b in aggs.get("levels", {}).get("buckets", [])],
+            }
+        except Exception as e:
+            logger.error("Failed to get metadata for AI", error=str(e))
+            return {
+                "hosts": [],
+                "containers": [],
+                "compose_projects": [],
+                "compose_services": [],
+                "levels": ["ERROR", "WARN", "INFO", "DEBUG"],
+            }
+
     async def cleanup_old_data(self, retention_days: int):
         """Delete data older than retention period."""
         cutoff = datetime.utcnow() - timedelta(days=retention_days)

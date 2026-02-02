@@ -536,8 +536,11 @@ async def ai_search_logs(request: Dict[str, str]) -> Dict[str, Any]:
     
     ai = get_ai_service()
     
-    # Convert natural language to query params
-    params = await ai.convert_to_query(natural_query)
+    # Get available metadata for better AI context (RAG)
+    metadata = await opensearch.get_available_metadata()
+    
+    # Convert natural language to query params with metadata context
+    params = await ai.convert_to_query(natural_query, metadata)
     
     # Calculate time range
     start_time = None
@@ -559,6 +562,7 @@ async def ai_search_logs(request: Dict[str, str]) -> Dict[str, Any]:
         query=params.get("query"),
         hosts=params.get("hosts", []),
         containers=params.get("containers", []),
+        compose_projects=params.get("compose_projects", []),
         levels=params.get("levels", []),
         http_status_min=params.get("http_status_min"),
         http_status_max=params.get("http_status_max"),
@@ -572,6 +576,11 @@ async def ai_search_logs(request: Dict[str, str]) -> Dict[str, Any]:
     return {
         "query_params": params,
         "result": result.model_dump(),
+        "available_metadata": {
+            "hosts": metadata.get("hosts", [])[:10],
+            "containers": metadata.get("containers", [])[:20],
+            "compose_projects": metadata.get("compose_projects", [])[:10],
+        }
     }
 
 
