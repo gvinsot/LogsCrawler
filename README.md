@@ -1,9 +1,14 @@
 
+
 # LogsCrawler
 
 ![Dashboard Screenshot](screenshot.png)
 
 A professional Docker container log aggregation and monitoring solution with an agent-based architecture. Deploy lightweight agents on each host to collect logs and metrics from Docker containers, store data in OpenSearch, and manage everything through a modern web dashboard.
+
+## Projects
+
+- **LogsCrawler** (this repository): Fully developed by me. A complete, production-grade log aggregation and monitoring platform for Docker environments, featuring agent-based collection, OpenSearch integration, AI-powered search, and a modern dashboard.
 
 ## Features
 
