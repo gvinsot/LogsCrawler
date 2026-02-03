@@ -2428,7 +2428,7 @@ body {
     .charts-grid {
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 4px;
         flex: none;
         overflow-y: auto;
         padding-bottom: 12px;
