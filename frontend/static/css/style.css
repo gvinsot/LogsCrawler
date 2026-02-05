@@ -2820,7 +2820,8 @@ a.btn {
     }
 
     .chart-card {
-        min-height: 180px;
+        height: auto;
+        min-height: 0;
         flex: none;
         padding: 12px;
     }
@@ -3240,7 +3241,8 @@ a.btn {
     }
 
     .chart-card {
-        min-height: 160px;
+        height: auto;
+        min-height: 0;
         padding: 10px;
     }
 
