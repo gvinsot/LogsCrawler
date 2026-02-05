@@ -30,6 +30,7 @@ class Collector:
 
         # Track Swarm manager for routing (if swarm_routing is enabled)
         self._swarm_manager_host: Optional[str] = None
+        self._swarm_manager_hostname: Optional[str] = None  # Real hostname of the manager node
         self._swarm_routing_enabled: bool = False
         self._swarm_autodiscover_enabled: bool = False
         self._discovered_nodes: Dict[str, str] = {}  # node_hostname -> node_id
@@ -172,6 +173,8 @@ class Collector:
                 # This handles the case where config name differs from actual hostname
                 if local_node_id and (node_id.startswith(local_node_id[:12]) or
                                       local_node_id.startswith(node_id[:12])):
+                    # Store the manager's real hostname for routing lookups
+                    self._swarm_manager_hostname = node_hostname
                     logger.debug("Skipping local manager node", node=node_hostname,
                                config_name=self._swarm_manager_host)
                     continue
@@ -406,8 +409,13 @@ class Collector:
         if self._swarm_routing_enabled and self._swarm_manager_host:
             manager_client = self.clients.get(self._swarm_manager_host)
             if manager_client:
-                # Check if target host is different from manager
-                # (manager can handle its own containers directly)
+                # Check if target host is the manager's real hostname
+                # (when config name differs from actual hostname, e.g. "manager" vs "server-b")
+                if host == self._swarm_manager_hostname:
+                    logger.debug("Routing to manager via real hostname",
+                                target_host=host, manager=self._swarm_manager_host)
+                    return manager_client
+                # Route other hosts through manager
                 if host != self._swarm_manager_host:
                     logger.debug("Routing exec through Swarm manager",
                                 target_host=host, manager=self._swarm_manager_host)
