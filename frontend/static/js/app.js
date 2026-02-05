@@ -2253,7 +2253,6 @@ function renderStacksList() {
         </div>
     `;
     }).join('');
-    }).join('');
 }
 
 async function buildStack(repoName, sshUrl) {

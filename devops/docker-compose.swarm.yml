@@ -4,6 +4,8 @@ version: '3.9'
 # LogsCrawler - Docker Swarm Deployment (Agent-Based Architecture)
 # Deploy with: docker stack deploy -c docker-compose.swarm.yml logscrawler
 #
+# IMPORTANT: Copy .env.example to .env and configure before deploying
+#
 # Architecture:
 # - Backend: API server (read-only from OpenSearch, action queue)
 # - Agent: Deployed on EVERY node (global mode), collects logs/metrics locally
@@ -37,7 +39,7 @@ services:
       replicas: 1
       placement:
         constraints:
-          - node.hostname == server-d
+          - node.hostname == ${OPENSEARCH_NODE_HOSTNAME:-server-d}
       restart_policy:
         condition: on-failure
       resources:
@@ -52,7 +54,7 @@ services:
   # Actual container operations (start/stop/exec) go through agents
   # ==========================================================================
   backend:
-    image: registry.methodinfo.fr/logscrawler:latest
+    image: ${DOCKER_REGISTRY_URL}/logscrawler:latest
     build:
       context: ..
       dockerfile: Dockerfile
@@ -62,8 +64,8 @@ services:
       # Map 'dockerhost' to the Docker host IP for SSH access
       - "dockerhost:host-gateway"
     volumes:
-      # Mount gildas's SSH keys for SSH to host
-      - /home/gildas/.ssh:/root/.ssh:ro
+      # Mount SSH keys for SSH to host
+      - ${SSH_KEYS_PATH:-/home/user/.ssh}:/root/.ssh:ro
       # Docker socket for Swarm API queries (read-only)
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
@@ -74,28 +76,27 @@ services:
       - LOGSCRAWLER_OPENSEARCH__INDEX_PREFIX=logscrawler
 
       # AI/Ollama configuration
-      - LOGSCRAWLER_AI__MODEL=llama3.2:latest
-      - LOGSCRAWLER_OLLAMA_URL=http://ollama-dev-service:11434
+      - LOGSCRAWLER_AI__MODEL=${OLLAMA_MODEL:-llama3.2:latest}
+      - LOGSCRAWLER_OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
 
       # Collector settings (disabled - agents handle collection)
       # Set very high intervals to effectively disable backend collection
       - LOGSCRAWLER_COLLECTOR__LOG_INTERVAL_SECONDS=999999
       - LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS=999999
-      - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS=7
+      - LOGSCRAWLER_COLLECTOR__RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
 
       # GitHub integration for Stacks tab
-      # SSH to host as gildas user for build/deploy (gildas has docker/git credentials)
       - LOGSCRAWLER_GITHUB__TOKEN=${LOGSCRAWLER_GITHUB__TOKEN}
-      - LOGSCRAWLER_GITHUB__USERNAME=gvinsot
-      - LOGSCRAWLER_GITHUB__USEREMAIL=gildas.music@gmail.com
-      - LOGSCRAWLER_GITHUB__REPOS_PATH=/home/gildas
-      - LOGSCRAWLER_GITHUB__SCRIPTS_PATH=/home/gildas/PrivateNetwork
-      - LOGSCRAWLER_GITHUB__SSH_HOST=dockerhost
-      - LOGSCRAWLER_GITHUB__SSH_USER=gildas
+      - LOGSCRAWLER_GITHUB__USERNAME=${LOGSCRAWLER_GITHUB__USERNAME}
+      - LOGSCRAWLER_GITHUB__USEREMAIL=${LOGSCRAWLER_GITHUB__USEREMAIL}
+      - LOGSCRAWLER_GITHUB__REPOS_PATH=${LOGSCRAWLER_GITHUB__REPOS_PATH:-/home/user}
+      - LOGSCRAWLER_GITHUB__SCRIPTS_PATH=${LOGSCRAWLER_GITHUB__SCRIPTS_PATH:-/home/user/scripts}
+      - LOGSCRAWLER_GITHUB__SSH_HOST=${LOGSCRAWLER_GITHUB__SSH_HOST:-dockerhost}
+      - LOGSCRAWLER_GITHUB__SSH_USER=${LOGSCRAWLER_GITHUB__SSH_USER:-user}
       # Docker registry for build/push operations
-      - LOGSCRAWLER_GITHUB__REGISTRY_URL=registry.methodinfo.fr
-      - LOGSCRAWLER_GITHUB__REGISTRY_USERNAME=${LOGSCRAWLER_REGISTRY_USERNAME}
-      - LOGSCRAWLER_GITHUB__REGISTRY_PASSWORD=${LOGSCRAWLER_REGISTRY_PASSWORD}
+      - LOGSCRAWLER_GITHUB__REGISTRY_URL=${DOCKER_REGISTRY_URL}
+      - LOGSCRAWLER_GITHUB__REGISTRY_USERNAME=${DOCKER_REGISTRY_USERNAME}
+      - LOGSCRAWLER_GITHUB__REGISTRY_PASSWORD=${DOCKER_REGISTRY_PASSWORD}
 
       # Swarm manager config - queries Swarm API to list all containers/services
       # Collection is disabled (agents handle it), this is only for listing
@@ -120,14 +121,14 @@ services:
         - "traefik.http.services.logscrawler.loadbalancer.server.port=8000"
 
         # HTTPS Router (main)
-        - "traefik.http.routers.logscrawler.rule=Host(`logs.methodinfo.fr`)"
+        - "traefik.http.routers.logscrawler.rule=Host(`${TRAEFIK_HOST}`)"
         - "traefik.http.routers.logscrawler.entrypoints=websecure"
         - "traefik.http.routers.logscrawler.tls.certresolver=letsencrypt"
         - "traefik.http.routers.logscrawler.middlewares=global@file,dashboard-auth@file"
         - "traefik.http.routers.logscrawler.service=logscrawler"
 
         # HTTP Router (redirect to HTTPS)
-        - "traefik.http.routers.logscrawler-http.rule=Host(`logs.methodinfo.fr`)"
+        - "traefik.http.routers.logscrawler-http.rule=Host(`${TRAEFIK_HOST}`)"
         - "traefik.http.routers.logscrawler-http.entrypoints=web"
         - "traefik.http.routers.logscrawler-http.middlewares=redirect-to-https@file"
         - "traefik.http.routers.logscrawler-http.service=noop@internal"
@@ -135,14 +136,14 @@ services:
         condition: on-failure
       placement:
         constraints:
-          - node.hostname == server-b
+          - node.hostname == ${BACKEND_NODE_HOSTNAME:-server-b}
 
   # ==========================================================================
   # LogsCrawler Agent - Deployed on EVERY node (global mode)
   # Collects Docker logs/metrics locally and pushes to OpenSearch
   # ==========================================================================
   agent:
-    image: registry.methodinfo.fr/logscrawler-agent:latest
+    image: ${DOCKER_REGISTRY_URL}/logscrawler-agent:latest
     build:
       context: ..
       dockerfile: Dockerfile.agent
