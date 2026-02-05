@@ -2119,6 +2119,41 @@ a.btn {
     gap: 4px;
 }
 
+/* Stack name block with meta badges below */
+.stack-name-block {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.stack-name-text {
+    font-weight: 600;
+}
+
+.stack-meta-badge {
+    font-size: 0.65rem;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    font-weight: 500;
+    margin-right: 4px;
+}
+
+.stack-meta-badge.private {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--status-error);
+}
+
+.stack-meta-badge.lang {
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+}
+
+/* Container age display */
+.container-age {
+    color: var(--text-muted);
+    font-size: 0.85em;
+}
+
 .stack-actions {
     display: flex;
     gap: 4px;

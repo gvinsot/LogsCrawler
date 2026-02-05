@@ -1254,6 +1254,7 @@ async function loadContainers(forceRefresh = false) {
                 const memDisplay = c.memory_percent != null 
                     ? `${c.memory_percent}%${c.memory_usage_mb ? ` (${c.memory_usage_mb}MB)` : ''}`
                     : '-';
+                const containerAge = c.created ? formatTimeAgo(c.created) : '';
                 
                 const containerNameHtml = escapeHtml(c.name);
                 
@@ -1263,7 +1264,7 @@ async function loadContainers(forceRefresh = false) {
                             <span class="container-status ${c.status}"></span>
                             <div>
                                 <div class="container-name">${containerNameHtml}</div>
-                                <div class="container-image">${escapeHtml(c.image)}</div>
+                                <div class="container-image">${escapeHtml(c.image)}${containerAge ? ` <span class="container-age">• ${containerAge}</span>` : ''}</div>
                             </div>
                         </div>
                         ${c.status === 'running' ? `
@@ -2131,6 +2132,7 @@ function renderStacksList() {
                     const memDisplay = c.memory_percent != null 
                         ? `${c.memory_percent}%${c.memory_usage_mb ? ` (${c.memory_usage_mb}MB)` : ''}`
                         : '-';
+                    const containerAge = c.created ? formatTimeAgo(c.created) : '';
                     
                     containersHtml += `
                         <div class="container-item" onclick="openContainer('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', ${JSON.stringify(c).replace(/"/g, '&quot;')})">
@@ -2138,7 +2140,7 @@ function renderStacksList() {
                                 <span class="container-status ${c.status}"></span>
                                 <div>
                                     <div class="container-name">${escapeHtml(c.name)} <span style="color: var(--text-muted); font-size: 0.85em;">(${escapeHtml(c.host)})</span></div>
-                                    <div class="container-image">${escapeHtml(c.image)}</div>
+                                    <div class="container-image">${escapeHtml(c.image)}${containerAge ? ` <span class="container-age">• ${containerAge}</span>` : ''}</div>
                                 </div>
                             </div>
                             ${c.status === 'running' ? `
@@ -2184,6 +2186,12 @@ function renderStacksList() {
         </svg>`;
         
         // Use host-group structure similar to Computers view
+        // Build metadata badges (private, language)
+        const metaBadges = [];
+        if (repo.private) metaBadges.push('<span class="stack-meta-badge private">Private</span>');
+        if (repo.language) metaBadges.push(`<span class="stack-meta-badge lang">${escapeHtml(repo.language)}</span>`);
+        const metaLine = metaBadges.length > 0 ? `<div class="stack-meta">${metaBadges.join('')}</div>` : '';
+        
         return `
         <div class="host-group ${isExpanded ? '' : 'collapsed'}" data-repo="${escapeHtml(repo.name)}">
             <div class="host-header" ${isDeployed ? `onclick="toggleStackExpand('${escapeHtml(repo.name)}')"` : ''}>
@@ -2194,15 +2202,16 @@ function renderStacksList() {
                     </svg>
                     ` : ''}
                     ${stackIcon}
-                    ${escapeHtml(repo.name)}
+                    <div class="stack-name-block">
+                        <span class="stack-name-text">${escapeHtml(repo.name)}</span>
+                        ${metaLine}
+                    </div>
                     ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : '<span class="stack-badge" style="background: var(--bg-tertiary); color: var(--text-muted);">Not deployed</span>'}
                     ${isDeployed ? `<span class="group-count">${containerCount} containers</span>` : ''}
                     ${stackMemoryDisplay ? `<span class="group-stat group-memory" title="RAM - Total memory usage">💾 ${stackMemoryDisplay}</span>` : ''}
                     ${stackCpuDisplay ? `<span class="group-stat group-cpu ${stackCpuClass}" title="CPU - Max usage">⚡ ${stackCpuDisplay}</span>` : ''}
                     ${stackGpuDisplay}
                     ${stackVramDisplay}
-                    ${repo.private ? '<span class="stack-badge private">Private</span>' : ''}
-                    ${repo.language ? `<span class="stack-badge lang">${escapeHtml(repo.language)}</span>` : ''}
                 </span>
                 <div class="host-header-actions" onclick="event.stopPropagation();">
                     <a class="btn btn-sm btn-ghost" href="${escapeHtml(repo.html_url)}" target="_blank" rel="noopener" title="Open on GitHub">

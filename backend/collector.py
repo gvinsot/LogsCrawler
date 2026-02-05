@@ -426,6 +426,10 @@ class Collector:
                                 target_host=host, manager=self._swarm_manager_host)
                     return manager_client
 
+        # Check if target host is the manager's real hostname (even without routing enabled)
+        if host == self._swarm_manager_hostname and self._swarm_manager_host:
+            return self.clients.get(self._swarm_manager_host)
+
         # Fall back to direct client
         return self.clients.get(host)
 
@@ -474,6 +478,10 @@ class Collector:
         
         containers = self._containers_cache.get(host, [])
         
+        # If host is the manager's real hostname but cache uses config name, try that too
+        if not containers and host == self._swarm_manager_hostname and self._swarm_manager_host:
+            containers = self._containers_cache.get(self._swarm_manager_host, [])
+        
         # Try exact match first
         container = next((c for c in containers if c.id == container_id), None)
         if container:
@@ -514,12 +522,17 @@ class Collector:
         
         # If we have a direct client for this host, use it
         direct_client = self.clients.get(host)
+        
+        # If host is the manager's real hostname, use the manager client
+        if not direct_client and host == self._swarm_manager_hostname and self._swarm_manager_host:
+            direct_client = self.clients.get(self._swarm_manager_host)
+        
         if direct_client:
             stats = await direct_client.get_container_stats(container.id, container.name)
             return stats.model_dump() if stats else None
         
         # For Swarm worker nodes without direct client, try manager with task info
-        if self._swarm_routing_enabled and self._swarm_manager_host and task_id:
+        if self._swarm_manager_host and task_id:
             manager_client = self.clients.get(self._swarm_manager_host)
             if manager_client:
                 # Try to get stats - will work if container happens to be on manager
