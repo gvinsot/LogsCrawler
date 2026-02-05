@@ -267,8 +267,17 @@ class GitHubService:
 
         Returns:
             Tuple of (is_valid, error_message)
+            Returns (True, "") if API is unavailable (best-effort validation)
         """
         branches = await self.get_repo_branches(owner, repo)
+        
+        # If we couldn't fetch branches (API error, permissions, etc.), 
+        # allow the operation to proceed - actual git commands will validate
+        if not branches:
+            logger.warning("Could not validate branch via API, allowing operation to proceed", 
+                          repo=f"{owner}/{repo}", branch=branch)
+            return True, ""
+        
         branch_names = [b["name"] for b in branches]
 
         if branch in branch_names:
@@ -285,9 +294,11 @@ class GitHubService:
 
         Returns:
             Tuple of (is_valid, error_message)
+            Returns (True, "") if API is unavailable (best-effort validation)
         """
         if not self.config.token:
-            return False, "GitHub token not configured"
+            logger.warning("GitHub token not configured, skipping commit validation")
+            return True, ""
 
         session = await self._get_session()
         url = f"https://api.github.com/repos/{owner}/{repo}/commits/{commit_id}"
@@ -298,10 +309,20 @@ class GitHubService:
                     return True, ""
                 elif response.status == 404:
                     return False, f"Commit '{commit_id}' not found in repository"
+                elif response.status == 403:
+                    # Permission error - allow operation to proceed, git will validate
+                    logger.warning("Could not validate commit via API (permission denied), allowing operation to proceed",
+                                  repo=f"{owner}/{repo}", commit=commit_id)
+                    return True, ""
                 else:
-                    return False, f"Error validating commit: HTTP {response.status}"
+                    # Other errors - log but allow to proceed
+                    logger.warning("Could not validate commit via API, allowing operation to proceed",
+                                  repo=f"{owner}/{repo}", commit=commit_id, status=response.status)
+                    return True, ""
         except Exception as e:
-            return False, f"Error validating commit: {str(e)}"
+            logger.warning("Error validating commit via API, allowing operation to proceed",
+                          repo=f"{owner}/{repo}", commit=commit_id, error=str(e))
+            return True, ""
 
 
 class StackDeployer:

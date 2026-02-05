@@ -70,6 +70,9 @@ class CollectorConfig(BaseModel):
     metrics_interval_seconds: int = 15
     log_lines_per_fetch: int = 500
     retention_days: int = 7
+    # When True, backend collection is completely disabled (agents handle everything)
+    # The collector will only maintain container lists for the UI, not collect logs/metrics
+    agents_only: bool = False
 
 
 class AIConfig(BaseModel):
@@ -196,6 +199,10 @@ def load_config() -> Settings:
     load_env(settings.collector, "metrics_interval_seconds", "LOGSCRAWLER_COLLECTOR__METRICS_INTERVAL_SECONDS", int)
     load_env(settings.collector, "log_lines_per_fetch", "LOGSCRAWLER_COLLECTOR__LOG_LINES_PER_FETCH", int)
     load_env(settings.collector, "retention_days", "LOGSCRAWLER_COLLECTOR__RETENTION_DAYS", int)
+    # Load agents_only as bool (accepts "true", "1", "yes")
+    agents_only_env = os.environ.get("LOGSCRAWLER_COLLECTOR__AGENTS_ONLY", "").lower()
+    if agents_only_env in ("true", "1", "yes"):
+        settings.collector.agents_only = True
 
     # AI settings
     load_env(settings.ai, "model", "LOGSCRAWLER_AI__MODEL")

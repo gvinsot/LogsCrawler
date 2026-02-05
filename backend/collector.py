@@ -57,15 +57,20 @@ class Collector:
             return
 
         self._running = True
-        logger.info("Starting collector")
+        logger.info("Starting collector", agents_only=self.settings.collector.agents_only)
 
         # Discover Swarm nodes if auto-discovery is enabled
         if self._swarm_autodiscover_enabled:
             await self._discover_swarm_nodes()
 
-        # Start collection tasks
-        asyncio.create_task(self._log_collection_loop())
-        asyncio.create_task(self._metrics_collection_loop())
+        # Start collection tasks only if agents_only mode is disabled
+        if not self.settings.collector.agents_only:
+            asyncio.create_task(self._log_collection_loop())
+            asyncio.create_task(self._metrics_collection_loop())
+        else:
+            logger.info("Backend collection disabled (agents_only=true) - agents handle logs/metrics")
+
+        # Always run cleanup loop (to remove old data)
         asyncio.create_task(self._cleanup_loop())
 
         # Start node discovery refresh loop if auto-discovery is enabled
