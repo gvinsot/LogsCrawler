@@ -148,22 +148,70 @@ compose_file = sys.argv[1]
 registry = sys.argv[2]
 
 with open(compose_file, 'r') as f:
-    content = f.read()
+    lines = f.readlines()
 
-# Find all services with their content
-# Pattern: service name followed by indented content until next service or section
-service_pattern = r'^(\s{2,8})([a-z][a-z0-9_-]*):\s*\n((?:\1\s+.*\n)*)'
-matches = re.findall(service_pattern, content, re.MULTILINE)
+# Parse services by tracking indentation
+in_services = False
+services_indent = -1
+current_service = None
+current_service_indent = -1
+service_content = {}
 
-for indent, service_name, service_content in matches:
-    has_build = bool(re.search(r'^\s+build:', service_content, re.MULTILINE))
-    image_match = re.search(r'^\s+image:\s*(.+)$', service_content, re.MULTILINE)
+for line in lines:
+    # Skip empty lines and comments for section detection
+    stripped = line.rstrip()
+    if not stripped or stripped.startswith('#'):
+        continue
     
-    if has_build and image_match:
-        image = image_match.group(1).strip().strip('"').strip("'")
+    # Calculate indentation
+    indent = len(line) - len(line.lstrip())
+    
+    # Check if we're entering the services section
+    if re.match(r'^services:\s*$', stripped):
+        in_services = True
+        services_indent = indent
+        continue
+    
+    # Check if we're leaving the services section (another top-level key)
+    if in_services and indent <= services_indent and ':' in stripped and not stripped.startswith(' '):
+        in_services = False
+        current_service = None
+        continue
+    
+    if not in_services:
+        continue
+    
+    # Check if this is a new service definition (direct child of services)
+    # A service name is a key at services_indent + 2 (or more) spaces
+    service_match = re.match(r'^(\s+)([a-zA-Z][a-zA-Z0-9_-]*):\s*$', line)
+    if service_match:
+        service_indent = len(service_match.group(1))
+        service_name = service_match.group(2)
+        # This is a new service if it's at the expected indent level
+        if current_service is None or service_indent <= current_service_indent:
+            current_service = service_name
+            current_service_indent = service_indent
+            service_content[current_service] = {'image': None, 'has_build': False}
+            continue
+    
+    # If we're inside a service, look for image and build
+    if current_service:
+        # Check for image line
+        image_match = re.match(r'^\s+image:\s*(.+)$', line)
+        if image_match:
+            image = image_match.group(1).strip().strip('"').strip("'")
+            service_content[current_service]['image'] = image
+        
+        # Check for build section
+        if re.match(r'^\s+build:\s*', line):
+            service_content[current_service]['has_build'] = True
+
+# Output images for services that have both build and image
+for service_name, data in service_content.items():
+    if data['has_build'] and data['image']:
+        image = data['image']
         # Replace ${DOCKER_REGISTRY_URL} with actual registry
         image = image.replace('${DOCKER_REGISTRY_URL}', registry)
-        # Build all services with a build: section, regardless of registry
         print(image)
 PYTHON_SCRIPT
 }
@@ -190,9 +238,12 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-# Get the script's directory and the repos root (two levels up since scripts are in LogsCrawler/scripts)
+# Get the script's directory and the parent of the parent (where repositories are)
+# Script is in: PrivateNetwork/scripts/
+# Repos are in: parent of PrivateNetwork/
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPOS_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+REPOS_DIR="$(dirname "$PROJECT_DIR")"
 
 # Resolve absolute path
 if [[ "$REPO_FOLDER" = /* ]]; then
