@@ -2323,6 +2323,240 @@ a.btn {
     max-width: 800px;
 }
 
+.modal-md {
+    max-width: 550px;
+}
+
+/* Form elements for modals */
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-label {
+    display: block;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.form-input,
+.form-select {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    transition: var(--transition);
+}
+
+.form-input:focus,
+.form-select:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 3px rgba(0, 212, 170, 0.1);
+}
+
+.form-input::placeholder {
+    color: var(--text-muted);
+}
+
+.form-hint {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+
+.radio-group {
+    display: flex;
+    gap: 20px;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+}
+
+.radio-label input[type="radio"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border-light);
+    border-radius: 50%;
+    background: var(--bg-primary);
+    cursor: pointer;
+    transition: var(--transition);
+    position: relative;
+}
+
+.radio-label input[type="radio"]:checked {
+    border-color: var(--accent-primary);
+}
+
+.radio-label input[type="radio"]:checked::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 8px;
+    height: 8px;
+    background: var(--accent-primary);
+    border-radius: 50%;
+}
+
+.modal-help-text {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    margin-bottom: 20px;
+    line-height: 1.5;
+}
+
+/* Tags list for deploy modal */
+.tags-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-primary);
+}
+
+.tags-group {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.tags-group:last-child {
+    border-bottom: none;
+}
+
+.tags-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.tags-group-header .branch-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.tags-group-header .branch-name::before {
+    content: '';
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2'%3E%3Cpath d='M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9'/%3E%3C/svg%3E") no-repeat center/contain;
+}
+
+.tags-group-header .tag-count {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.tags-group-items {
+    padding: 8px;
+}
+
+.tag-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.tag-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.tag-item.selected {
+    background: rgba(0, 212, 170, 0.15);
+    border: 1px solid rgba(0, 212, 170, 0.3);
+}
+
+.tag-item .tag-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.tag-item .tag-name::before {
+    content: '';
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300d4aa' stroke-width='2'%3E%3Cpath d='M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z'/%3E%3Cline x1='7' y1='7' x2='7.01' y2='7'/%3E%3C/svg%3E") no-repeat center/contain;
+}
+
+.tag-item .tag-sha {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.selected-tag-display {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: rgba(0, 212, 170, 0.1);
+    border: 1px solid rgba(0, 212, 170, 0.2);
+    border-radius: var(--radius-md);
+    margin-top: 16px;
+}
+
+.selected-tag-display .label {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.selected-tag-display .tag-value {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--accent-primary);
+}
+
+.empty-placeholder,
+.error-placeholder {
+    padding: 32px 24px;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.empty-placeholder p,
+.error-placeholder p {
+    margin-bottom: 8px;
+}
+
+.empty-placeholder .hint,
+.error-placeholder .hint {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.error-placeholder {
+    color: var(--status-error);
+}
+
 .btn-loading {
     display: inline-block;
     width: 14px;

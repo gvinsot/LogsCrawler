@@ -2253,65 +2253,329 @@ function renderStacksList() {
     }).join('');
 }
 
+// ============== Build Modal ==============
+
+let currentBuildRepo = null;
+let currentBuildSshUrl = null;
+
 async function buildStack(repoName, sshUrl) {
-    const version = document.getElementById('stack-version')?.value || '1.0';
-    const btn = document.getElementById(`build-${repoName}`);
+    currentBuildRepo = repoName;
+    currentBuildSshUrl = sshUrl;
     
-    // Disable button and show loading
-    if (btn) {
-        btn.disabled = true;
-        btn.innerHTML = '<span class="btn-loading"></span> Building...';
+    const modal = document.getElementById('stack-build-modal');
+    const title = document.getElementById('stack-build-title');
+    const branchSelect = document.getElementById('build-branch-select');
+    const versionInput = document.getElementById('build-version-input');
+    const commitInput = document.getElementById('build-commit-input');
+    
+    title.textContent = `Build: ${repoName}`;
+    branchSelect.innerHTML = '<option value="">Loading branches...</option>';
+    commitInput.value = '';
+    versionInput.value = document.getElementById('stack-version')?.value || '1.0';
+    
+    // Reset to branch mode
+    document.querySelector('input[name="build-source"][value="branch"]').checked = true;
+    toggleBuildSource('branch');
+    
+    modal.classList.add('active');
+    
+    // Extract owner from ssh_url
+    const ownerMatch = sshUrl.match(/[:/]([^/]+)\/[^/]+\.git$/);
+    if (!ownerMatch) {
+        branchSelect.innerHTML = '<option value="">Failed to parse repository URL</option>';
+        return;
     }
+    const owner = ownerMatch[1];
     
+    // Load branches
     try {
-        const result = await apiPost(`/stacks/build?repo_name=${encodeURIComponent(repoName)}&ssh_url=${encodeURIComponent(sshUrl)}&version=${encodeURIComponent(version)}`);
-        showStackOutput('Build', repoName, result);
-    } catch (e) {
-        showStackOutput('Build', repoName, { success: false, output: e.message || 'Build failed' });
-    } finally {
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = `
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-                    <polyline points="22 4 12 14.01 9 11.01"/>
-                </svg>
-                Build
-            `;
+        const data = await apiGet(`/stacks/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/branches`);
+        if (data && data.branches && data.branches.length > 0) {
+            branchSelect.innerHTML = data.branches.map(b => 
+                `<option value="${escapeHtml(b.name)}" ${b.name === 'main' || b.name === 'master' ? 'selected' : ''}>
+                    ${escapeHtml(b.name)}${b.protected ? ' 🔒' : ''}
+                </option>`
+            ).join('');
+        } else {
+            branchSelect.innerHTML = '<option value="main">main</option>';
         }
+    } catch (e) {
+        console.error('Failed to load branches:', e);
+        branchSelect.innerHTML = '<option value="main">main (default)</option>';
     }
 }
 
-async function deployStack(repoName, sshUrl) {
-    const version = document.getElementById('stack-version')?.value || '1.0';
-    const btn = document.getElementById(`deploy-${repoName}`);
+function toggleBuildSource(source) {
+    const branchGroup = document.getElementById('build-branch-group');
+    const commitGroup = document.getElementById('build-commit-group');
     
-    // Disable button and show loading
-    if (btn) {
-        btn.disabled = true;
-        btn.innerHTML = '<span class="btn-loading"></span> Deploying...';
+    if (source === 'branch') {
+        branchGroup.style.display = 'block';
+        commitGroup.style.display = 'none';
+    } else {
+        branchGroup.style.display = 'none';
+        commitGroup.style.display = 'block';
+    }
+}
+
+function closeBuildModal() {
+    document.getElementById('stack-build-modal').classList.remove('active');
+    currentBuildRepo = null;
+    currentBuildSshUrl = null;
+}
+
+async function submitBuild() {
+    if (!currentBuildRepo || !currentBuildSshUrl) return;
+    
+    const submitBtn = document.getElementById('stack-build-submit');
+    const source = document.querySelector('input[name="build-source"]:checked').value;
+    const version = document.getElementById('build-version-input').value || '1.0';
+    
+    let branch = null;
+    let commit = null;
+    
+    if (source === 'branch') {
+        branch = document.getElementById('build-branch-select').value;
+    } else {
+        commit = document.getElementById('build-commit-input').value.trim();
+        if (!commit) {
+            showNotification('error', 'Please enter a commit ID');
+            return;
+        }
+        // Basic validation
+        if (!/^[a-fA-F0-9]{7,40}$/.test(commit)) {
+            showNotification('error', 'Invalid commit ID format. Expected 7-40 hexadecimal characters.');
+            return;
+        }
     }
     
+    // Disable button and show loading
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="btn-loading"></span> Building...';
+    
     try {
-        const result = await apiPost(`/stacks/deploy?repo_name=${encodeURIComponent(repoName)}&ssh_url=${encodeURIComponent(sshUrl)}&version=${encodeURIComponent(version)}`);
-        showStackOutput('Deploy', repoName, result);
+        let url = `/stacks/build?repo_name=${encodeURIComponent(currentBuildRepo)}&ssh_url=${encodeURIComponent(currentBuildSshUrl)}&version=${encodeURIComponent(version)}`;
+        if (branch) {
+            url += `&branch=${encodeURIComponent(branch)}`;
+        }
+        if (commit) {
+            url += `&commit=${encodeURIComponent(commit)}`;
+        }
+        
+        const result = await apiPost(url);
+        closeBuildModal();
+        showStackOutput('Build', currentBuildRepo, result);
     } catch (e) {
-        showStackOutput('Deploy', repoName, { success: false, output: e.message || 'Deploy failed' });
+        showNotification('error', e.message || 'Build failed');
     } finally {
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = `
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                    <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
-                    <polyline points="7.5 19.79 7.5 14.6 3 12"/>
-                    <polyline points="21 12 16.5 14.6 16.5 19.79"/>
-                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                    <line x1="12" y1="22.08" x2="12" y2="12"/>
-                </svg>
-                Deploy
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+            Build
+        `;
+    }
+}
+
+// ============== Deploy Modal ==============
+
+let currentDeployRepo = null;
+let currentDeploySshUrl = null;
+let selectedDeployTag = null;
+
+async function deployStack(repoName, sshUrl) {
+    currentDeployRepo = repoName;
+    currentDeploySshUrl = sshUrl;
+    selectedDeployTag = null;
+    
+    const modal = document.getElementById('stack-deploy-modal');
+    const title = document.getElementById('stack-deploy-title');
+    const tagsList = document.getElementById('deploy-tags-list');
+    const tagInput = document.getElementById('deploy-tag-input');
+    const selectedDisplay = document.getElementById('deploy-selected-tag');
+    
+    title.textContent = `Deploy: ${repoName}`;
+    tagsList.innerHTML = '<div class="loading-placeholder">Loading tags...</div>';
+    tagInput.value = '';
+    selectedDisplay.style.display = 'none';
+    
+    // Reset to select mode
+    document.querySelector('input[name="deploy-source"][value="select"]').checked = true;
+    toggleDeploySource('select');
+    
+    modal.classList.add('active');
+    
+    // Extract owner from ssh_url
+    const ownerMatch = sshUrl.match(/[:/]([^/]+)\/[^/]+\.git$/);
+    if (!ownerMatch) {
+        tagsList.innerHTML = '<div class="error-placeholder">Failed to parse repository URL</div>';
+        return;
+    }
+    const owner = ownerMatch[1];
+    
+    // Load tags
+    try {
+        const data = await apiGet(`/stacks/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/tags?limit=20`);
+        if (data && data.tags && data.tags.length > 0) {
+            renderDeployTagsList(data.tags, data.default_branch || 'main');
+            
+            // Auto-select the first (most recent) tag
+            if (data.tags.length > 0) {
+                selectDeployTag(data.tags[0].name);
+            }
+        } else {
+            tagsList.innerHTML = `
+                <div class="empty-placeholder">
+                    <p>No tags found in this repository.</p>
+                    <p class="hint">Use the manual input to enter a tag version.</p>
+                </div>
             `;
         }
+    } catch (e) {
+        console.error('Failed to load tags:', e);
+        tagsList.innerHTML = `
+            <div class="error-placeholder">
+                <p>Failed to load tags: ${escapeHtml(e.message || 'Unknown error')}</p>
+                <p class="hint">You can still enter a tag manually.</p>
+            </div>
+        `;
+    }
+}
+
+function renderDeployTagsList(tags, defaultBranch) {
+    const tagsList = document.getElementById('deploy-tags-list');
+    
+    // Group tags - for now we show them all in one group
+    let html = `
+        <div class="tags-group">
+            <div class="tags-group-header">
+                <span class="branch-name">${escapeHtml(defaultBranch)}</span>
+                <span class="tag-count">${tags.length} tag${tags.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div class="tags-group-items">
+    `;
+    
+    for (const tag of tags) {
+        html += `
+            <div class="tag-item" data-tag="${escapeHtml(tag.name)}" onclick="selectDeployTag('${escapeHtml(tag.name)}')">
+                <span class="tag-name">${escapeHtml(tag.name)}</span>
+                <span class="tag-sha">${escapeHtml(tag.sha.substring(0, 7))}</span>
+            </div>
+        `;
+    }
+    
+    html += `
+            </div>
+        </div>
+    `;
+    
+    tagsList.innerHTML = html;
+}
+
+function selectDeployTag(tagName) {
+    selectedDeployTag = tagName;
+    
+    // Update visual selection
+    document.querySelectorAll('.tag-item').forEach(el => {
+        el.classList.toggle('selected', el.dataset.tag === tagName);
+    });
+    
+    // Show selected tag display
+    const selectedDisplay = document.getElementById('deploy-selected-tag');
+    const selectedValue = document.getElementById('deploy-selected-tag-value');
+    selectedValue.textContent = tagName;
+    selectedDisplay.style.display = 'flex';
+}
+
+function toggleDeploySource(source) {
+    const selectGroup = document.getElementById('deploy-select-group');
+    const manualGroup = document.getElementById('deploy-manual-group');
+    const selectedDisplay = document.getElementById('deploy-selected-tag');
+    
+    if (source === 'select') {
+        selectGroup.style.display = 'block';
+        manualGroup.style.display = 'none';
+        // Restore selection display if we have a selected tag
+        if (selectedDeployTag) {
+            selectedDisplay.style.display = 'flex';
+        }
+    } else {
+        selectGroup.style.display = 'none';
+        manualGroup.style.display = 'block';
+        selectedDisplay.style.display = 'none';
+    }
+}
+
+function closeDeployModal() {
+    document.getElementById('stack-deploy-modal').classList.remove('active');
+    currentDeployRepo = null;
+    currentDeploySshUrl = null;
+    selectedDeployTag = null;
+}
+
+async function submitDeploy() {
+    if (!currentDeployRepo || !currentDeploySshUrl) return;
+    
+    const submitBtn = document.getElementById('stack-deploy-submit');
+    const source = document.querySelector('input[name="deploy-source"]:checked').value;
+    const version = document.getElementById('stack-version')?.value || '1.0';
+    
+    let tag = null;
+    
+    if (source === 'select') {
+        tag = selectedDeployTag;
+        if (!tag) {
+            showNotification('error', 'Please select a tag to deploy');
+            return;
+        }
+    } else {
+        tag = document.getElementById('deploy-tag-input').value.trim();
+        if (!tag) {
+            showNotification('error', 'Please enter a tag to deploy');
+            return;
+        }
+        // Basic validation for tag format
+        if (!/^v?\d+(\.\d+){0,2}$/.test(tag)) {
+            showNotification('error', 'Invalid tag format. Expected: vX.X.X or X.X.X (e.g., v1.0.5)');
+            return;
+        }
+    }
+    
+    // Disable button and show loading
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="btn-loading"></span> Deploying...';
+    
+    try {
+        let url = `/stacks/deploy?repo_name=${encodeURIComponent(currentDeployRepo)}&ssh_url=${encodeURIComponent(currentDeploySshUrl)}&version=${encodeURIComponent(version)}`;
+        if (tag) {
+            url += `&tag=${encodeURIComponent(tag)}`;
+        }
+        
+        const result = await apiPost(url);
+        closeDeployModal();
+        showStackOutput('Deploy', currentDeployRepo, result);
+        
+        // Refresh stacks list after successful deploy
+        if (result.success) {
+            setTimeout(refreshStacks, 2000);
+        }
+    } catch (e) {
+        showNotification('error', e.message || 'Deploy failed');
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
+                <polyline points="7.5 19.79 7.5 14.6 3 12"/>
+                <polyline points="21 12 16.5 14.6 16.5 19.79"/>
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                <line x1="12" y1="22.08" x2="12" y2="12"/>
+            </svg>
+            Deploy
+        `;
     }
 }
 

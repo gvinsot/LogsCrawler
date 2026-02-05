@@ -143,6 +143,166 @@ class GitHubService:
         """Check if GitHub integration is properly configured."""
         return bool(self.config.token)
 
+    async def get_repo_branches(self, owner: str, repo: str) -> List[Dict[str, Any]]:
+        """Get list of branches for a repository.
+
+        Args:
+            owner: Repository owner (user or org)
+            repo: Repository name
+
+        Returns:
+            List of branch info dicts with name, commit sha, etc.
+        """
+        if not self.config.token:
+            logger.warning("GitHub token not configured")
+            return []
+
+        session = await self._get_session()
+        url = f"https://api.github.com/repos/{owner}/{repo}/branches"
+        params = {"per_page": 100}
+
+        branches = []
+
+        try:
+            async with session.get(url, params=params) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error("GitHub API error getting branches", status=response.status, error=error_text)
+                    return []
+
+                data = await response.json()
+                for branch in data:
+                    branches.append({
+                        "name": branch["name"],
+                        "sha": branch["commit"]["sha"],
+                        "protected": branch.get("protected", False),
+                    })
+
+            # Sort branches: main/master first, then alphabetically
+            def branch_sort_key(b):
+                name = b["name"].lower()
+                if name == "main":
+                    return (0, name)
+                elif name == "master":
+                    return (1, name)
+                else:
+                    return (2, name)
+
+            branches.sort(key=branch_sort_key)
+            logger.info("Fetched branches", repo=f"{owner}/{repo}", count=len(branches))
+            return branches
+
+        except Exception as e:
+            logger.error("Failed to fetch branches", repo=f"{owner}/{repo}", error=str(e))
+            return []
+
+    async def get_repo_tags(self, owner: str, repo: str, limit: int = 20) -> Dict[str, Any]:
+        """Get list of tags for a repository, grouped by the branch they were created from.
+
+        Args:
+            owner: Repository owner (user or org)
+            repo: Repository name
+            limit: Maximum number of tags to return
+
+        Returns:
+            Dict with tags grouped by branch and metadata
+        """
+        if not self.config.token:
+            logger.warning("GitHub token not configured")
+            return {"tags": [], "branches": {}}
+
+        session = await self._get_session()
+
+        # Get all tags with their commit info
+        tags_url = f"https://api.github.com/repos/{owner}/{repo}/tags"
+        tags = []
+
+        try:
+            async with session.get(tags_url, params={"per_page": min(limit, 100)}) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error("GitHub API error getting tags", status=response.status, error=error_text)
+                    return {"tags": [], "branches": {}}
+
+                data = await response.json()
+                for tag in data[:limit]:
+                    tags.append({
+                        "name": tag["name"],
+                        "sha": tag["commit"]["sha"],
+                        "zipball_url": tag.get("zipball_url"),
+                    })
+
+            # Get branches to associate tags with branches
+            branches = await self.get_repo_branches(owner, repo)
+            branch_shas = {b["sha"]: b["name"] for b in branches}
+
+            # Try to get commit info for each tag to find which branch it belongs to
+            # This is a simplified approach - we'll group tags by checking if they match branch tips
+            # or by extracting branch info from commit history
+            tags_by_branch = {"main": [], "other": []}
+
+            for tag in tags:
+                # For now, put all tags in a list - the frontend will display them
+                # In a more sophisticated implementation, we could trace the commit history
+                tags_by_branch["main"].append(tag)
+
+            logger.info("Fetched tags", repo=f"{owner}/{repo}", count=len(tags))
+            return {
+                "tags": tags,
+                "branches": [b["name"] for b in branches],
+                "default_branch": branches[0]["name"] if branches else "main",
+            }
+
+        except Exception as e:
+            logger.error("Failed to fetch tags", repo=f"{owner}/{repo}", error=str(e))
+            return {"tags": [], "branches": []}
+
+    async def validate_branch(self, owner: str, repo: str, branch: str) -> tuple[bool, str]:
+        """Validate that a branch exists in the repository.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            branch: Branch name to validate
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        branches = await self.get_repo_branches(owner, repo)
+        branch_names = [b["name"] for b in branches]
+
+        if branch in branch_names:
+            return True, ""
+        return False, f"Branch '{branch}' not found. Available branches: {', '.join(branch_names[:5])}"
+
+    async def validate_commit(self, owner: str, repo: str, commit_id: str) -> tuple[bool, str]:
+        """Validate that a commit exists in the repository.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            commit_id: Commit SHA to validate
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if not self.config.token:
+            return False, "GitHub token not configured"
+
+        session = await self._get_session()
+        url = f"https://api.github.com/repos/{owner}/{repo}/commits/{commit_id}"
+
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return True, ""
+                elif response.status == 404:
+                    return False, f"Commit '{commit_id}' not found in repository"
+                else:
+                    return False, f"Error validating commit: HTTP {response.status}"
+        except Exception as e:
+            return False, f"Error validating commit: {str(e)}"
+
 
 class StackDeployer:
     """Service for building and deploying stacks from GitHub repos."""
@@ -347,13 +507,16 @@ class StackDeployer:
             logger.error("Command execution failed", command=command[:80], error=str(e))
             return False, str(e)
 
-    async def build(self, repo_name: str, ssh_url: str, version: str = "1.0") -> Dict[str, Any]:
+    async def build(self, repo_name: str, ssh_url: str, version: str = "1.0", 
+                   branch: str = None, commit: str = None) -> Dict[str, Any]:
         """Build a stack from a repository.
 
         Args:
             repo_name: Name of the repository
             ssh_url: SSH URL for cloning if needed
             version: Version tag for the build
+            branch: Optional branch name to build from
+            commit: Optional specific commit hash to build from
 
         Returns:
             Dict with success status, output, and timing info
@@ -363,6 +526,8 @@ class StackDeployer:
             "action": "build",
             "repo": repo_name,
             "version": version,
+            "branch": branch,
+            "commit": commit,
             "success": False,
             "output": "",
             "started_at": start_time.isoformat(),
@@ -380,11 +545,21 @@ class StackDeployer:
                 result["output"] = clone_msg
                 return result
 
-            # Run build script
+            # Run build script with optional branch and commit
             scripts_path = self.config.scripts_path
-            build_cmd = f"cd {scripts_path} && bash build-push.sh {repo_name} {version}"
+            
+            # Build command with optional branch/commit parameters
+            # Script format: build-push.sh <folder> <version> [branch] [commit]
+            build_cmd = f"cd {scripts_path} && bash build-push.sh \"{repo_name}\" {version}"
+            if branch:
+                build_cmd += f" {branch}"
+                if commit:
+                    build_cmd += f" {commit}"
+            elif commit:
+                # If commit is provided without branch, use current branch
+                build_cmd += f" \"\" {commit}"
 
-            logger.info("Running build", repo=repo_name, version=version)
+            logger.info("Running build", repo=repo_name, version=version, branch=branch, commit=commit)
             success, output = await self._run_command(build_cmd)
 
             result["success"] = success
@@ -400,22 +575,29 @@ class StackDeployer:
 
         return result
 
-    async def deploy(self, repo_name: str, ssh_url: str, version: str = "1.0") -> Dict[str, Any]:
+    async def deploy(self, repo_name: str, ssh_url: str, version: str = "1.0",
+                    tag: str = None) -> Dict[str, Any]:
         """Deploy a stack from a repository.
 
         Args:
             repo_name: Name of the repository
             ssh_url: SSH URL for cloning if needed
             version: Version tag for deployment
+            tag: Optional specific tag to deploy (e.g., v1.0.5)
 
         Returns:
             Dict with success status, output, and timing info
         """
         start_time = datetime.utcnow()
+        
+        # If tag is provided, extract version from it (e.g., v1.0.5 -> use full tag)
+        deploy_version = tag if tag else version
+        
         result = {
             "action": "deploy",
             "repo": repo_name,
-            "version": version,
+            "version": deploy_version,
+            "tag": tag,
             "success": False,
             "output": "",
             "started_at": start_time.isoformat(),
@@ -432,9 +614,9 @@ class StackDeployer:
 
             # Run deploy script
             scripts_path = self.config.scripts_path
-            deploy_cmd = f"cd {scripts_path} && bash deploy-service.sh {repo_name} {version}"
+            deploy_cmd = f"cd {scripts_path} && bash deploy-service.sh \"{repo_name}\" {deploy_version}"
 
-            logger.info("Running deploy", repo=repo_name, version=version)
+            logger.info("Running deploy", repo=repo_name, version=deploy_version, tag=tag)
             success, output = await self._run_command(deploy_cmd)
 
             result["success"] = success

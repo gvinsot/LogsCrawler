@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css?v=14">
+    <link rel="stylesheet" href="/static/css/style.css?v=15">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -421,6 +421,121 @@
                         </div>
                     </div>
                 </div>
+                
+                <!-- Build modal -->
+                <div id="stack-build-modal" class="modal">
+                    <div class="modal-content modal-md">
+                        <div class="modal-header">
+                            <h2 id="stack-build-title">Build Stack</h2>
+                            <button class="modal-close" onclick="closeBuildModal()">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="modal-help-text">Choose a branch to build from, or enter a specific commit ID.</p>
+                            
+                            <div class="form-group">
+                                <label class="form-label">Source</label>
+                                <div class="radio-group">
+                                    <label class="radio-label">
+                                        <input type="radio" name="build-source" value="branch" checked onchange="toggleBuildSource('branch')">
+                                        <span>Branch</span>
+                                    </label>
+                                    <label class="radio-label">
+                                        <input type="radio" name="build-source" value="commit" onchange="toggleBuildSource('commit')">
+                                        <span>Commit ID</span>
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            <div id="build-branch-group" class="form-group">
+                                <label class="form-label" for="build-branch-select">Branch</label>
+                                <select id="build-branch-select" class="form-select">
+                                    <option value="">Loading branches...</option>
+                                </select>
+                            </div>
+                            
+                            <div id="build-commit-group" class="form-group" style="display: none;">
+                                <label class="form-label" for="build-commit-input">Commit ID</label>
+                                <input type="text" id="build-commit-input" class="form-input" placeholder="e.g., abc1234 or full SHA">
+                                <span class="form-hint">Enter a short or full commit hash (7-40 characters)</span>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label class="form-label" for="build-version-input">Version</label>
+                                <input type="text" id="build-version-input" class="form-input" placeholder="1.0" value="1.0">
+                                <span class="form-hint">Major.minor version (patch will be auto-incremented)</span>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary" onclick="closeBuildModal()">Cancel</button>
+                            <button class="btn btn-primary" id="stack-build-submit" onclick="submitBuild()">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                                    <polyline points="22 4 12 14.01 9 11.01"/>
+                                </svg>
+                                Build
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Deploy modal -->
+                <div id="stack-deploy-modal" class="modal">
+                    <div class="modal-content modal-md">
+                        <div class="modal-header">
+                            <h2 id="stack-deploy-title">Deploy Stack</h2>
+                            <button class="modal-close" onclick="closeDeployModal()">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="modal-help-text">Select a version tag to deploy, or enter a custom tag.</p>
+                            
+                            <div class="form-group">
+                                <label class="form-label">Tag Source</label>
+                                <div class="radio-group">
+                                    <label class="radio-label">
+                                        <input type="radio" name="deploy-source" value="select" checked onchange="toggleDeploySource('select')">
+                                        <span>Select from list</span>
+                                    </label>
+                                    <label class="radio-label">
+                                        <input type="radio" name="deploy-source" value="manual" onchange="toggleDeploySource('manual')">
+                                        <span>Enter manually</span>
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            <div id="deploy-select-group" class="form-group">
+                                <label class="form-label">Available Tags</label>
+                                <div id="deploy-tags-list" class="tags-list">
+                                    <div class="loading-placeholder">Loading tags...</div>
+                                </div>
+                            </div>
+                            
+                            <div id="deploy-manual-group" class="form-group" style="display: none;">
+                                <label class="form-label" for="deploy-tag-input">Tag</label>
+                                <input type="text" id="deploy-tag-input" class="form-input" placeholder="e.g., v1.0.5 or 1.0.5">
+                                <span class="form-hint">Format: vX.X.X or X.X.X (e.g., v1.0.5)</span>
+                            </div>
+                            
+                            <div id="deploy-selected-tag" class="selected-tag-display" style="display: none;">
+                                <span class="label">Selected:</span>
+                                <span class="tag-value" id="deploy-selected-tag-value">-</span>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary" onclick="closeDeployModal()">Cancel</button>
+                            <button class="btn btn-primary" id="stack-deploy-submit" onclick="submitDeploy()">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                                    <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
+                                    <polyline points="7.5 19.79 7.5 14.6 3 12"/>
+                                    <polyline points="21 12 16.5 14.6 16.5 19.79"/>
+                                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                                    <line x1="12" y1="22.08" x2="12" y2="12"/>
+                                </svg>
+                                Deploy
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- Container Detail Modal -->
@@ -540,6 +655,6 @@
         </main>
     </div>
     
-    <script src="/static/js/app.js?v=9"></script>
+    <script src="/static/js/app.js?v=10"></script>
 </body>
 </html>

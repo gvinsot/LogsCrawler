@@ -864,15 +864,73 @@ async def get_starred_repos():
     return {"repos": repos, "count": len(repos)}
 
 
+@app.get("/api/stacks/{owner}/{repo}/branches")
+async def get_repo_branches(owner: str, repo: str):
+    """Get list of branches for a repository."""
+    if not github_service.is_configured():
+        raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    branches = await github_service.get_repo_branches(owner, repo)
+    return {"branches": branches, "count": len(branches)}
+
+
+@app.get("/api/stacks/{owner}/{repo}/tags")
+async def get_repo_tags(
+    owner: str,
+    repo: str,
+    limit: int = Query(default=20, ge=1, le=100, description="Maximum number of tags to return"),
+):
+    """Get list of tags for a repository."""
+    if not github_service.is_configured():
+        raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    tags_data = await github_service.get_repo_tags(owner, repo, limit)
+    return tags_data
+
+
+import re
+
 @app.post("/api/stacks/build")
 async def build_stack(
     repo_name: str = Query(..., description="Repository name"),
     ssh_url: str = Query(..., description="SSH URL for cloning"),
     version: str = Query(default="1.0", description="Version tag"),
+    branch: str = Query(default=None, description="Branch name to build from"),
+    commit: str = Query(default=None, description="Specific commit hash to build from"),
 ):
-    """Build a stack from a GitHub repository."""
+    """Build a stack from a GitHub repository.
+    
+    Args:
+        repo_name: Name of the repository
+        ssh_url: SSH URL for cloning
+        version: Version tag for the build (e.g., "1.0")
+        branch: Optional branch name to build from
+        commit: Optional specific commit hash to build from
+    """
     if not github_service.is_configured():
         raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    # Extract owner from ssh_url (format: git@github.com:owner/repo.git)
+    owner = None
+    if ssh_url:
+        match = re.search(r'[:/]([^/]+)/[^/]+\.git$', ssh_url)
+        if match:
+            owner = match.group(1)
+    
+    # Validate branch if provided
+    if branch and owner:
+        is_valid, error_msg = await github_service.validate_branch(owner, repo_name, branch)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+    
+    # Validate commit if provided
+    if commit and owner:
+        # Basic format validation for commit hash
+        if not re.match(r'^[a-fA-F0-9]{7,40}$', commit):
+            raise HTTPException(status_code=400, detail=f"Invalid commit hash format: '{commit}'. Expected 7-40 hexadecimal characters.")
+        is_valid, error_msg = await github_service.validate_commit(owner, repo_name, commit)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
     
     # Get the first configured host client for running commands
     if not collector.clients:
@@ -894,7 +952,7 @@ async def build_stack(
         host_name, host_client = next(iter(collector.clients.items()))
     
     deployer = StackDeployer(settings.github, host_client)
-    result = await deployer.build(repo_name, ssh_url, version)
+    result = await deployer.build(repo_name, ssh_url, version, branch=branch, commit=commit)
     result["host"] = host_name
     
     return result
@@ -905,10 +963,27 @@ async def deploy_stack(
     repo_name: str = Query(..., description="Repository name"),
     ssh_url: str = Query(..., description="SSH URL for cloning"),
     version: str = Query(default="1.0", description="Version tag"),
+    tag: str = Query(default=None, description="Specific tag to deploy (format: vX.X.X)"),
 ):
-    """Deploy a stack from a GitHub repository."""
+    """Deploy a stack from a GitHub repository.
+    
+    Args:
+        repo_name: Name of the repository
+        ssh_url: SSH URL for cloning
+        version: Version tag for the deployment (e.g., "1.0")
+        tag: Optional specific tag to deploy (e.g., "v1.0.5")
+    """
     if not github_service.is_configured():
         raise HTTPException(status_code=400, detail="GitHub integration not configured")
+    
+    # Validate tag format if provided
+    if tag:
+        # Accept formats: vX.X.X, X.X.X, vX.X, X.X, or any version-like string
+        if not re.match(r'^v?\d+(\.\d+){0,2}$', tag):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid tag format: '{tag}'. Expected format: vX.X.X (e.g., v1.0.5) or X.X.X"
+            )
     
     # Get the first configured host client for running commands
     if not collector.clients:
@@ -930,7 +1005,7 @@ async def deploy_stack(
         host_name, host_client = next(iter(collector.clients.items()))
     
     deployer = StackDeployer(settings.github, host_client)
-    result = await deployer.deploy(repo_name, ssh_url, version)
+    result = await deployer.deploy(repo_name, ssh_url, version, tag=tag)
     result["host"] = host_name
     
     return result

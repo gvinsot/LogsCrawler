@@ -84,8 +84,8 @@ class GitHubConfig(BaseModel):
     useremail: Optional[str] = None
     # Path where repos are cloned on the host
     repos_path: str = "~/repos"
-    # Path to deployment scripts
-    scripts_path: str = "~/PrivateNetwork"
+    # Path to deployment scripts (LogsCrawler/scripts folder)
+    scripts_path: str = "~/repos/LogsCrawler/scripts"
     # SSH configuration for executing commands on the host
     # Required when LogsCrawler runs in a container and needs to run git/build on the host
     ssh_host: Optional[str] = None
