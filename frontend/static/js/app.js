@@ -2186,12 +2186,6 @@ function renderStacksList() {
         </svg>`;
         
         // Use host-group structure similar to Computers view
-        // Build metadata badges (private, language)
-        const metaBadges = [];
-        if (repo.private) metaBadges.push('<span class="stack-meta-badge private">Private</span>');
-        if (repo.language) metaBadges.push(`<span class="stack-meta-badge lang">${escapeHtml(repo.language)}</span>`);
-        const metaLine = metaBadges.length > 0 ? `<div class="stack-meta">${metaBadges.join('')}</div>` : '';
-        
         return `
         <div class="host-group ${isExpanded ? '' : 'collapsed'}" data-repo="${escapeHtml(repo.name)}">
             <div class="host-header" ${isDeployed ? `onclick="toggleStackExpand('${escapeHtml(repo.name)}')"` : ''}>
@@ -2202,10 +2196,7 @@ function renderStacksList() {
                     </svg>
                     ` : ''}
                     ${stackIcon}
-                    <div class="stack-name-block">
-                        <span class="stack-name-text">${escapeHtml(repo.name)}</span>
-                        ${metaLine}
-                    </div>
+                    ${escapeHtml(repo.name)}
                     ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : '<span class="stack-badge" style="background: var(--bg-tertiary); color: var(--text-muted);">Not deployed</span>'}
                     ${isDeployed ? `<span class="group-count">${containerCount} containers</span>` : ''}
                     ${stackMemoryDisplay ? `<span class="group-stat group-memory" title="RAM - Total memory usage">💾 ${stackMemoryDisplay}</span>` : ''}

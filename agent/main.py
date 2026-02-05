@@ -27,9 +27,17 @@ logging.basicConfig(
 )
 
 # Silence noisy HTTP client logs
-logging.getLogger("opensearchpy").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("elastic_transport").setLevel(logging.WARNING)
+logging.getLogger("opensearchpy").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
+logging.getLogger("elastic_transport").setLevel(logging.ERROR)
+logging.getLogger("elastic_transport.transport").setLevel(logging.ERROR)
+logging.getLogger("elastic_transport.node").setLevel(logging.ERROR)
+logging.getLogger("elastic_transport.node_pool").setLevel(logging.ERROR)
+logging.getLogger("opensearch").setLevel(logging.ERROR)
+logging.getLogger("aiohttp").setLevel(logging.ERROR)
+logging.getLogger("aiohttp.client").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("httpcore").setLevel(logging.ERROR)
 
 # Configure structured logging
 structlog.configure(

@@ -878,7 +878,7 @@ async def get_repo_branches(owner: str, repo: str):
 async def get_repo_tags(
     owner: str,
     repo: str,
-    limit: int = Query(default=20, ge=1, le=100, description="Maximum number of tags to return"),
+    limit: int = Query(default=10, ge=1, le=100, description="Maximum number of tags to return"),
 ):
     """Get list of tags for a repository."""
     if not github_service.is_configured():

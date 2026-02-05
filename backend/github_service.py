@@ -196,7 +196,7 @@ class GitHubService:
             logger.error("Failed to fetch branches", repo=f"{owner}/{repo}", error=str(e))
             return []
 
-    async def get_repo_tags(self, owner: str, repo: str, limit: int = 20) -> Dict[str, Any]:
+    async def get_repo_tags(self, owner: str, repo: str, limit: int = 10) -> Dict[str, Any]:
         """Get list of tags for a repository, grouped by the branch they were created from.
 
         Args:
