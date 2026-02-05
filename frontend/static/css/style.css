@@ -488,6 +488,14 @@ a.btn {
     margin-bottom: 0;
 }
 
+#stacks-list > .host-group {
+    margin-bottom: 16px;
+}
+
+#stacks-list > .host-group:last-child {
+    margin-bottom: 0;
+}
+
 /* Scrollbar styling for containers */
 #containers-list::-webkit-scrollbar {
     width: 8px;
