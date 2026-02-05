@@ -3,46 +3,65 @@
 # LogsCrawler
 
 ![Dashboard Screenshot](screenshot.png)
+*Dashboard: Real-time metrics, error tracking, and resource monitoring*
 
-A professional Docker container log aggregation and monitoring solution with an agent-based architecture. Deploy lightweight agents on each host to collect logs and metrics from Docker containers, store data in OpenSearch, and manage everything through a modern web dashboard.
+![Stacks Management](screenshot2.png)
+*Stacks: Build and deploy directly from your GitHub repositories*
 
-## Projects
+**Stop switching between GitHub, Portainer, Grafana, and terminal windows.** LogsCrawler is an all-in-one DevOps platform that unifies your entire container workflow into a single, modern interface.
 
-- **LogsCrawler** (this repository): Fully developed by me. A complete, production-grade log aggregation and monitoring platform for Docker environments, featuring agent-based collection, OpenSearch integration, AI-powered search, and a modern dashboard.
+Built for **homelab enthusiasts** and small-scale DevOps teams who want the power of enterprise tools without the complexity. Star a repo on GitHub, build it, deploy it to your Swarm cluster, and monitor it — all from one dashboard.
+
+## Why LogsCrawler?
+
+If you're tired of:
+- Jumping between GitHub, CI/CD pipelines, and deployment tools
+- SSHing into multiple machines to check logs
+- Managing Docker containers across different hosts
+- Setting up separate monitoring stacks
+
+Then LogsCrawler is for you. **One tool. One interface. Complete control.**
+
+## Key Capabilities
+
+| Build | Deploy | Monitor | Manage |
+|-------|--------|---------|--------|
+| Clone from GitHub | Docker Swarm stacks | Centralized logs | Start/Stop containers |
+| Multi-branch builds | Environment config | Real-time metrics | Exec into containers |
+| Version tagging | Rolling updates | AI-powered search | Resource limits |
+| Build history | Rollback support | Error tracking | Grouped views |
 
 ## Features
 
-### Log Management
-- **Centralized Log Collection**: Agents automatically collect logs from all Docker containers on each host
-- **Direct OpenSearch Writes**: Agents write directly to OpenSearch for minimal latency
-- **Full-Text Search**: Powerful search capabilities using OpenSearch query syntax
-- **AI-Powered Search**: Natural language queries powered by Ollama (e.g., "show me errors from nginx in the last hour")
-- **Log Level Detection**: Automatically detects ERROR, WARN, INFO, DEBUG levels
-- **HTTP Status Extraction**: Parses HTTP status codes from web server logs
+### 🔗 GitHub Integration
+- **Starred Repos**: Your starred repositories appear automatically
+- **Branch Selection**: Build from any branch or specific commit
+- **Compose Detection**: Automatically finds docker-compose files
+- **Version Management**: Tag your builds with semantic versions
 
-### Metrics & Monitoring
-- **Host Metrics**: CPU, Memory, Disk, and GPU (AMD/NVIDIA) usage per host
-- **Container Metrics**: CPU, Memory, Network I/O, Block I/O per container
-- **Time Series Visualization**: Charts showing resource usage over time
+### 🏗️ Build & Deploy
+- **One-Click Builds**: Build Docker images directly from your repos
+- **Docker Swarm**: Deploy as Swarm stacks for high availability
+- **Environment Management**: Configure environment variables per stack
+- **Tag Selection**: Deploy specific versions or latest builds
+
+### 📊 Monitoring & Logs
+- **Centralized Log Collection**: Agents collect logs from all containers across all hosts
+- **Full-Text Search**: Powerful OpenSearch-backed queries
+- **AI-Powered Search**: Natural language queries via Ollama (e.g., "show me errors from nginx in the last hour")
+- **Real-Time Metrics**: CPU, Memory, GPU (AMD/NVIDIA), Disk usage
 - **Error Tracking**: 4xx/5xx HTTP error counts and trends
 
-### Container Management
-- **Grouped View**: Containers grouped by host and Docker Compose project
-- **Status Filtering**: Filter by running, exited, paused status
-- **Container Actions**: Start, Stop, Restart, Pause/Unpause containers via agent polling
-- **Live Logs**: View real-time container logs
-- **Resource Stats**: View current CPU/Memory usage
+### 🖥️ Container Management
+- **Multi-Host View**: See all containers grouped by host and Compose project
+- **Container Actions**: Start, Stop, Restart, Pause/Unpause from the UI
+- **Live Logs**: Stream container logs in real-time
+- **Resource Stats**: Monitor CPU/Memory usage per container
 
-### Stack Deployment
-- **GitHub Integration**: Deploy Docker stacks from your starred GitHub repositories
-- **Compose File Detection**: Automatically detects docker-compose.yml files
-- **Direct Deployment**: Deploy stacks to your Docker hosts
-
-### Dashboard
-- **Summary Statistics**: Running containers, hosts, error counts
-- **Error Trends**: Visualize error patterns over 24h
-- **Resource Usage**: CPU and Memory usage graphs
-- **HTTP Status Distribution**: 4xx/5xx breakdown
+### 📈 Dashboard
+- **Summary Statistics**: Running containers, hosts, error counts at a glance
+- **Time Series Charts**: Visualize resource usage and error patterns over 24h
+- **HTTP Status Distribution**: Track 4xx/5xx breakdown
 
 ## Architecture
 
