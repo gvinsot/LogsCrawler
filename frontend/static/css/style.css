@@ -454,8 +454,8 @@ a.btn {
 
 .chart-wrapper {
     position: relative;
-    flex: 1;
-    min-height: 0;
+    height: calc(100% - 36px);
+    min-height: 180px;
 }
 
 .chart-card canvas {
@@ -2832,7 +2832,7 @@ a.btn {
 
     .chart-wrapper {
         height: 140px;
-        flex: none;
+        min-height: 140px;
     }
 
     /* Container view */
@@ -3251,7 +3251,7 @@ a.btn {
 
     .chart-wrapper {
         height: 120px;
-        flex: none;
+        min-height: 120px;
     }
 
     .container-stats-mini {
