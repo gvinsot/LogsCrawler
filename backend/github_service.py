@@ -630,8 +630,11 @@ class StackDeployer:
         """
         start_time = datetime.utcnow()
         
-        # If tag is provided, extract version from it (e.g., v1.0.5 -> use full tag)
+        # If tag is provided, extract version from it (e.g., v1.0.5 -> 1.0.5)
         deploy_version = tag if tag else version
+        # Strip leading 'v' from version if present
+        if deploy_version.startswith('v'):
+            deploy_version = deploy_version[1:]
         
         result = {
             "action": "deploy",
