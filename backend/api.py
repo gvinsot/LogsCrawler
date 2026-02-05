@@ -687,6 +687,54 @@ async def get_hosts_metrics() -> Dict[str, Dict[str, Any]]:
     return result
 
 
+@app.post("/api/hosts/{host_name}/action")
+async def execute_host_action(host_name: str, request: Dict[str, str]) -> Dict[str, Any]:
+    """Execute an action on a host (reboot or shutdown).
+    
+    Args:
+        host_name: Name of the host to perform action on
+        request: Dict with 'action' key: 'reboot' or 'shutdown'
+    """
+    action = request.get("action", "").lower()
+    
+    if action not in ("reboot", "shutdown"):
+        raise HTTPException(status_code=400, detail="Invalid action. Must be 'reboot' or 'shutdown'")
+    
+    client = collector.clients.get(host_name)
+    if not client:
+        raise HTTPException(status_code=404, detail=f"Host '{host_name}' not found")
+    
+    try:
+        if action == "reboot":
+            command = "sudo reboot"
+        else:
+            command = "sudo shutdown -h now"
+        
+        # Execute the command
+        success, output = await client.run_shell_command(command)
+        
+        # For reboot/shutdown, command may "fail" because connection drops
+        # We consider it a success if it was sent
+        return {
+            "success": True,
+            "message": f"{action.capitalize()} command sent to {host_name}",
+            "host": host_name,
+            "action": action,
+            "output": output
+        }
+    except Exception as e:
+        # Connection dropping during shutdown is expected
+        if "disconnect" in str(e).lower() or "closed" in str(e).lower():
+            return {
+                "success": True,
+                "message": f"{action.capitalize()} initiated on {host_name}",
+                "host": host_name,
+                "action": action
+            }
+        logger.error("Failed to execute host action", host=host_name, action=action, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to {action}: {str(e)}")
+
+
 # ============== Health ==============
 
 @app.get("/api/health")

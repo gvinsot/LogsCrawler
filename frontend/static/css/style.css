@@ -1982,19 +1982,48 @@ body {
 
 .stack-item {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 12px;
+    flex-direction: column;
+    padding: 0;
     background: var(--bg-card);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
     transition: var(--transition);
-    gap: 12px;
+    overflow: hidden;
 }
 
 .stack-item:hover {
     border-color: var(--accent-primary);
     box-shadow: var(--shadow-glow);
+}
+
+.stack-item.deployed {
+    border-color: rgba(34, 197, 94, 0.3);
+}
+
+.stack-header {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    gap: 8px;
+    cursor: default;
+}
+
+.stack-item.deployed .stack-header {
+    cursor: pointer;
+}
+
+.stack-item.deployed .stack-header:hover {
+    background: var(--bg-tertiary);
+}
+
+.stack-chevron {
+    flex-shrink: 0;
+    color: var(--text-muted);
+    transition: transform 0.2s ease;
+}
+
+.stack-chevron.expanded {
+    transform: rotate(180deg);
 }
 
 .stack-info {
@@ -2070,6 +2099,50 @@ body {
     display: flex;
     gap: 4px;
     flex-shrink: 0;
+}
+
+/* Stack Containers (expandable section) */
+.stack-containers {
+    border-top: 1px solid var(--border-color);
+    padding: 12px;
+    background: var(--bg-secondary);
+}
+
+.stack-service {
+    margin-bottom: 12px;
+}
+
+.stack-service:last-child {
+    margin-bottom: 0;
+}
+
+.stack-service-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+}
+
+.stack-service-header svg {
+    color: var(--text-muted);
+}
+
+.stack-service-containers {
+    padding-left: 12px;
+}
+
+.stack-service-containers .container-item {
+    margin-bottom: 6px;
+}
+
+.stack-service-containers .container-item:last-child {
+    margin-bottom: 0;
 }
 
 .github-status {

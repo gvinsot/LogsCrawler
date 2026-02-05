@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css?v=11">
+    <link rel="stylesheet" href="/static/css/style.css?v=12">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -47,9 +47,12 @@
                 </a>
                 <a href="#" class="nav-item" data-view="containers">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+                        <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+                        <line x1="6" y1="6" x2="6.01" y2="6"/>
+                        <line x1="6" y1="18" x2="6.01" y2="18"/>
                     </svg>
-                    <span>Containers</span>
+                    <span>Computers</span>
                 </a>
                 <a href="#" class="nav-item" data-view="logs">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -221,18 +224,11 @@
                 </div>
             </section>
 
-            <!-- Containers View -->
+            <!-- Computers View -->
             <section id="containers-view" class="view">
                 <header class="view-header">
-                    <h1>Containers</h1>
+                    <h1>Computers</h1>
                     <div class="header-actions">
-                        <div class="filter-group">
-                            <label>Group by:</label>
-                            <select id="group-by-filter" onchange="filterContainers()">
-                                <option value="host">Host</option>
-                                <option value="stack">Swarm Stack</option>
-                            </select>
-                        </div>
                         <div class="filter-group">
                             <label>Status:</label>
                             <select id="status-filter" onchange="filterContainers()">
@@ -544,6 +540,6 @@
         </main>
     </div>
     
-    <script src="/static/js/app.js?v=5"></script>
+    <script src="/static/js/app.js?v=6"></script>
 </body>
 </html>

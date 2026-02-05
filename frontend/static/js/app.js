@@ -1009,7 +1009,6 @@ function getChartOptions(isPercent = false) {
 // Local storage keys
 const CONTAINERS_FILTER_KEY = 'logscrawler_containers_filter';
 const CONTAINERS_GROUPS_KEY = 'logscrawler_containers_groups';
-const CONTAINERS_GROUP_BY_KEY = 'logscrawler_containers_group_by';
 
 function getStoredFilter() {
     try {
@@ -1048,22 +1047,6 @@ function getGroupKey(host, project) {
     return `${host}::${project}`;
 }
 
-function getStoredGroupBy() {
-    try {
-        return localStorage.getItem(CONTAINERS_GROUP_BY_KEY) || 'host';
-    } catch {
-        return 'host';
-    }
-}
-
-function saveGroupBy(value) {
-    try {
-        localStorage.setItem(CONTAINERS_GROUP_BY_KEY, value);
-    } catch (e) {
-        console.error('Failed to save group by:', e);
-    }
-}
-
 async function loadContainers(forceRefresh = false) {
     // Restore filters from localStorage
     const storedFilter = getStoredFilter();
@@ -1072,14 +1055,8 @@ async function loadContainers(forceRefresh = false) {
         document.getElementById('status-filter').value = storedFilter;
     }
     
-    // Restore group by preference - prioritize stored value
-    const storedGroupBy = getStoredGroupBy();
-    const groupBySelect = document.getElementById('group-by-filter');
-    if (groupBySelect && storedGroupBy) {
-        groupBySelect.value = storedGroupBy;
-    }
-    const groupBy = groupBySelect?.value || storedGroupBy || 'host';
-    saveGroupBy(groupBy);
+    // Always use host grouping for Computers view
+    const groupBy = 'host';
     
     // forceRefresh ensures backend cache is invalidated
     let endpoint = `/containers/grouped?refresh=true&group_by=${groupBy}`;
@@ -1100,15 +1077,11 @@ async function loadContainers(forceRefresh = false) {
     const container = document.getElementById('containers-list');
     container.innerHTML = '';
     
-    const isStackView = groupBy === 'stack';
-    const topLevelLabel = isStackView ? 'Stack' : 'Host';
-    const topLevelIcon = isStackView ? 
-        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-        </svg>` :
-        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    const topLevelIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
             <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+            <line x1="6" y1="6" x2="6.01" y2="6"/>
+            <line x1="6" y1="18" x2="6.01" y2="18"/>
         </svg>`;
     
     for (const [topLevel, services] of Object.entries(grouped)) {
@@ -1139,11 +1112,11 @@ async function loadContainers(forceRefresh = false) {
         const topLevelCpuClass = topLevelMaxCpu >= 80 ? 'cpu-critical' : (topLevelMaxCpu >= 50 ? 'cpu-warning' : '');
         const topLevelCpuDisplay = topLevelMaxCpu > 0 ? `${topLevelMaxCpu.toFixed(1)}%` : '';
         
-        // Get GPU usage from host metrics (only in host view, not stack view)
+        // Get GPU usage from host metrics
         let topLevelGpuDisplay = '';
         let topLevelGpuClass = '';
         let topLevelVramDisplay = '';
-        if (!isStackView && hostMetrics && hostMetrics[topLevel]) {
+        if (hostMetrics && hostMetrics[topLevel]) {
             const gpuPercent = hostMetrics[topLevel].gpu_percent;
             const gpuMemUsed = hostMetrics[topLevel].gpu_memory_used_mb;
             const gpuMemTotal = hostMetrics[topLevel].gpu_memory_total_mb;
@@ -1157,53 +1130,6 @@ async function loadContainers(forceRefresh = false) {
                 topLevelVramDisplay = `<span class="group-stat group-gpu ${vramClass}" title="VRAM usage">🖼️ ${formatMemory(gpuMemUsed)} / ${formatMemory(gpuMemTotal)}</span>`;
             }
         }
-        
-        // For stack view: aggregate GPU metrics from all hosts that have containers in this stack
-        if (isStackView && hostMetrics) {
-            // Collect unique hosts that have containers in this stack
-            const hostsInStack = new Set();
-            for (const containers of Object.values(services)) {
-                for (const c of containers) {
-                    if (c.host) hostsInStack.add(c.host);
-                }
-            }
-            
-            // Aggregate GPU metrics: max GPU%, sum VRAM used, sum VRAM total
-            let maxGpuPercent = null;
-            let totalVramUsed = 0;
-            let totalVramTotal = 0;
-            let hasVramData = false;
-            
-            for (const host of hostsInStack) {
-                if (hostMetrics[host]) {
-                    const gpuPercent = hostMetrics[host].gpu_percent;
-                    const gpuMemUsed = hostMetrics[host].gpu_memory_used_mb;
-                    const gpuMemTotal = hostMetrics[host].gpu_memory_total_mb;
-                    
-                    if (gpuPercent != null) {
-                        maxGpuPercent = maxGpuPercent != null ? Math.max(maxGpuPercent, gpuPercent) : gpuPercent;
-                    }
-                    if (gpuMemUsed != null && gpuMemTotal != null) {
-                        totalVramUsed += gpuMemUsed;
-                        totalVramTotal += gpuMemTotal;
-                        hasVramData = true;
-                    }
-                }
-            }
-            
-            if (maxGpuPercent != null) {
-                topLevelGpuClass = maxGpuPercent >= 80 ? 'gpu-critical' : (maxGpuPercent >= 50 ? 'gpu-warning' : '');
-                topLevelGpuDisplay = `${maxGpuPercent.toFixed(1)}%`;
-            }
-            if (hasVramData && totalVramTotal > 0) {
-                const vramPercent = (totalVramUsed / totalVramTotal) * 100;
-                const vramClass = vramPercent >= 80 ? 'gpu-critical' : (vramPercent >= 50 ? 'gpu-warning' : '');
-                topLevelVramDisplay = `<span class="group-stat group-gpu ${vramClass}" title="VRAM usage (${hostsInStack.size} host${hostsInStack.size > 1 ? 's' : ''})">🖼️ ${formatMemory(totalVramUsed)} / ${formatMemory(totalVramTotal)}</span>`;
-            }
-        }
-        
-        // Get the first host from containers in this stack (for stack removal)
-        const firstHost = Object.values(services)[0]?.[0]?.host || '';
         
         let topLevelHtml = `
             <div class="host-header" onclick="toggleHostGroup(event, this)">
@@ -1219,17 +1145,22 @@ async function loadContainers(forceRefresh = false) {
                     ${topLevelGpuDisplay ? `<span class="group-stat group-gpu ${topLevelGpuClass}" title="GPU - Compute usage">🎮 ${topLevelGpuDisplay}</span>` : ''}
                     ${topLevelVramDisplay}
                 </span>
-                ${isStackView && topLevel !== '_standalone' ? `
                 <div class="host-header-actions" onclick="event.stopPropagation();">
-                    <button class="btn btn-sm btn-danger" onclick="removeStack('${escapeHtml(topLevel)}', '${escapeHtml(firstHost)}')" title="Remove entire stack">
+                    <button class="btn btn-sm btn-warning" onclick="hostAction('${escapeHtml(topLevel)}', 'reboot')" title="Reboot this computer">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                            <polyline points="3 6 5 6 21 6"/>
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                            <polyline points="23 4 23 10 17 10"/>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
                         </svg>
-                        Remove Stack
+                        <span>Reboot</span>
+                    </button>
+                    <button class="btn btn-sm btn-danger" onclick="hostAction('${escapeHtml(topLevel)}', 'shutdown')" title="Shutdown this computer">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+                            <line x1="12" y1="2" x2="12" y2="12"/>
+                        </svg>
+                        <span>Shutdown</span>
                     </button>
                 </div>
-                ` : ''}
             </div>
             <div class="host-content">
         `;
@@ -1324,10 +1255,7 @@ async function loadContainers(forceRefresh = false) {
                     ? `${c.memory_percent}%${c.memory_usage_mb ? ` (${c.memory_usage_mb}MB)` : ''}`
                     : '-';
                 
-                // In stack view, show host info in container name
-                const containerNameHtml = isStackView && c.host ? 
-                    `${escapeHtml(c.name)} <span style="color: var(--text-muted); font-size: 0.85em;">(${escapeHtml(c.host)})</span>` :
-                    escapeHtml(c.name);
+                const containerNameHtml = escapeHtml(c.name);
                 
                 topLevelHtml += `
                     <div class="container-item" onclick="openContainer('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', ${JSON.stringify(c).replace(/"/g, '&quot;')})">
@@ -1422,11 +1350,32 @@ function filterContainers() {
     const filterValue = document.getElementById('status-filter').value;
     saveFilter(filterValue);
     
-    // Save group by value
-    const groupByValue = document.getElementById('group-by-filter').value;
-    saveGroupBy(groupByValue);
-    
     loadContainers();
+}
+
+// Host action (reboot/shutdown)
+async function hostAction(hostName, action) {
+    const actionLabel = action === 'reboot' ? 'reboot' : 'shutdown';
+    const confirmMessage = `Are you sure you want to ${actionLabel} the computer "${hostName}"?\n\nThis action cannot be undone and will affect all containers on this host.`;
+    
+    if (!confirm(confirmMessage)) {
+        return;
+    }
+    
+    try {
+        const result = await apiPost(`/hosts/${encodeURIComponent(hostName)}/action`, {
+            action: action
+        });
+        
+        if (result && result.success) {
+            showNotification('success', `${actionLabel.charAt(0).toUpperCase() + actionLabel.slice(1)} command sent to ${hostName}`);
+        } else {
+            showNotification('error', result?.message || `Failed to ${actionLabel} ${hostName}`);
+        }
+    } catch (error) {
+        console.error(`Failed to ${actionLabel} host:`, error);
+        showNotification('error', `Failed to ${actionLabel}: ${error.message || 'Unknown error'}`);
+    }
 }
 
 // ============== Container Modal ==============
@@ -1861,6 +1810,41 @@ async function removeStack(stackName, host) {
     }
 }
 
+// Remove deployed stack from Stacks view
+async function removeDeployedStack(stackName) {
+    // Show confirmation
+    const confirmMessage = `Are you sure you want to remove the deployed stack "${stackName}"?\n\nThis will remove ALL services and containers in this stack. This action cannot be undone.`;
+    
+    if (!confirm(confirmMessage)) {
+        return;
+    }
+    
+    try {
+        const url = `/api/stacks/${encodeURIComponent(stackName)}/remove`;
+        const response = await fetch(`${API_BASE}${url}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result && result.success) {
+            showNotification('success', result.message);
+            setTimeout(refreshStacks, 2000); // Wait a bit longer for stack removal
+        } else {
+            showNotification('error', result?.message || result?.detail || 'Failed to remove stack');
+        }
+    } catch (error) {
+        console.error('Failed to remove stack:', error);
+        showNotification('error', `Failed to remove stack: ${error.message || 'Unknown error'}`);
+    }
+}
+
 // ============== Logs Search ==============
 
 // Store last search params for pagination
@@ -1963,10 +1947,12 @@ async function refreshStacks() {
     const listEl = document.getElementById('stacks-list');
     listEl.innerHTML = '<div class="loading-placeholder">Loading starred repositories...</div>';
     
-    // Load repos and deployed tags in parallel
-    const [reposData, tagsData] = await Promise.all([
+    // Load repos, deployed tags, and containers in parallel
+    const [reposData, tagsData, containersData, hostMetrics] = await Promise.all([
         apiGet('/stacks/repos'),
-        apiGet('/stacks/deployed-tags')
+        apiGet('/stacks/deployed-tags'),
+        apiGet('/containers/grouped?refresh=true&group_by=stack'),
+        apiGet('/hosts/metrics')
     ]);
     
     if (!reposData || !reposData.repos) {
@@ -1976,6 +1962,8 @@ async function refreshStacks() {
     
     stacksRepos = reposData.repos;
     stacksDeployedTags = (tagsData && tagsData.tags) ? tagsData.tags : {};
+    stacksContainers = containersData || {};
+    stacksHostMetrics = hostMetrics || {};
     
     if (stacksRepos.length === 0) {
         listEl.innerHTML = '<div class="empty-placeholder">No starred repositories found</div>';
@@ -1985,70 +1973,286 @@ async function refreshStacks() {
     renderStacksList();
 }
 
+// Storage for stack containers and metrics
+let stacksContainers = {};
+let stacksHostMetrics = {};
+
+// Track expanded stacks
+const STACKS_EXPANDED_KEY = 'logscrawler_stacks_expanded';
+
+function getExpandedStacks() {
+    try {
+        const stored = localStorage.getItem(STACKS_EXPANDED_KEY);
+        return stored ? JSON.parse(stored) : {};
+    } catch {
+        return {};
+    }
+}
+
+function saveExpandedStacks(expanded) {
+    try {
+        localStorage.setItem(STACKS_EXPANDED_KEY, JSON.stringify(expanded));
+    } catch (e) {
+        console.error('Failed to save expanded stacks:', e);
+    }
+}
+
+function toggleStackExpand(stackName) {
+    const expanded = getExpandedStacks();
+    expanded[stackName] = !expanded[stackName];
+    saveExpandedStacks(expanded);
+    
+    const contentEl = document.getElementById(`stack-containers-${stackName}`);
+    const chevronEl = document.querySelector(`[data-repo="${stackName}"] .stack-chevron`);
+    
+    if (contentEl) {
+        contentEl.style.display = expanded[stackName] ? 'block' : 'none';
+    }
+    if (chevronEl) {
+        chevronEl.classList.toggle('expanded', expanded[stackName]);
+    }
+}
+
 function renderStacksList() {
     const listEl = document.getElementById('stacks-list');
     const version = document.getElementById('stack-version')?.value || '1.0';
+    const expandedStacks = getExpandedStacks();
     
     listEl.innerHTML = stacksRepos.map(repo => {
         const deployedTag = stacksDeployedTags[repo.name];
+        const isDeployed = !!deployedTag;
+        const stackContainers = stacksContainers[repo.name] || {};
+        const isExpanded = expandedStacks[repo.name] || false;
+        
+        // Calculate stack-level stats
+        let stackTotalMemory = 0;
+        let stackMaxCpu = 0;
+        let containerCount = 0;
+        
+        for (const serviceContainers of Object.values(stackContainers)) {
+            for (const c of serviceContainers) {
+                containerCount++;
+                if (c.memory_usage_mb != null) stackTotalMemory += c.memory_usage_mb;
+                if (c.cpu_percent != null && c.cpu_percent > stackMaxCpu) stackMaxCpu = c.cpu_percent;
+            }
+        }
+        
+        // Calculate GPU stats from host metrics
+        let stackGpuDisplay = '';
+        let stackGpuClass = '';
+        let stackVramDisplay = '';
+        
+        if (isDeployed && stacksHostMetrics) {
+            // Collect unique hosts that have containers in this stack
+            const hostsInStack = new Set();
+            for (const serviceContainers of Object.values(stackContainers)) {
+                for (const c of serviceContainers) {
+                    if (c.host) hostsInStack.add(c.host);
+                }
+            }
+            
+            let maxGpuPercent = null;
+            let totalVramUsed = 0;
+            let totalVramTotal = 0;
+            let hasVramData = false;
+            
+            for (const host of hostsInStack) {
+                if (stacksHostMetrics[host]) {
+                    const gpuPercent = stacksHostMetrics[host].gpu_percent;
+                    const gpuMemUsed = stacksHostMetrics[host].gpu_memory_used_mb;
+                    const gpuMemTotal = stacksHostMetrics[host].gpu_memory_total_mb;
+                    
+                    if (gpuPercent != null) {
+                        maxGpuPercent = maxGpuPercent != null ? Math.max(maxGpuPercent, gpuPercent) : gpuPercent;
+                    }
+                    if (gpuMemUsed != null && gpuMemTotal != null) {
+                        totalVramUsed += gpuMemUsed;
+                        totalVramTotal += gpuMemTotal;
+                        hasVramData = true;
+                    }
+                }
+            }
+            
+            if (maxGpuPercent != null) {
+                stackGpuClass = maxGpuPercent >= 80 ? 'gpu-critical' : (maxGpuPercent >= 50 ? 'gpu-warning' : '');
+                stackGpuDisplay = `<span class="group-stat group-gpu ${stackGpuClass}" title="GPU - Max usage">🎮 ${maxGpuPercent.toFixed(1)}%</span>`;
+            }
+            if (hasVramData && totalVramTotal > 0) {
+                const vramPercent = (totalVramUsed / totalVramTotal) * 100;
+                const vramClass = vramPercent >= 80 ? 'gpu-critical' : (vramPercent >= 50 ? 'gpu-warning' : '');
+                stackVramDisplay = `<span class="group-stat group-gpu ${vramClass}" title="VRAM usage">🖼️ ${formatMemory(totalVramUsed)} / ${formatMemory(totalVramTotal)}</span>`;
+            }
+        }
+        
+        const stackMemoryDisplay = isDeployed && stackTotalMemory > 0 ? formatMemory(stackTotalMemory) : '';
+        const stackCpuClass = stackMaxCpu >= 80 ? 'cpu-critical' : (stackMaxCpu >= 50 ? 'cpu-warning' : '');
+        const stackCpuDisplay = isDeployed && stackMaxCpu > 0 ? `${stackMaxCpu.toFixed(1)}%` : '';
+        
+        // Build expanded container content
+        let containersHtml = '';
+        if (isDeployed && Object.keys(stackContainers).length > 0) {
+            containersHtml = `<div class="stack-containers" id="stack-containers-${escapeHtml(repo.name)}" style="display: ${isExpanded ? 'block' : 'none'};">`;
+            
+            for (const [serviceName, containers] of Object.entries(stackContainers)) {
+                const displayServiceName = serviceName === '_standalone' ? 'Standalone' : serviceName;
+                
+                // Calculate service stats
+                let serviceTotalMemory = 0;
+                let serviceMaxCpu = 0;
+                for (const c of containers) {
+                    if (c.memory_usage_mb != null) serviceTotalMemory += c.memory_usage_mb;
+                    if (c.cpu_percent != null && c.cpu_percent > serviceMaxCpu) serviceMaxCpu = c.cpu_percent;
+                }
+                const serviceMemoryDisplay = serviceTotalMemory > 0 ? formatMemory(serviceTotalMemory) : '';
+                const serviceCpuClass = serviceMaxCpu >= 80 ? 'cpu-critical' : (serviceMaxCpu >= 50 ? 'cpu-warning' : '');
+                const serviceCpuDisplay = serviceMaxCpu > 0 ? `${serviceMaxCpu.toFixed(1)}%` : '';
+                
+                containersHtml += `
+                    <div class="stack-service">
+                        <div class="stack-service-header">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            </svg>
+                            ${escapeHtml(displayServiceName)}
+                            <span class="group-count">${containers.length}</span>
+                            ${serviceMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${serviceMemoryDisplay}</span>` : ''}
+                            ${serviceCpuDisplay ? `<span class="group-stat group-cpu ${serviceCpuClass}" title="Max CPU usage">⚡ ${serviceCpuDisplay}</span>` : ''}
+                        </div>
+                        <div class="stack-service-containers">
+                `;
+                
+                for (const c of containers) {
+                    const cpuDisplay = c.cpu_percent != null ? `${c.cpu_percent}%` : '-';
+                    const memDisplay = c.memory_percent != null 
+                        ? `${c.memory_percent}%${c.memory_usage_mb ? ` (${c.memory_usage_mb}MB)` : ''}`
+                        : '-';
+                    
+                    containersHtml += `
+                        <div class="container-item" onclick="openContainer('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', ${JSON.stringify(c).replace(/"/g, '&quot;')})">
+                            <div class="container-info">
+                                <span class="container-status ${c.status}"></span>
+                                <div>
+                                    <div class="container-name">${escapeHtml(c.name)} <span style="color: var(--text-muted); font-size: 0.85em;">(${escapeHtml(c.host)})</span></div>
+                                    <div class="container-image">${escapeHtml(c.image)}</div>
+                                </div>
+                            </div>
+                            ${c.status === 'running' ? `
+                            <div class="container-stats-mini">
+                                <span class="stat-mini" title="CPU %">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                                        <rect x="4" y="4" width="16" height="16" rx="2"/>
+                                        <rect x="9" y="9" width="6" height="6"/>
+                                        <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3"/>
+                                    </svg>
+                                    ${cpuDisplay}
+                                </span>
+                                <span class="stat-mini" title="RAM">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                                        <path d="M2 20h20M6 16V8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8"/>
+                                    </svg>
+                                    ${memDisplay}
+                                </span>
+                            </div>
+                            ` : ''}
+                            <div class="container-actions">
+                                <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); quickAction('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', 'restart', '${escapeHtml(c.name)}')">
+                                    Restart
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                containersHtml += `
+                        </div>
+                    </div>
+                `;
+            }
+            
+            containersHtml += `</div>`;
+        }
+        
         return `
-        <div class="stack-item" data-repo="${escapeHtml(repo.name)}">
-            <div class="stack-info">
-                <div class="stack-name">
-                    <a href="${escapeHtml(repo.html_url)}" target="_blank" rel="noopener">
-                        ${escapeHtml(repo.name)}
-                    </a>
-                    ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : ''}
-                    ${repo.private ? '<span class="stack-badge private">Private</span>' : ''}
-                    ${repo.language ? `<span class="stack-badge lang">${escapeHtml(repo.language)}</span>` : ''}
+        <div class="stack-item ${isDeployed ? 'deployed' : ''}" data-repo="${escapeHtml(repo.name)}">
+            <div class="stack-header" ${isDeployed ? `onclick="toggleStackExpand('${escapeHtml(repo.name)}')"` : ''}>
+                ${isDeployed ? `
+                <svg class="stack-chevron ${isExpanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <polyline points="6 9 12 15 18 9"/>
+                </svg>
+                ` : ''}
+                <div class="stack-info">
+                    <div class="stack-name">
+                        <a href="${escapeHtml(repo.html_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">
+                            ${escapeHtml(repo.name)}
+                        </a>
+                        ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : ''}
+                        ${isDeployed ? `<span class="group-count">${containerCount} containers</span>` : ''}
+                        ${stackMemoryDisplay ? `<span class="group-stat group-memory" title="RAM - Total memory usage">💾 ${stackMemoryDisplay}</span>` : ''}
+                        ${stackCpuDisplay ? `<span class="group-stat group-cpu ${stackCpuClass}" title="CPU - Max usage">⚡ ${stackCpuDisplay}</span>` : ''}
+                        ${stackGpuDisplay}
+                        ${stackVramDisplay}
+                        ${repo.private ? '<span class="stack-badge private">Private</span>' : ''}
+                        ${repo.language ? `<span class="stack-badge lang">${escapeHtml(repo.language)}</span>` : ''}
+                    </div>
+                    <div class="stack-description">${escapeHtml(repo.description) || 'No description'}</div>
+                    <div class="stack-meta">
+                        <span class="stack-owner">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                                <circle cx="12" cy="7" r="4"/>
+                            </svg>
+                            ${escapeHtml(repo.owner)}
+                        </span>
+                        <span class="stack-updated">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                                <circle cx="12" cy="12" r="10"/>
+                                <polyline points="12 6 12 12 16 14"/>
+                            </svg>
+                            ${formatRelativeTime(repo.updated_at)}
+                        </span>
+                    </div>
                 </div>
-                <div class="stack-description">${escapeHtml(repo.description) || 'No description'}</div>
-                <div class="stack-meta">
-                    <span class="stack-owner">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
-                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                            <circle cx="12" cy="7" r="4"/>
+                <div class="stack-actions" onclick="event.stopPropagation()">
+                    <button class="btn btn-ghost" onclick="editStackEnv('${escapeHtml(repo.name)}')" title="Edit .env file">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                         </svg>
-                        ${escapeHtml(repo.owner)}
-                    </span>
-                    <span class="stack-updated">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
-                            <circle cx="12" cy="12" r="10"/>
-                            <polyline points="12 6 12 12 16 14"/>
+                        Env
+                    </button>
+                    <button class="btn btn-secondary" onclick="buildStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="build-${escapeHtml(repo.name)}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                            <polyline points="22 4 12 14.01 9 11.01"/>
                         </svg>
-                        ${formatRelativeTime(repo.updated_at)}
-                    </span>
+                        Build
+                    </button>
+                    <button class="btn btn-primary" onclick="deployStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="deploy-${escapeHtml(repo.name)}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
+                            <polyline points="7.5 19.79 7.5 14.6 3 12"/>
+                            <polyline points="21 12 16.5 14.6 16.5 19.79"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        Deploy
+                    </button>
+                    ${isDeployed ? `
+                    <button class="btn btn-danger" onclick="removeDeployedStack('${escapeHtml(repo.name)}')" title="Remove deployed stack">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <polyline points="3 6 5 6 21 6"/>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        </svg>
+                        Remove
+                    </button>
+                    ` : ''}
                 </div>
             </div>
-            <div class="stack-actions">
-                <button class="btn btn-ghost" onclick="editStackEnv('${escapeHtml(repo.name)}')" title="Edit .env file">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                    </svg>
-                    Env
-                </button>
-                <button class="btn btn-secondary" onclick="buildStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="build-${escapeHtml(repo.name)}">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-                        <polyline points="22 4 12 14.01 9 11.01"/>
-                    </svg>
-                    Build
-                </button>
-                <button class="btn btn-primary" onclick="deployStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="deploy-${escapeHtml(repo.name)}">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                        <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
-                        <polyline points="7.5 19.79 7.5 14.6 3 12"/>
-                        <polyline points="21 12 16.5 14.6 16.5 19.79"/>
-                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                        <line x1="12" y1="22.08" x2="12" y2="12"/>
-                    </svg>
-                    Deploy
-                </button>
-            </div>
+            ${containersHtml}
         </div>
     `;
+    }).join('');
     }).join('');
 }
 
