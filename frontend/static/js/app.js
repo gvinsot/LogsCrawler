@@ -2024,7 +2024,9 @@ function renderStacksList() {
     listEl.innerHTML = stacksRepos.map(repo => {
         const deployedTag = stacksDeployedTags[repo.name];
         const isDeployed = !!deployedTag;
-        const stackContainers = stacksContainers[repo.name] || {};
+        // Docker stack names are lowercase versions of repo names
+        const stackName = repo.name.toLowerCase();
+        const stackContainers = stacksContainers[stackName] || {};
         const isExpanded = expandedStacks[repo.name] || false;
         
         // Calculate stack-level stats
