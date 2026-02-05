@@ -2016,7 +2016,6 @@ function toggleStackExpand(stackName) {
 
 function renderStacksList() {
     const listEl = document.getElementById('stacks-list');
-    const version = document.getElementById('stack-version')?.value || '1.0';
     const expandedStacks = getExpandedStacks();
     
     // Use containers-grouped class for similar styling to Computers view
@@ -2271,7 +2270,7 @@ async function buildStack(repoName, sshUrl) {
     title.textContent = `Build: ${repoName}`;
     branchSelect.innerHTML = '<option value="">Loading branches...</option>';
     commitInput.value = '';
-    versionInput.value = document.getElementById('stack-version')?.value || '1.0';
+    versionInput.value = '1.0';
     
     // Reset to branch mode
     document.querySelector('input[name="build-source"][value="branch"]').checked = true;
@@ -2552,7 +2551,7 @@ async function submitDeploy() {
     
     const submitBtn = document.getElementById('stack-deploy-submit');
     const source = document.querySelector('input[name="deploy-source"]:checked').value;
-    const version = document.getElementById('stack-version')?.value || '1.0';
+    const version = '1.0';
     
     let tag = null;
     
