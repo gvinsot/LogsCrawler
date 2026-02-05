@@ -2,7 +2,7 @@
 
 import asyncio
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiohttp
 import structlog
@@ -11,6 +11,9 @@ from .config import GitHubConfig
 
 logger = structlog.get_logger()
 
+# Cache TTL for starred repos (1 minute)
+STARRED_REPOS_CACHE_TTL = timedelta(minutes=1)
+
 
 class GitHubService:
     """Service for interacting with GitHub API."""
@@ -18,6 +21,9 @@ class GitHubService:
     def __init__(self, config: GitHubConfig):
         self.config = config
         self._session: Optional[aiohttp.ClientSession] = None
+        # Cache for starred repos
+        self._starred_repos_cache: Optional[List[Dict[str, Any]]] = None
+        self._starred_repos_cache_time: Optional[datetime] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -36,12 +42,32 @@ class GitHubService:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def get_starred_repos(self) -> List[Dict[str, Any]]:
+    def _is_cache_valid(self) -> bool:
+        """Check if the starred repos cache is still valid."""
+        if self._starred_repos_cache is None or self._starred_repos_cache_time is None:
+            return False
+        return datetime.now() - self._starred_repos_cache_time < STARRED_REPOS_CACHE_TTL
+
+    def invalidate_cache(self):
+        """Invalidate the starred repos cache."""
+        self._starred_repos_cache = None
+        self._starred_repos_cache_time = None
+        logger.info("Starred repos cache invalidated")
+
+    async def get_starred_repos(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """Get list of starred repositories for the configured user.
+
+        Args:
+            force_refresh: If True, bypass cache and fetch fresh data.
 
         Returns:
             List of repo info dicts with name, full_name, description, url, etc.
         """
+        # Check cache first (unless force refresh requested)
+        if not force_refresh and self._is_cache_valid():
+            logger.debug("Returning cached starred repos", count=len(self._starred_repos_cache))
+            return self._starred_repos_cache
+
         if not self.config.token:
             logger.warning("GitHub token not configured")
             return []
@@ -103,7 +129,10 @@ class GitHubService:
                         break
                     page += 1
 
-            logger.info("Fetched starred repos", count=len(repos))
+            # Update cache
+            self._starred_repos_cache = repos
+            self._starred_repos_cache_time = datetime.now()
+            logger.info("Fetched and cached starred repos", count=len(repos))
             return repos
 
         except Exception as e:

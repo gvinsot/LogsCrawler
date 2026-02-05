@@ -2002,14 +2002,14 @@ function toggleStackExpand(stackName) {
     expanded[stackName] = !expanded[stackName];
     saveExpandedStacks(expanded);
     
+    const hostGroupEl = document.querySelector(`[data-repo="${stackName}"].host-group`);
     const contentEl = document.getElementById(`stack-containers-${stackName}`);
-    const chevronEl = document.querySelector(`[data-repo="${stackName}"] .stack-chevron`);
     
+    if (hostGroupEl) {
+        hostGroupEl.classList.toggle('collapsed', !expanded[stackName]);
+    }
     if (contentEl) {
         contentEl.style.display = expanded[stackName] ? 'block' : 'none';
-    }
-    if (chevronEl) {
-        chevronEl.classList.toggle('expanded', expanded[stackName]);
     }
 }
 
@@ -2017,6 +2017,9 @@ function renderStacksList() {
     const listEl = document.getElementById('stacks-list');
     const version = document.getElementById('stack-version')?.value || '1.0';
     const expandedStacks = getExpandedStacks();
+    
+    // Use containers-grouped class for similar styling to Computers view
+    listEl.className = 'containers-grouped';
     
     listEl.innerHTML = stacksRepos.map(repo => {
         const deployedTag = stacksDeployedTags[repo.name];
@@ -2043,7 +2046,6 @@ function renderStacksList() {
         let stackVramDisplay = '';
         
         if (isDeployed && stacksHostMetrics) {
-            // Collect unique hosts that have containers in this stack
             const hostsInStack = new Set();
             for (const serviceContainers of Object.values(stackContainers)) {
                 for (const c of serviceContainers) {
@@ -2088,10 +2090,10 @@ function renderStacksList() {
         const stackCpuClass = stackMaxCpu >= 80 ? 'cpu-critical' : (stackMaxCpu >= 50 ? 'cpu-warning' : '');
         const stackCpuDisplay = isDeployed && stackMaxCpu > 0 ? `${stackMaxCpu.toFixed(1)}%` : '';
         
-        // Build expanded container content
+        // Build containers HTML (similar to Computers view compose-group style)
         let containersHtml = '';
         if (isDeployed && Object.keys(stackContainers).length > 0) {
-            containersHtml = `<div class="stack-containers" id="stack-containers-${escapeHtml(repo.name)}" style="display: ${isExpanded ? 'block' : 'none'};">`;
+            containersHtml = `<div class="host-content" id="stack-containers-${escapeHtml(repo.name)}" style="display: ${isExpanded ? 'block' : 'none'};">`;
             
             for (const [serviceName, containers] of Object.entries(stackContainers)) {
                 const displayServiceName = serviceName === '_standalone' ? 'Standalone' : serviceName;
@@ -2108,9 +2110,9 @@ function renderStacksList() {
                 const serviceCpuDisplay = serviceMaxCpu > 0 ? `${serviceMaxCpu.toFixed(1)}%` : '';
                 
                 containersHtml += `
-                    <div class="stack-service">
-                        <div class="stack-service-header">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                    <div class="compose-group">
+                        <div class="compose-header">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
                             </svg>
                             ${escapeHtml(displayServiceName)}
@@ -2118,7 +2120,8 @@ function renderStacksList() {
                             ${serviceMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${serviceMemoryDisplay}</span>` : ''}
                             ${serviceCpuDisplay ? `<span class="group-stat group-cpu ${serviceCpuClass}" title="Max CPU usage">⚡ ${serviceCpuDisplay}</span>` : ''}
                         </div>
-                        <div class="stack-service-containers">
+                        <div class="compose-content">
+                            <div class="container-list">
                 `;
                 
                 for (const c of containers) {
@@ -2164,6 +2167,7 @@ function renderStacksList() {
                 }
                 
                 containersHtml += `
+                            </div>
                         </div>
                     </div>
                 `;
@@ -2172,62 +2176,54 @@ function renderStacksList() {
             containersHtml += `</div>`;
         }
         
+        // Stack icon
+        const stackIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+        </svg>`;
+        
+        // Use host-group structure similar to Computers view
         return `
-        <div class="stack-item ${isDeployed ? 'deployed' : ''}" data-repo="${escapeHtml(repo.name)}">
-            <div class="stack-header" ${isDeployed ? `onclick="toggleStackExpand('${escapeHtml(repo.name)}')"` : ''}>
-                ${isDeployed ? `
-                <svg class="stack-chevron ${isExpanded ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                    <polyline points="6 9 12 15 18 9"/>
-                </svg>
-                ` : ''}
-                <div class="stack-info">
-                    <div class="stack-name">
-                        <a href="${escapeHtml(repo.html_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">
-                            ${escapeHtml(repo.name)}
-                        </a>
-                        ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : ''}
-                        ${isDeployed ? `<span class="group-count">${containerCount} containers</span>` : ''}
-                        ${stackMemoryDisplay ? `<span class="group-stat group-memory" title="RAM - Total memory usage">💾 ${stackMemoryDisplay}</span>` : ''}
-                        ${stackCpuDisplay ? `<span class="group-stat group-cpu ${stackCpuClass}" title="CPU - Max usage">⚡ ${stackCpuDisplay}</span>` : ''}
-                        ${stackGpuDisplay}
-                        ${stackVramDisplay}
-                        ${repo.private ? '<span class="stack-badge private">Private</span>' : ''}
-                        ${repo.language ? `<span class="stack-badge lang">${escapeHtml(repo.language)}</span>` : ''}
-                    </div>
-                    <div class="stack-description">${escapeHtml(repo.description) || 'No description'}</div>
-                    <div class="stack-meta">
-                        <span class="stack-owner">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
-                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                                <circle cx="12" cy="7" r="4"/>
-                            </svg>
-                            ${escapeHtml(repo.owner)}
-                        </span>
-                        <span class="stack-updated">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
-                                <circle cx="12" cy="12" r="10"/>
-                                <polyline points="12 6 12 12 16 14"/>
-                            </svg>
-                            ${formatRelativeTime(repo.updated_at)}
-                        </span>
-                    </div>
-                </div>
-                <div class="stack-actions" onclick="event.stopPropagation()">
-                    <button class="btn btn-ghost" onclick="editStackEnv('${escapeHtml(repo.name)}')" title="Edit .env file">
+        <div class="host-group ${isExpanded ? '' : 'collapsed'}" data-repo="${escapeHtml(repo.name)}">
+            <div class="host-header" ${isDeployed ? `onclick="toggleStackExpand('${escapeHtml(repo.name)}')"` : ''}>
+                <span class="host-name">
+                    ${isDeployed ? `
+                    <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                    ` : ''}
+                    ${stackIcon}
+                    ${escapeHtml(repo.name)}
+                    ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : '<span class="stack-badge" style="background: var(--bg-tertiary); color: var(--text-muted);">Not deployed</span>'}
+                    ${isDeployed ? `<span class="group-count">${containerCount} containers</span>` : ''}
+                    ${stackMemoryDisplay ? `<span class="group-stat group-memory" title="RAM - Total memory usage">💾 ${stackMemoryDisplay}</span>` : ''}
+                    ${stackCpuDisplay ? `<span class="group-stat group-cpu ${stackCpuClass}" title="CPU - Max usage">⚡ ${stackCpuDisplay}</span>` : ''}
+                    ${stackGpuDisplay}
+                    ${stackVramDisplay}
+                    ${repo.private ? '<span class="stack-badge private">Private</span>' : ''}
+                    ${repo.language ? `<span class="stack-badge lang">${escapeHtml(repo.language)}</span>` : ''}
+                </span>
+                <div class="host-header-actions" onclick="event.stopPropagation();">
+                    <a class="btn btn-sm btn-ghost" href="${escapeHtml(repo.html_url)}" target="_blank" rel="noopener" title="Open on GitHub">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>
+                        </svg>
+                        <span>GitHub</span>
+                    </a>
+                    <button class="btn btn-sm btn-ghost" onclick="editStackEnv('${escapeHtml(repo.name)}')" title="Edit .env file">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                             <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                         </svg>
-                        Env
+                        <span>Env</span>
                     </button>
-                    <button class="btn btn-secondary" onclick="buildStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="build-${escapeHtml(repo.name)}">
+                    <button class="btn btn-sm btn-secondary" onclick="buildStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="build-${escapeHtml(repo.name)}" title="Build images">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                             <polyline points="22 4 12 14.01 9 11.01"/>
                         </svg>
-                        Build
+                        <span>Build</span>
                     </button>
-                    <button class="btn btn-primary" onclick="deployStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="deploy-${escapeHtml(repo.name)}">
+                    <button class="btn btn-sm btn-primary" onclick="deployStack('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}')" id="deploy-${escapeHtml(repo.name)}" title="Deploy stack">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                             <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
                             <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
@@ -2236,15 +2232,15 @@ function renderStacksList() {
                             <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
                             <line x1="12" y1="22.08" x2="12" y2="12"/>
                         </svg>
-                        Deploy
+                        <span>Deploy</span>
                     </button>
                     ${isDeployed ? `
-                    <button class="btn btn-danger" onclick="removeDeployedStack('${escapeHtml(repo.name)}')" title="Remove deployed stack">
+                    <button class="btn btn-sm btn-danger" onclick="removeDeployedStack('${escapeHtml(repo.name)}')" title="Remove deployed stack">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                             <polyline points="3 6 5 6 21 6"/>
                             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                         </svg>
-                        Remove
+                        <span>Remove</span>
                     </button>
                     ` : ''}
                 </div>
@@ -2376,11 +2372,16 @@ async function editStackEnv(repoName) {
     
     try {
         const data = await apiGet(`/stacks/${encodeURIComponent(repoName)}/env`);
-        textarea.value = data.content || '';
+        if (data === null) {
+            textarea.value = '# .env file not found or failed to load\n# You can create it here\n';
+        } else {
+            textarea.value = data.content || '';
+        }
         textarea.disabled = false;
         textarea.focus();
     } catch (e) {
-        textarea.value = `Error loading .env file: ${e.message || 'Unknown error'}`;
+        textarea.value = `# Error loading .env file: ${e.message || 'Unknown error'}\n# You can create it here\n`;
+        textarea.disabled = false;
     }
 }
 
