@@ -239,11 +239,10 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
 fi
 
 # Get the script's directory and the parent of the parent (where repositories are)
-# Script is in: PrivateNetwork/scripts/
-# Repos are in: parent of PrivateNetwork/
+# Script is in: LogsCrawler/scripts/
+# Repos are in: parent of LogsCrawler/ (e.g., ~/repos/)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-REPOS_DIR="$(dirname "$PROJECT_DIR")"
+REPOS_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
 # Resolve absolute path
 if [[ "$REPO_FOLDER" = /* ]]; then
