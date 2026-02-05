@@ -2513,6 +2513,18 @@ a.btn {
     color: var(--text-muted);
 }
 
+.tag-item .tag-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.tag-item .tag-age {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    opacity: 0.8;
+}
+
 .selected-tag-display {
     display: flex;
     align-items: center;

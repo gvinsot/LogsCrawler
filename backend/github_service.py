@@ -225,12 +225,31 @@ class GitHubService:
                     return {"tags": [], "branches": {}}
 
                 data = await response.json()
-                for tag in data[:limit]:
-                    tags.append({
-                        "name": tag["name"],
-                        "sha": tag["commit"]["sha"],
-                        "zipball_url": tag.get("zipball_url"),
-                    })
+                
+                # Fetch commit dates for each tag (in parallel for performance)
+                async def get_tag_with_date(tag_data):
+                    tag_info = {
+                        "name": tag_data["name"],
+                        "sha": tag_data["commit"]["sha"],
+                        "zipball_url": tag_data.get("zipball_url"),
+                        "created_at": None,
+                    }
+                    # Get commit info to retrieve the date
+                    commit_url = tag_data["commit"]["url"]
+                    try:
+                        async with session.get(commit_url) as commit_response:
+                            if commit_response.status == 200:
+                                commit_data = await commit_response.json()
+                                # Use committer date (when the commit was applied)
+                                tag_info["created_at"] = commit_data.get("commit", {}).get("committer", {}).get("date")
+                    except Exception as e:
+                        logger.debug("Could not fetch commit date for tag", tag=tag_data["name"], error=str(e))
+                    return tag_info
+                
+                # Fetch all tag dates in parallel
+                import asyncio
+                tag_tasks = [get_tag_with_date(tag) for tag in data[:limit]]
+                tags = await asyncio.gather(*tag_tasks)
 
             # Get branches to associate tags with branches
             branches = await self.get_repo_branches(owner, repo)
