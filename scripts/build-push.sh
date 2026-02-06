@@ -139,80 +139,143 @@ get_images_from_compose() {
     local compose_file="$1"
     local registry="$REGISTRY"
     
-    # Use Python for reliable YAML-like parsing
+    # Use Python for reliable YAML parsing (PyYAML with regex fallback)
     python3 - "$compose_file" "$registry" << 'PYTHON_SCRIPT'
 import sys
 import re
+import os
 
 compose_file = sys.argv[1]
 registry = sys.argv[2]
 
-with open(compose_file, 'r') as f:
-    lines = f.readlines()
+def resolve_env_vars(value):
+    """Replace ${VAR} and ${VAR:-default} with env values or defaults."""
+    def replacer(m):
+        var = m.group(1)
+        default = m.group(3) if m.group(3) is not None else ''
+        return os.environ.get(var, default)
+    return re.sub(r'\$\{([^:}]+)(:-([^}]*))?\}', replacer, str(value))
 
-# Parse services by tracking indentation
-in_services = False
-services_indent = -1
-current_service = None
-current_service_indent = -1
-service_content = {}
+def parse_with_pyyaml(compose_file, registry):
+    """Parse compose file using PyYAML (reliable)."""
+    import yaml
+    with open(compose_file, 'r') as f:
+        data = yaml.safe_load(f)
+    if not data or 'services' not in data:
+        return []
+    results = []
+    for name, config in data['services'].items():
+        if isinstance(config, dict) and 'build' in config and 'image' in config:
+            image = str(config['image'])
+            image = image.replace('${DOCKER_REGISTRY_URL}', registry)
+            image = resolve_env_vars(image)
+            results.append(image)
+    return results
 
-for line in lines:
-    # Skip empty lines and comments for section detection
-    stripped = line.rstrip()
-    if not stripped or stripped.startswith('#'):
-        continue
-    
-    # Calculate indentation
-    indent = len(line) - len(line.lstrip())
-    
-    # Check if we're entering the services section
-    if re.match(r'^services:\s*$', stripped):
-        in_services = True
-        services_indent = indent
-        continue
-    
-    # Check if we're leaving the services section (another top-level key)
-    if in_services and indent <= services_indent and ':' in stripped and not stripped.startswith(' '):
-        in_services = False
-        current_service = None
-        continue
-    
-    if not in_services:
-        continue
-    
-    # Check if this is a new service definition (direct child of services)
-    # A service name is a key at services_indent + 2 (or more) spaces
-    service_match = re.match(r'^(\s+)([a-zA-Z][a-zA-Z0-9_-]*):\s*$', line)
-    if service_match:
-        service_indent = len(service_match.group(1))
-        service_name = service_match.group(2)
-        # This is a new service if it's at the expected indent level
-        if current_service is None or service_indent <= current_service_indent:
-            current_service = service_name
-            current_service_indent = service_indent
-            service_content[current_service] = {'image': None, 'has_build': False}
+def parse_with_regex(compose_file, registry):
+    """Fallback regex-based parser for when PyYAML is not available."""
+    with open(compose_file, 'r') as f:
+        content = f.read()
+
+    # Normalize line endings
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+    lines = content.split('\n')
+
+    in_services = False
+    services_indent = -1
+    current_service = None
+    current_service_indent = -1
+    service_content = {}
+
+    for raw_line in lines:
+        # Strip comments (but not inside quoted strings)
+        line = raw_line
+        comment_match = re.match(r'^([^#]*?)\s+#.*$', line)
+        if comment_match:
+            line = comment_match.group(1)
+
+        stripped = line.rstrip()
+        if not stripped:
             continue
-    
-    # If we're inside a service, look for image and build
-    if current_service:
-        # Check for image line
-        image_match = re.match(r'^\s+image:\s*(.+)$', line)
-        if image_match:
-            image = image_match.group(1).strip().strip('"').strip("'")
-            service_content[current_service]['image'] = image
-        
-        # Check for build section
-        if re.match(r'^\s+build:\s*', line):
-            service_content[current_service]['has_build'] = True
 
-# Output images for services that have both build and image
-for service_name, data in service_content.items():
-    if data['has_build'] and data['image']:
-        image = data['image']
-        # Replace ${DOCKER_REGISTRY_URL} with actual registry
-        image = image.replace('${DOCKER_REGISTRY_URL}', registry)
-        print(image)
+        # Calculate indentation from original line (before comment stripping)
+        indent = len(raw_line) - len(raw_line.lstrip())
+
+        # Detect 'services:' section (with or without trailing comment)
+        if re.match(r'^services:\s*$', stripped):
+            in_services = True
+            services_indent = indent
+            continue
+
+        # Leaving services section: another top-level key at same or lower indent
+        if in_services and indent <= services_indent and indent == 0 and ':' in stripped:
+            if not re.match(r'^services:', stripped):
+                in_services = False
+                current_service = None
+                continue
+
+        if not in_services:
+            continue
+
+        # Detect service names: keys directly under 'services' (one indent level deeper)
+        # They are lines like "  service-name:" with only a key and colon
+        key_match = re.match(r'^(\s+)([a-zA-Z][a-zA-Z0-9_.-]*):\s*$', stripped)
+        if key_match:
+            key_indent = len(key_match.group(1))
+            key_name = key_match.group(2)
+            # A service name is at services_indent + one level (typically +2)
+            # It must be deeper than services but not deeper than current service props
+            if current_service is None:
+                # First service found
+                current_service = key_name
+                current_service_indent = key_indent
+                service_content[current_service] = {'image': None, 'has_build': False}
+                continue
+            elif key_indent <= current_service_indent:
+                # Same or less indent = new service at same level
+                current_service = key_name
+                current_service_indent = key_indent
+                service_content[current_service] = {'image': None, 'has_build': False}
+                continue
+            # Otherwise it's a sub-key within the service (e.g., build:, deploy:)
+            # Fall through to check for build/image
+
+        # Inside a service: look for image and build
+        if current_service:
+            image_match = re.match(r'^\s+image:\s*(.+)$', stripped)
+            if image_match:
+                # Only set image if this line is at service property level
+                img_indent = len(raw_line) - len(raw_line.lstrip())
+                if img_indent == current_service_indent + 2 or (img_indent > current_service_indent):
+                    image = image_match.group(1).strip().strip('"').strip("'")
+                    service_content[current_service]['image'] = image
+
+            build_match = re.match(r'^\s+build:\s*', stripped)
+            if build_match:
+                build_indent = len(raw_line) - len(raw_line.lstrip())
+                if build_indent == current_service_indent + 2 or (build_indent > current_service_indent):
+                    service_content[current_service]['has_build'] = True
+
+    results = []
+    for service_name, data in service_content.items():
+        if data['has_build'] and data['image']:
+            image = data['image']
+            image = image.replace('${DOCKER_REGISTRY_URL}', registry)
+            image = resolve_env_vars(image)
+            results.append(image)
+    return results
+
+# Try PyYAML first, fall back to regex parser
+try:
+    images = parse_with_pyyaml(compose_file, registry)
+except ImportError:
+    images = parse_with_regex(compose_file, registry)
+except Exception:
+    # PyYAML failed (e.g., invalid YAML with unresolved env vars)
+    images = parse_with_regex(compose_file, registry)
+
+for img in images:
+    print(img)
 PYTHON_SCRIPT
 }
 
