@@ -1,6 +1,9 @@
 """GitHub integration service for LogsCrawler."""
 
 import asyncio
+import json
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 
@@ -14,6 +17,9 @@ logger = structlog.get_logger()
 # Cache TTL for starred repos (1 minute)
 STARRED_REPOS_CACHE_TTL = timedelta(minutes=1)
 
+# File path for persistent tag date cache
+TAG_DATE_CACHE_FILE = Path(__file__).parent.parent / ".tag_date_cache.json"
+
 
 class GitHubService:
     """Service for interacting with GitHub API."""
@@ -24,6 +30,10 @@ class GitHubService:
         # Cache for starred repos
         self._starred_repos_cache: Optional[List[Dict[str, Any]]] = None
         self._starred_repos_cache_time: Optional[datetime] = None
+        # Persistent cache for tag dates (SHA -> date string)
+        # SHAs are immutable so this cache never expires
+        self._tag_date_cache: Optional[Dict[str, str]] = None
+        self._tag_date_cache_dirty: bool = False
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -47,6 +57,34 @@ class GitHubService:
         if self._starred_repos_cache is None or self._starred_repos_cache_time is None:
             return False
         return datetime.now() - self._starred_repos_cache_time < STARRED_REPOS_CACHE_TTL
+
+    def _load_tag_date_cache(self) -> Dict[str, str]:
+        """Load tag date cache from file."""
+        if self._tag_date_cache is not None:
+            return self._tag_date_cache
+        
+        self._tag_date_cache = {}
+        try:
+            if TAG_DATE_CACHE_FILE.exists():
+                with open(TAG_DATE_CACHE_FILE, "r") as f:
+                    self._tag_date_cache = json.load(f)
+                logger.debug("Loaded tag date cache", entries=len(self._tag_date_cache))
+        except Exception as e:
+            logger.warning("Failed to load tag date cache", error=str(e))
+            self._tag_date_cache = {}
+        return self._tag_date_cache
+
+    def _save_tag_date_cache(self):
+        """Save tag date cache to file if modified."""
+        if not self._tag_date_cache_dirty or self._tag_date_cache is None:
+            return
+        try:
+            with open(TAG_DATE_CACHE_FILE, "w") as f:
+                json.dump(self._tag_date_cache, f)
+            self._tag_date_cache_dirty = False
+            logger.debug("Saved tag date cache", entries=len(self._tag_date_cache))
+        except Exception as e:
+            logger.warning("Failed to save tag date cache", error=str(e))
 
     def invalidate_cache(self):
         """Invalidate the starred repos cache."""
@@ -212,6 +250,7 @@ class GitHubService:
             return {"tags": [], "branches": {}}
 
         session = await self._get_session()
+        date_cache = self._load_tag_date_cache()
 
         # Get all tags with their commit info
         tags_url = f"https://api.github.com/repos/{owner}/{repo}/tags"
@@ -226,30 +265,44 @@ class GitHubService:
 
                 data = await response.json()
                 
-                # Fetch commit dates for each tag (in parallel for performance)
-                async def get_tag_with_date(tag_data):
+                # Build tag list, using cache for dates when available
+                tags_needing_dates = []
+                for tag_data in data[:limit]:
+                    sha = tag_data["commit"]["sha"]
                     tag_info = {
                         "name": tag_data["name"],
-                        "sha": tag_data["commit"]["sha"],
+                        "sha": sha,
                         "zipball_url": tag_data.get("zipball_url"),
-                        "created_at": None,
+                        "created_at": date_cache.get(sha),  # May be None if not cached
                     }
-                    # Get commit info to retrieve the date
-                    commit_url = tag_data["commit"]["url"]
-                    try:
-                        async with session.get(commit_url) as commit_response:
-                            if commit_response.status == 200:
-                                commit_data = await commit_response.json()
-                                # Use committer date (when the commit was applied)
-                                tag_info["created_at"] = commit_data.get("commit", {}).get("committer", {}).get("date")
-                    except Exception as e:
-                        logger.debug("Could not fetch commit date for tag", tag=tag_data["name"], error=str(e))
-                    return tag_info
+                    tags.append(tag_info)
+                    if tag_info["created_at"] is None:
+                        tags_needing_dates.append((tag_info, tag_data["commit"]["url"]))
                 
-                # Fetch all tag dates in parallel
-                import asyncio
-                tag_tasks = [get_tag_with_date(tag) for tag in data[:limit]]
-                tags = await asyncio.gather(*tag_tasks)
+                # Only fetch dates for tags not in cache (in parallel)
+                if tags_needing_dates:
+                    logger.debug("Fetching dates for uncached tags", count=len(tags_needing_dates))
+                    
+                    async def fetch_commit_date(tag_info, commit_url):
+                        try:
+                            async with session.get(commit_url) as commit_response:
+                                if commit_response.status == 200:
+                                    commit_data = await commit_response.json()
+                                    date = commit_data.get("commit", {}).get("committer", {}).get("date")
+                                    if date:
+                                        tag_info["created_at"] = date
+                                        # Add to cache (SHA is immutable so this never expires)
+                                        date_cache[tag_info["sha"]] = date
+                                        self._tag_date_cache_dirty = True
+                        except Exception as e:
+                            logger.debug("Could not fetch commit date for tag", tag=tag_info["name"], error=str(e))
+                    
+                    await asyncio.gather(*[fetch_commit_date(t, url) for t, url in tags_needing_dates])
+                    
+                    # Save cache if we fetched new dates
+                    self._save_tag_date_cache()
+                else:
+                    logger.debug("All tag dates served from cache", count=len(tags))
 
             # Get branches to associate tags with branches
             branches = await self.get_repo_branches(owner, repo)
@@ -265,7 +318,7 @@ class GitHubService:
                 # In a more sophisticated implementation, we could trace the commit history
                 tags_by_branch["main"].append(tag)
 
-            logger.info("Fetched tags", repo=f"{owner}/{repo}", count=len(tags))
+            logger.info("Fetched tags", repo=f"{owner}/{repo}", count=len(tags), cached=len(tags) - len(tags_needing_dates))
             return {
                 "tags": tags,
                 "branches": [b["name"] for b in branches],
