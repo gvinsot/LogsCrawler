@@ -137,143 +137,39 @@ get_next_patch_number() {
 # Returns images from services that have a 'build:' section
 get_images_from_compose() {
     local compose_file="$1"
-    local compose_dir
-    compose_dir="$(dirname "$compose_file")"
     
-    # Use docker compose config to parse the file (handles all YAML quirks and env vars)
-    # This is the most reliable method as it uses Docker's own parser
-    local config_json
-    if config_json=$(docker compose -f "$compose_file" config --format json 2>/dev/null); then
-        # Parse JSON output with Python (json module is always available)
-        echo "$config_json" | python3 -c '
-import sys
-import json
-
-data = json.load(sys.stdin)
-services = data.get("services", {})
-
-for name, config in services.items():
-    if isinstance(config, dict) and "build" in config and "image" in config:
-        print(config["image"])
-'
-        return
-    fi
-    
-    # Fallback: parse YAML directly with Python
-    python3 - "$compose_file" "$REGISTRY" << 'PYTHON_SCRIPT'
-import sys
-import re
-import os
-
-compose_file = sys.argv[1]
-registry = sys.argv[2]
-
-def resolve_env_vars(value):
-    """Replace ${VAR} and ${VAR:-default} with env values or defaults."""
-    def replacer(m):
-        var = m.group(1)
-        default = m.group(3) if m.group(3) is not None else ''
-        return os.environ.get(var, default)
-    return re.sub(r'\$\{([^:}]+)(:-([^}]*))?\}', replacer, str(value))
-
-def parse_with_pyyaml(compose_file, registry):
-    """Parse compose file using PyYAML."""
-    import yaml
-    with open(compose_file, 'r') as f:
-        content = f.read()
-    # Pre-process: replace ${VAR} with placeholders that PyYAML can handle
-    # or resolve them from environment
-    content = resolve_env_vars(content)
-    data = yaml.safe_load(content)
-    if not data or 'services' not in data:
-        return []
-    results = []
-    for name, config in data['services'].items():
-        if isinstance(config, dict) and 'build' in config and 'image' in config:
-            image = str(config['image'])
-            results.append(image)
-    return results
-
-def parse_with_regex(compose_file, registry):
-    """Fallback regex-based parser."""
-    with open(compose_file, 'r') as f:
-        content = f.read()
-    
-    # Resolve env vars first
-    content = resolve_env_vars(content)
-    content = content.replace('\r\n', '\n').replace('\r', '\n')
-    lines = content.split('\n')
-    
-    in_services = False
-    services_indent = -1
-    current_service = None
-    current_service_indent = -1
-    service_data = {}
-    
-    i = 0
-    while i < len(lines):
-        raw_line = lines[i]
-        i += 1
-        
-        # Remove inline comments (not in quotes)
-        line = re.sub(r'\s+#.*$', '', raw_line)
-        stripped = line.rstrip()
-        
-        if not stripped or stripped.lstrip().startswith('#'):
-            continue
-        
-        indent = len(line) - len(line.lstrip())
-        
-        # Detect services: section
-        if stripped == 'services:':
-            in_services = True
-            services_indent = indent
-            continue
-        
-        # Another top-level section ends services
-        if in_services and indent == 0 and ':' in stripped and not stripped.startswith('services'):
-            in_services = False
-            current_service = None
-            continue
-        
-        if not in_services:
-            continue
-        
-        # Service name: a key directly under services (indent = services_indent + 2)
-        # with only "name:" on the line
-        m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_.-]*):\s*$', stripped)
-        if m and indent == services_indent + 2:
-            current_service = m.group(1)
-            current_service_indent = indent
-            service_data[current_service] = {'image': None, 'has_build': False}
-            continue
-        
-        # Properties of current service
-        if current_service and indent > current_service_indent:
-            # image: value
-            m = re.match(r'^image:\s*(.+)$', stripped)
-            if m and indent == current_service_indent + 2:
-                service_data[current_service]['image'] = m.group(1).strip().strip('"\'')
-            
-            # build: (with or without inline value)
-            if stripped.startswith('build:') and indent == current_service_indent + 2:
-                service_data[current_service]['has_build'] = True
-    
-    results = []
-    for svc, data in service_data.items():
-        if data['has_build'] and data['image']:
-            results.append(data['image'])
-    return results
-
-# Try PyYAML first, fall back to regex
-try:
-    images = parse_with_pyyaml(compose_file, registry)
-except Exception:
-    images = parse_with_regex(compose_file, registry)
-
-for img in images:
-    print(img)
-PYTHON_SCRIPT
+    # Simple approach: use awk to find services with both image: and build:
+    awk '
+    /^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$/ {
+        # New service at indent 2 - save any previous service with image+build
+        if (current_image != "" && has_build) {
+            print current_image
+        }
+        current_image = ""
+        has_build = 0
+    }
+    /^[[:space:]]{4}image:[[:space:]]*/ {
+        # image: at indent 4 (direct child of service)
+        gsub(/^[[:space:]]+image:[[:space:]]*/, "")
+        gsub(/[[:space:]]*$/, "")
+        gsub(/"/, "")
+        gsub(/\047/, "")  # single quote
+        current_image = $0
+    }
+    /^[[:space:]]{4}build:/ {
+        # build: at indent 4
+        has_build = 1
+    }
+    END {
+        # Output last service if it has image+build
+        if (current_image != "" && has_build) {
+            print current_image
+        }
+    }
+    ' "$compose_file" | while read -r img; do
+        # Resolve ${DOCKER_REGISTRY_URL} with actual registry
+        echo "$img" | sed "s|\${DOCKER_REGISTRY_URL}|$REGISTRY|g"
+    done
 }
 
 # ============================================================================
