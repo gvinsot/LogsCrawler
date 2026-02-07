@@ -632,6 +632,21 @@ a.btn {
     font-weight: 600;
 }
 
+.group-disk {
+    color: var(--accent-secondary);
+}
+
+.group-disk.disk-warning {
+    color: var(--status-warning);
+    background: rgba(245, 158, 11, 0.15);
+}
+
+.group-disk.disk-critical {
+    color: var(--status-error);
+    background: rgba(239, 68, 68, 0.2);
+    font-weight: 600;
+}
+
 .host-name {
     font-size: 1.1rem;
     font-weight: 600;

@@ -1116,10 +1116,14 @@ async function loadContainers(forceRefresh = false) {
         let topLevelGpuDisplay = '';
         let topLevelGpuClass = '';
         let topLevelVramDisplay = '';
+        let topLevelDiskDisplay = '';
         if (hostMetrics && hostMetrics[topLevel]) {
             const gpuPercent = hostMetrics[topLevel].gpu_percent;
             const gpuMemUsed = hostMetrics[topLevel].gpu_memory_used_mb;
             const gpuMemTotal = hostMetrics[topLevel].gpu_memory_total_mb;
+            const diskUsedGb = hostMetrics[topLevel].disk_used_gb;
+            const diskTotalGb = hostMetrics[topLevel].disk_total_gb;
+            const diskPercent = hostMetrics[topLevel].disk_percent;
             if (gpuPercent != null) {
                 topLevelGpuClass = gpuPercent >= 80 ? 'gpu-critical' : (gpuPercent >= 50 ? 'gpu-warning' : '');
                 topLevelGpuDisplay = `${gpuPercent.toFixed(1)}%`;
@@ -1128,6 +1132,10 @@ async function loadContainers(forceRefresh = false) {
                 const vramPercent = (gpuMemUsed / gpuMemTotal) * 100;
                 const vramClass = vramPercent >= 80 ? 'gpu-critical' : (vramPercent >= 50 ? 'gpu-warning' : '');
                 topLevelVramDisplay = `<span class="group-stat group-gpu ${vramClass}" title="VRAM usage">🖼️ ${formatMemory(gpuMemUsed)} / ${formatMemory(gpuMemTotal)}</span>`;
+            }
+            if (diskUsedGb != null && diskTotalGb != null && diskTotalGb > 0) {
+                const diskClass = diskPercent >= 90 ? 'disk-critical' : (diskPercent >= 75 ? 'disk-warning' : '');
+                topLevelDiskDisplay = `<span class="group-stat group-disk ${diskClass}" title="Disk usage">💿 ${diskUsedGb.toFixed(1)} / ${diskTotalGb.toFixed(1)} GB</span>`;
             }
         }
         
@@ -1142,6 +1150,7 @@ async function loadContainers(forceRefresh = false) {
                     <span class="group-count">${containerCount} containers</span>
                     ${topLevelMemoryDisplay ? `<span class="group-stat group-memory" title="RAM - Total memory usage">💾 ${topLevelMemoryDisplay}</span>` : ''}
                     ${topLevelCpuDisplay ? `<span class="group-stat group-cpu ${topLevelCpuClass}" title="CPU - Max usage">⚡ ${topLevelCpuDisplay}</span>` : ''}
+                    ${topLevelDiskDisplay}
                     ${topLevelGpuDisplay ? `<span class="group-stat group-gpu ${topLevelGpuClass}" title="GPU - Compute usage">🎮 ${topLevelGpuDisplay}</span>` : ''}
                     ${topLevelVramDisplay}
                 </span>

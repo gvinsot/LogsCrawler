@@ -432,3 +432,60 @@ def parse_nvidia_smi_csv(stdout: str) -> Tuple[Optional[float], Optional[float],
         logger.warning("nvidia-smi output has fewer than 3 values", output=stdout[:100], parts_count=len(parts))
     
     return None, None, None
+
+
+# ============== Disk Metrics ==============
+
+def get_disk_metrics() -> Tuple[float, float, float]:
+    """Get disk usage metrics for the root filesystem.
+    
+    Uses 'df' command to get disk usage. Falls back to shutil.disk_usage if available.
+    
+    Returns:
+        Tuple of (disk_total_gb, disk_used_gb, disk_percent)
+        Returns (0, 0, 0) if metrics cannot be collected.
+    """
+    import shutil
+    
+    # Try using shutil.disk_usage (works in both containers and host)
+    try:
+        # Check root filesystem
+        usage = shutil.disk_usage("/")
+        total_gb = usage.total / (1024 ** 3)
+        used_gb = usage.used / (1024 ** 3)
+        percent = (usage.used / usage.total) * 100 if usage.total > 0 else 0
+        logger.debug("Disk metrics collected via shutil", 
+                    total_gb=round(total_gb, 2), 
+                    used_gb=round(used_gb, 2), 
+                    percent=round(percent, 1))
+        return round(total_gb, 2), round(used_gb, 2), round(percent, 1)
+    except Exception as e:
+        logger.debug("shutil.disk_usage failed, trying df command", error=str(e))
+    
+    # Fallback to df command
+    try:
+        result = run_host_command(["df", "-B1", "/"], timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            lines = result.stdout.strip().split("\n")
+            if len(lines) >= 2:
+                # Parse df output: Filesystem 1B-blocks Used Available Use% Mounted
+                parts = lines[1].split()
+                if len(parts) >= 5:
+                    total_bytes = int(parts[1])
+                    used_bytes = int(parts[2])
+                    total_gb = total_bytes / (1024 ** 3)
+                    used_gb = used_bytes / (1024 ** 3)
+                    percent = (used_bytes / total_bytes) * 100 if total_bytes > 0 else 0
+                    logger.debug("Disk metrics collected via df", 
+                                total_gb=round(total_gb, 2), 
+                                used_gb=round(used_gb, 2), 
+                                percent=round(percent, 1))
+                    return round(total_gb, 2), round(used_gb, 2), round(percent, 1)
+    except FileNotFoundError:
+        logger.debug("df command not found")
+    except subprocess.TimeoutExpired:
+        logger.warning("df command timed out")
+    except Exception as e:
+        logger.warning("Failed to get disk metrics via df", error=str(e))
+    
+    return 0.0, 0.0, 0.0

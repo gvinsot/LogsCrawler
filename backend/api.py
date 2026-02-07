@@ -667,11 +667,12 @@ async def list_hosts() -> List[Dict[str, Any]]:
 
 @app.get("/api/hosts/metrics")
 async def get_hosts_metrics() -> Dict[str, Dict[str, Any]]:
-    """Get latest metrics for all hosts including GPU usage.
+    """Get latest metrics for all hosts including GPU and disk usage.
     
     Returns a dict keyed by host name with metrics:
     - cpu_percent, memory_percent, memory_used_mb, memory_total_mb
     - gpu_percent, gpu_memory_used_mb, gpu_memory_total_mb (if GPU available)
+    - disk_total_gb, disk_used_gb, disk_percent
     """
     result = {}
     

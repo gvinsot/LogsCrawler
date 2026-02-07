@@ -264,7 +264,7 @@ class OpenSearchClient:
             host_name: Name of the host
             
         Returns:
-            Dict with cpu_percent, memory_percent, gpu_percent, etc. or None
+            Dict with cpu_percent, memory_percent, gpu_percent, disk_percent, etc. or None
         """
         try:
             body = {
@@ -275,7 +275,8 @@ class OpenSearchClient:
                 "sort": [{"timestamp": "desc"}],
                 "_source": [
                     "cpu_percent", "memory_percent", "memory_used_mb", "memory_total_mb",
-                    "gpu_percent", "gpu_memory_used_mb", "gpu_memory_total_mb", "timestamp"
+                    "gpu_percent", "gpu_memory_used_mb", "gpu_memory_total_mb",
+                    "disk_total_gb", "disk_used_gb", "disk_percent", "timestamp"
                 ]
             }
             
@@ -292,6 +293,9 @@ class OpenSearchClient:
                     "gpu_percent": round(source.get("gpu_percent"), 1) if source.get("gpu_percent") is not None else None,
                     "gpu_memory_used_mb": round(source.get("gpu_memory_used_mb"), 1) if source.get("gpu_memory_used_mb") is not None else None,
                     "gpu_memory_total_mb": round(source.get("gpu_memory_total_mb"), 1) if source.get("gpu_memory_total_mb") is not None else None,
+                    "disk_total_gb": round(source.get("disk_total_gb", 0) or 0, 1),
+                    "disk_used_gb": round(source.get("disk_used_gb", 0) or 0, 1),
+                    "disk_percent": round(source.get("disk_percent", 0) or 0, 1),
                     "timestamp": source.get("timestamp"),
                 }
             

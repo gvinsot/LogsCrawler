@@ -214,6 +214,7 @@ class DockerCollector:
         memory_percent = (memory_used_mb / memory_total_mb * 100) if memory_total_mb > 0 else 0
 
         gpu_percent, gpu_mem_used, gpu_mem_total = utils.get_gpu_metrics()
+        disk_total_gb, disk_used_gb, disk_percent = utils.get_disk_metrics()
 
         return {
             "host": self.host_name,
@@ -222,9 +223,9 @@ class DockerCollector:
             "memory_total_mb": round(memory_total_mb, 2),
             "memory_used_mb": round(memory_used_mb, 2),
             "memory_percent": round(memory_percent, 2),
-            "disk_total_gb": 0,
-            "disk_used_gb": 0,
-            "disk_percent": 0,
+            "disk_total_gb": disk_total_gb,
+            "disk_used_gb": disk_used_gb,
+            "disk_percent": disk_percent,
             "gpu_percent": gpu_percent,
             "gpu_memory_used_mb": gpu_mem_used,
             "gpu_memory_total_mb": gpu_mem_total,
