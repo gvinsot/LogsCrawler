@@ -735,6 +735,36 @@ class DockerAPIClient:
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             return {}
 
+    async def remove_stack(self, stack_name: str) -> Tuple[bool, str]:
+        """Remove a Docker Swarm stack.
+        
+        Uses docker stack rm command since there's no direct Docker API endpoint for stacks.
+        
+        Args:
+            stack_name: Name of the stack to remove
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["docker", "stack", "rm", stack_name],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                return True, f"Stack '{stack_name}' removed successfully"
+            else:
+                error = result.stderr.strip() or result.stdout.strip()
+                return False, f"Failed to remove stack '{stack_name}': {error}"
+        except FileNotFoundError:
+            return False, "Docker CLI not available"
+        except subprocess.TimeoutExpired:
+            return False, f"Timeout removing stack '{stack_name}'"
+
     async def exec_command(self, container_id: str, command: List[str]) -> Tuple[bool, str]:
         """Execute a command inside a container using Docker exec API.
 
