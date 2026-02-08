@@ -441,6 +441,8 @@ async def execute_container_action(request: ActionRequest) -> ActionResult:
 @app.post("/api/stacks/{stack_name}/remove")
 async def remove_stack(stack_name: str, host: Optional[str] = Query(default=None)) -> Dict[str, Any]:
     """Remove a Docker Swarm stack."""
+    # Docker Swarm stores stack names in lowercase
+    stack_name = stack_name.lower()
     containers = await collector.get_all_containers(refresh=True)
     
     # Find containers belonging to this stack
