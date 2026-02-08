@@ -1834,7 +1834,7 @@ async function removeDeployedStack(stackName) {
     }
     
     try {
-        const url = `/api/stacks/${encodeURIComponent(stackName)}/remove`;
+        const url = `/stacks/${encodeURIComponent(stackName)}/remove`;
         const response = await fetch(`${API_BASE}${url}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }

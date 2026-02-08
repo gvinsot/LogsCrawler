@@ -473,38 +473,34 @@ async def remove_stack(stack_name: str, host: Optional[str] = Query(default=None
     """Remove a Docker Swarm stack."""
     # Docker Swarm stores stack names in lowercase
     stack_name = stack_name.lower()
-    containers = await collector.get_all_containers(refresh=True)
     
-    # Find containers belonging to this stack
-    stack_containers = [
-        c for c in containers 
-        if (c.labels.get("com.docker.swarm.stack.namespace") == stack_name or
-            (stack_name != "_standalone" and c.compose_project == stack_name))
-    ]
+    # Find the Swarm manager host to execute the removal
+    manager_host = None
+    for host_config in settings.hosts:
+        if host_config.swarm_manager:
+            manager_host = host_config.name
+            break
     
-    if not stack_containers:
-        raise HTTPException(status_code=404, detail=f"Stack '{stack_name}' not found")
+    # If host specified, use it; otherwise try manager, then fallback to containers
+    target_host = host or manager_host
     
-    # If host not specified, use the first host that has containers from this stack
-    if not host:
-        host = stack_containers[0].host
+    if not target_host:
+        # Fallback: find host from containers belonging to this stack
+        containers = await collector.get_all_containers(refresh=True)
+        stack_containers = [
+            c for c in containers 
+            if c.labels.get("com.docker.swarm.stack.namespace") == stack_name
+        ]
+        if stack_containers:
+            target_host = stack_containers[0].host
     
-    # Check if this is actually a Swarm stack (has swarm labels)
-    is_swarm_stack = any(
-        c.labels.get("com.docker.swarm.stack.namespace") == stack_name 
-        for c in stack_containers
-    )
-    
-    if not is_swarm_stack:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"'{stack_name}' is not a Docker Swarm stack. Use container removal for compose projects."
-        )
+    if not target_host:
+        raise HTTPException(status_code=404, detail=f"No host found to remove stack '{stack_name}'")
     
     # Execute stack removal
-    client = collector.clients.get(host)
+    client = collector.clients.get(target_host)
     if not client:
-        raise HTTPException(status_code=404, detail=f"Host '{host}' not found")
+        raise HTTPException(status_code=404, detail=f"Host '{target_host}' not found")
     
     success, message = await client.remove_stack(stack_name)
     
