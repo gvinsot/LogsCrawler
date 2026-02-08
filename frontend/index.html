@@ -389,6 +389,22 @@
                     </div>
                 </div>
                 
+                <!-- Action Logs modal (real-time build/deploy logs) -->
+                <div id="action-logs-modal" class="modal">
+                    <div class="modal-content modal-lg">
+                        <div class="modal-header">
+                            <h2 id="action-logs-title">Action Logs</h2>
+                            <button class="modal-close" onclick="closeActionLogsModal()">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <div id="action-logs-content" class="log-viewer action-log-viewer"></div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary" onclick="closeActionLogsModal()">Close</button>
+                        </div>
+                    </div>
+                </div>
+                
                 <!-- Env editor modal -->
                 <div id="stack-env-modal" class="modal">
                     <div class="modal-content modal-lg">

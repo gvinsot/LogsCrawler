@@ -950,6 +950,25 @@ async def get_repo_tags(
 
 import re
 
+def _get_deployer_and_host():
+    """Helper to get deployer instance and host name."""
+    if not collector.clients:
+        raise HTTPException(status_code=500, detail="No host clients available")
+    
+    host_name = None
+    host_client = None
+    
+    for name, client in collector.clients.items():
+        if hasattr(client, 'config') and getattr(client.config, 'swarm_manager', False):
+            host_name = name
+            host_client = client
+            break
+    
+    if not host_client:
+        host_name, host_client = next(iter(collector.clients.items()))
+    
+    return StackDeployer(settings.github, host_client), host_name
+
 @app.post("/api/stacks/build")
 async def build_stack(
     repo_name: str = Query(..., description="Repository name"),
@@ -958,64 +977,55 @@ async def build_stack(
     branch: str = Query(default=None, description="Branch name to build from"),
     commit: str = Query(default=None, description="Specific commit hash to build from"),
 ):
-    """Build a stack from a GitHub repository.
-    
-    Args:
-        repo_name: Name of the repository
-        ssh_url: SSH URL for cloning
-        version: Version tag for the build (e.g., "1.0")
-        branch: Optional branch name to build from
-        commit: Optional specific commit hash to build from
-    """
+    """Build a stack from a GitHub repository. Runs in background, returns action ID."""
     if not github_service.is_configured():
         raise HTTPException(status_code=400, detail="GitHub integration not configured")
     
-    # Extract owner from ssh_url (format: git@github.com:owner/repo.git)
     owner = None
     if ssh_url:
         match = re.search(r'[:/]([^/]+)/[^/]+\.git$', ssh_url)
         if match:
             owner = match.group(1)
     
-    # Validate branch if provided
     if branch and owner:
         is_valid, error_msg = await github_service.validate_branch(owner, repo_name, branch)
         if not is_valid:
             raise HTTPException(status_code=400, detail=error_msg)
     
-    # Validate commit if provided
     if commit and owner:
-        # Basic format validation for commit hash
         if not re.match(r'^[a-fA-F0-9]{7,40}$', commit):
             raise HTTPException(status_code=400, detail=f"Invalid commit hash format: '{commit}'. Expected 7-40 hexadecimal characters.")
         is_valid, error_msg = await github_service.validate_commit(owner, repo_name, commit)
         if not is_valid:
             raise HTTPException(status_code=400, detail=error_msg)
     
-    # Get the first configured host client for running commands
-    if not collector.clients:
-        raise HTTPException(status_code=500, detail="No host clients available")
+    deployer, host_name = _get_deployer_and_host()
     
-    # Use the swarm manager or first available host
-    host_name = None
-    host_client = None
+    # Create background action
+    action_id = str(uuid.uuid4())[:8]
+    action = BackgroundAction(action_id, "build", repo_name)
+    _background_actions[action_id] = action
     
-    # Prefer swarm manager if available
-    for name, client in collector.clients.items():
-        if hasattr(client, 'config') and getattr(client.config, 'swarm_manager', False):
-            host_name = name
-            host_client = client
-            break
+    async def _run_build():
+        try:
+            result = await deployer.build(
+                repo_name, ssh_url, version, branch=branch, commit=commit,
+                output_callback=action.append_output,
+                cancel_event=action.cancel_event,
+            )
+            result["host"] = host_name
+            action.result = result
+            action.status = "completed" if result.get("success") else "failed"
+            if action.cancel_event.is_set():
+                action.status = "cancelled"
+        except Exception as e:
+            action.status = "failed"
+            action.result = {"success": False, "output": str(e), "action": "build", "repo": repo_name}
+            action.append_output(f"Error: {e}")
     
-    # Fallback to first host
-    if not host_client:
-        host_name, host_client = next(iter(collector.clients.items()))
+    action.task = asyncio.create_task(_run_build())
     
-    deployer = StackDeployer(settings.github, host_client)
-    result = await deployer.build(repo_name, ssh_url, version, branch=branch, commit=commit)
-    result["host"] = host_name
-    
-    return result
+    return {"action_id": action_id, "action_type": "build", "repo": repo_name}
 
 
 @app.post("/api/stacks/deploy")
@@ -1025,50 +1035,112 @@ async def deploy_stack(
     version: str = Query(default="1.0", description="Version tag"),
     tag: str = Query(default=None, description="Specific tag to deploy (format: vX.X.X)"),
 ):
-    """Deploy a stack from a GitHub repository.
-    
-    Args:
-        repo_name: Name of the repository
-        ssh_url: SSH URL for cloning
-        version: Version tag for the deployment (e.g., "1.0")
-        tag: Optional specific tag to deploy (e.g., "v1.0.5")
-    """
+    """Deploy a stack from a GitHub repository. Runs in background, returns action ID."""
     if not github_service.is_configured():
         raise HTTPException(status_code=400, detail="GitHub integration not configured")
     
-    # Validate tag format if provided
     if tag:
-        # Accept formats: vX.X.X, X.X.X, vX.X, X.X, or any version-like string
         if not re.match(r'^v?\d+(\.\d+){0,2}$', tag):
             raise HTTPException(
                 status_code=400, 
                 detail=f"Invalid tag format: '{tag}'. Expected format: vX.X.X (e.g., v1.0.5) or X.X.X"
             )
     
-    # Get the first configured host client for running commands
-    if not collector.clients:
-        raise HTTPException(status_code=500, detail="No host clients available")
+    deployer, host_name = _get_deployer_and_host()
     
-    # Use the swarm manager or first available host
-    host_name = None
-    host_client = None
+    # Create background action
+    action_id = str(uuid.uuid4())[:8]
+    action = BackgroundAction(action_id, "deploy", repo_name)
+    _background_actions[action_id] = action
     
-    # Prefer swarm manager if available
-    for name, client in collector.clients.items():
-        if hasattr(client, 'config') and getattr(client.config, 'swarm_manager', False):
-            host_name = name
-            host_client = client
-            break
+    async def _run_deploy():
+        try:
+            result = await deployer.deploy(
+                repo_name, ssh_url, version, tag=tag,
+                output_callback=action.append_output,
+                cancel_event=action.cancel_event,
+            )
+            result["host"] = host_name
+            action.result = result
+            action.status = "completed" if result.get("success") else "failed"
+            if action.cancel_event.is_set():
+                action.status = "cancelled"
+        except Exception as e:
+            action.status = "failed"
+            action.result = {"success": False, "output": str(e), "action": "deploy", "repo": repo_name}
+            action.append_output(f"Error: {e}")
     
-    # Fallback to first host
-    if not host_client:
-        host_name, host_client = next(iter(collector.clients.items()))
+    action.task = asyncio.create_task(_run_deploy())
     
-    deployer = StackDeployer(settings.github, host_client)
-    result = await deployer.deploy(repo_name, ssh_url, version, tag=tag)
-    result["host"] = host_name
+    return {"action_id": action_id, "action_type": "deploy", "repo": repo_name}
+
+
+@app.get("/api/stacks/actions/{action_id}/status")
+async def get_action_status(action_id: str) -> Dict[str, Any]:
+    """Get the status of a background build/deploy action."""
+    action = _background_actions.get(action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
     
-    return result
+    response = {
+        "action_id": action.id,
+        "action_type": action.action_type,
+        "repo": action.repo_name,
+        "status": action.status,
+        "started_at": action.started_at.isoformat(),
+        "elapsed_seconds": (datetime.utcnow() - action.started_at).total_seconds(),
+    }
+    
+    if action.result:
+        response["result"] = action.result
+    
+    return response
+
+
+@app.get("/api/stacks/actions/{action_id}/logs")
+async def get_action_logs(
+    action_id: str,
+    offset: int = Query(default=0, ge=0, description="Line offset to start from"),
+) -> Dict[str, Any]:
+    """Get the streaming logs of a background build/deploy action."""
+    action = _background_actions.get(action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+    
+    lines = action.output_lines[offset:]
+    
+    return {
+        "action_id": action.id,
+        "status": action.status,
+        "lines": lines,
+        "offset": offset,
+        "total_lines": len(action.output_lines),
+    }
+
+
+@app.post("/api/stacks/actions/{action_id}/cancel")
+async def cancel_action(action_id: str) -> Dict[str, Any]:
+    """Cancel a running background build/deploy action."""
+    action = _background_actions.get(action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+    
+    if action.status != "running":
+        return {"success": False, "message": f"Action is already {action.status}"}
+    
+    action.cancel_event.set()
+    action.append_output("[Cancellation requested...]")
+    
+    # Wait briefly for the task to acknowledge cancellation
+    try:
+        await asyncio.wait_for(asyncio.shield(action.task), timeout=5)
+    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+        pass
+    
+    if action.status == "running":
+        action.status = "cancelled"
+    
+    return {"success": True, "message": "Action cancelled"}
 
 
 @app.get("/api/stacks/{repo_name}/env")

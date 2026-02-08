@@ -2490,7 +2490,7 @@ async function submitBuild() {
     
     // Disable button and show loading
     submitBtn.disabled = true;
-    submitBtn.innerHTML = '<span class="btn-loading"></span> Building...';
+    submitBtn.innerHTML = '<span class="btn-loading"></span> Starting...';
     
     try {
         let url = `/stacks/build?repo_name=${encodeURIComponent(currentBuildRepo)}&ssh_url=${encodeURIComponent(currentBuildSshUrl)}&version=${encodeURIComponent(version)}`;
@@ -2501,9 +2501,13 @@ async function submitBuild() {
             url += `&commit=${encodeURIComponent(commit)}`;
         }
         
-        const result = await apiPost(url);
-        closeBuildModal();
-        showStackOutput('Build', currentBuildRepo, result);
+        const response = await apiPost(url);
+        if (response && response.action_id) {
+            closeBuildModal();
+            trackBackgroundAction(response.action_id, 'Build', currentBuildRepo);
+        } else {
+            showNotification('error', 'Failed to start build');
+        }
     } catch (e) {
         showNotification('error', e.message || 'Build failed');
     } finally {
@@ -2716,7 +2720,7 @@ async function submitDeploy() {
     
     // Disable button and show loading
     submitBtn.disabled = true;
-    submitBtn.innerHTML = '<span class="btn-loading"></span> Deploying...';
+    submitBtn.innerHTML = '<span class="btn-loading"></span> Starting...';
     
     try {
         let url = `/stacks/deploy?repo_name=${encodeURIComponent(currentDeployRepo)}&ssh_url=${encodeURIComponent(currentDeploySshUrl)}&version=${encodeURIComponent(version)}`;
@@ -2724,13 +2728,12 @@ async function submitDeploy() {
             url += `&tag=${encodeURIComponent(tag)}`;
         }
         
-        const result = await apiPost(url);
-        closeDeployModal();
-        showStackOutput('Deploy', currentDeployRepo, result);
-        
-        // Refresh stacks list after successful deploy
-        if (result.success) {
-            setTimeout(refreshStacks, 2000);
+        const response = await apiPost(url);
+        if (response && response.action_id) {
+            closeDeployModal();
+            trackBackgroundAction(response.action_id, 'Deploy', currentDeployRepo);
+        } else {
+            showNotification('error', 'Failed to start deployment');
         }
     } catch (e) {
         showNotification('error', e.message || 'Deploy failed');
@@ -2749,6 +2752,239 @@ async function submitDeploy() {
         `;
     }
 }
+
+// ============== Background Action Tracking ==============
+
+const _activeActions = {}; // action_id -> { interval, toastEl, ... }
+
+function trackBackgroundAction(actionId, actionType, repoName) {
+    const startTime = Date.now();
+    let toastShown = false;
+    let toastEl = null;
+    
+    const tracker = { actionId, actionType, repoName, startTime, interval: null, toastEl: null };
+    _activeActions[actionId] = tracker;
+    
+    // Poll for status every 2 seconds
+    tracker.interval = setInterval(async () => {
+        const elapsed = (Date.now() - startTime) / 1000;
+        
+        // Show persistent toast after 7 seconds
+        if (!toastShown && elapsed >= 7) {
+            toastShown = true;
+            toastEl = showActionToast(actionId, actionType, repoName);
+            tracker.toastEl = toastEl;
+        }
+        
+        // Update elapsed time on toast
+        if (toastEl) {
+            const elapsedEl = toastEl.querySelector('.action-toast-elapsed');
+            if (elapsedEl) {
+                elapsedEl.textContent = formatElapsed(elapsed);
+            }
+        }
+        
+        // Check status
+        try {
+            const status = await apiGet(`/stacks/actions/${actionId}/status`);
+            if (!status) return;
+            
+            if (status.status !== 'running') {
+                // Action finished
+                clearInterval(tracker.interval);
+                delete _activeActions[actionId];
+                
+                // Remove toast if shown
+                if (toastEl) {
+                    toastEl.classList.add('toast-exit');
+                    setTimeout(() => toastEl.remove(), 300);
+                }
+                
+                // Close action logs modal if open for this action
+                if (currentActionLogsId === actionId) {
+                    stopActionLogsPolling();
+                }
+                
+                // Show result
+                if (status.result) {
+                    showStackOutput(actionType, repoName, status.result);
+                } else {
+                    showNotification(
+                        status.status === 'cancelled' ? 'warning' : (status.status === 'completed' ? 'success' : 'error'),
+                        `${actionType} ${repoName}: ${status.status}`
+                    );
+                }
+                
+                // Refresh stacks after deploy
+                if (actionType === 'Deploy' && status.status === 'completed') {
+                    setTimeout(refreshStacks, 2000);
+                }
+            }
+        } catch (e) {
+            console.error('Failed to poll action status:', e);
+        }
+    }, 2000);
+}
+
+function formatElapsed(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function showActionToast(actionId, actionType, repoName) {
+    // Remove any existing toast for the same action
+    const existing = document.getElementById(`action-toast-${actionId}`);
+    if (existing) existing.remove();
+    
+    const toast = document.createElement('div');
+    toast.id = `action-toast-${actionId}`;
+    toast.className = 'action-toast';
+    toast.innerHTML = `
+        <div class="action-toast-content">
+            <div class="action-toast-info">
+                <span class="action-toast-spinner"></span>
+                <span class="action-toast-text"><strong>${escapeHtml(actionType)}</strong> ${escapeHtml(repoName)}</span>
+                <span class="action-toast-elapsed">0s</span>
+            </div>
+            <div class="action-toast-actions">
+                <button class="btn btn-sm btn-ghost" onclick="openActionLogs('${actionId}', '${escapeHtml(actionType)}', '${escapeHtml(repoName)}')" title="View logs">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                    </svg>
+                    Logs
+                </button>
+                <button class="btn btn-sm btn-danger" onclick="cancelAction('${actionId}')" title="Stop">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                        <rect x="6" y="6" width="12" height="12"/>
+                    </svg>
+                    Stop
+                </button>
+            </div>
+        </div>
+    `;
+    
+    // Add to toast container (create if needed)
+    let container = document.getElementById('action-toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'action-toast-container';
+        document.body.appendChild(container);
+    }
+    container.appendChild(toast);
+    
+    // Trigger entrance animation
+    requestAnimationFrame(() => toast.classList.add('toast-visible'));
+    
+    return toast;
+}
+
+async function cancelAction(actionId) {
+    try {
+        const result = await apiPost(`/stacks/actions/${actionId}/cancel`);
+        if (result && result.success) {
+            showNotification('warning', 'Cancellation requested...');
+        } else {
+            showNotification('error', result?.message || 'Failed to cancel');
+        }
+    } catch (e) {
+        showNotification('error', `Failed to cancel: ${e.message || 'Unknown error'}`);
+    }
+}
+
+// ============== Action Logs Modal ==============
+
+let currentActionLogsId = null;
+let actionLogsInterval = null;
+let actionLogsOffset = 0;
+
+function openActionLogs(actionId, actionType, repoName) {
+    currentActionLogsId = actionId;
+    actionLogsOffset = 0;
+    
+    const modal = document.getElementById('action-logs-modal');
+    const title = document.getElementById('action-logs-title');
+    const content = document.getElementById('action-logs-content');
+    
+    title.textContent = `${actionType}: ${repoName}`;
+    content.innerHTML = '<div class="loading-placeholder">Loading logs...</div>';
+    
+    modal.classList.add('active');
+    
+    // Start polling logs
+    pollActionLogs();
+    actionLogsInterval = setInterval(pollActionLogs, 1500);
+}
+
+function closeActionLogsModal() {
+    stopActionLogsPolling();
+    document.getElementById('action-logs-modal').classList.remove('active');
+    currentActionLogsId = null;
+}
+
+function stopActionLogsPolling() {
+    if (actionLogsInterval) {
+        clearInterval(actionLogsInterval);
+        actionLogsInterval = null;
+    }
+}
+
+async function pollActionLogs() {
+    if (!currentActionLogsId) return;
+    
+    try {
+        const data = await apiGet(`/stacks/actions/${currentActionLogsId}/logs?offset=${actionLogsOffset}`);
+        if (!data) return;
+        
+        const content = document.getElementById('action-logs-content');
+        
+        // On first load, clear placeholder
+        if (actionLogsOffset === 0 && data.lines.length > 0) {
+            content.innerHTML = '';
+        } else if (actionLogsOffset === 0 && data.lines.length === 0) {
+            content.innerHTML = '<div class="empty-placeholder">Waiting for output...</div>';
+            return;
+        }
+        
+        // Append new lines
+        for (const line of data.lines) {
+            const lineEl = document.createElement('div');
+            lineEl.className = 'log-line';
+            
+            // Highlight errors
+            if (/\b(error|ERROR|fatal|FATAL|failed|FAILED)\b/.test(line)) {
+                lineEl.classList.add('log-error');
+            }
+            
+            lineEl.textContent = line;
+            content.appendChild(lineEl);
+        }
+        
+        actionLogsOffset = data.total_lines;
+        
+        // Auto-scroll to bottom
+        content.scrollTop = content.scrollHeight;
+        
+        // Stop polling if action is done
+        if (data.status !== 'running') {
+            stopActionLogsPolling();
+            
+            // Add status line
+            const statusLine = document.createElement('div');
+            statusLine.className = `log-line ${data.status === 'completed' ? 'log-success' : 'log-error'}`;
+            statusLine.textContent = `\n--- ${data.status.toUpperCase()} ---`;
+            content.appendChild(statusLine);
+            content.scrollTop = content.scrollHeight;
+        }
+    } catch (e) {
+        console.error('Failed to poll action logs:', e);
+    }
+}
+
+// ============== Stack Output ==============
 
 function showStackOutput(action, repoName, result) {
     const modal = document.getElementById('stack-output-modal');
