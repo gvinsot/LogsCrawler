@@ -2228,11 +2228,13 @@ function renderStacksList() {
         
         // Build containers HTML (similar to Computers view compose-group style)
         let containersHtml = '';
-        if (isDeployed && Object.keys(stackContainers).length > 0) {
+        const serviceCount = Object.keys(stackContainers).length;
+        if (isDeployed && serviceCount > 0) {
             containersHtml = `<div class="host-content" id="stack-containers-${escapeHtml(repo.name)}" style="display: ${isExpanded ? 'block' : 'none'};">`;
             
             for (const [serviceName, containers] of Object.entries(stackContainers)) {
                 const displayServiceName = serviceName === '_standalone' ? 'Standalone' : serviceName;
+                const hasContainers = containers.length > 0;
                 
                 // Calculate service stats
                 let serviceTotalMemory = 0;
@@ -2245,17 +2247,21 @@ function renderStacksList() {
                 const serviceCpuClass = serviceMaxCpu >= 80 ? 'cpu-critical' : (serviceMaxCpu >= 50 ? 'cpu-warning' : '');
                 const serviceCpuDisplay = serviceMaxCpu > 0 ? `${serviceMaxCpu.toFixed(1)}%` : '';
                 
+                // For the service logs button, use the full swarm service name (stack_service)
+                const fullServiceName = `${stackName}_${serviceName}`;
+                
                 containersHtml += `
-                    <div class="compose-group">
+                    <div class="compose-group${hasContainers ? '' : ' compose-group-empty'}">
                         <div class="compose-header">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
                             </svg>
                             ${escapeHtml(displayServiceName)}
                             <span class="group-count">${containers.length}</span>
+                            ${!hasContainers ? '<span class="service-no-replicas">0 replicas</span>' : ''}
                             ${serviceMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${serviceMemoryDisplay}</span>` : ''}
                             ${serviceCpuDisplay ? `<span class="group-stat group-cpu ${serviceCpuClass}" title="Max CPU usage">⚡ ${serviceCpuDisplay}</span>` : ''}
-                            <button class="btn btn-sm btn-ghost service-logs-btn" onclick="event.stopPropagation(); openServiceLogs('${escapeHtml(serviceName)}')" title="View service logs">
+                            <button class="btn btn-sm btn-ghost service-logs-btn" onclick="event.stopPropagation(); openServiceLogs('${escapeHtml(fullServiceName)}')" title="View service logs">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                                     <polyline points="14 2 14 8 20 8"/>
@@ -2269,6 +2275,20 @@ function renderStacksList() {
                         <div class="compose-content">
                             <div class="container-list">
                 `;
+                
+                if (!hasContainers) {
+                    containersHtml += `
+                        <div class="container-item container-item-empty">
+                            <div class="container-info">
+                                <span class="container-status exited"></span>
+                                <div>
+                                    <div class="container-name" style="color: var(--text-muted);">No running containers</div>
+                                    <div class="container-image">Service has 0 replicas or all tasks failed</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
                 
                 for (const c of containers) {
                     const cpuDisplay = c.cpu_percent != null ? `${c.cpu_percent}%` : '-';
@@ -2341,7 +2361,7 @@ function renderStacksList() {
                     ${stackIcon}
                     ${escapeHtml(repo.name)}
                     ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : '<span class="stack-badge" style="background: var(--bg-tertiary); color: var(--text-muted);">Not deployed</span>'}
-                    ${isDeployed ? `<span class="group-count">${containerCount} containers</span>` : ''}
+                    ${isDeployed ? `<span class="group-count">${Object.keys(stackContainers).length} services, ${containerCount} containers</span>` : ''}
                     ${stackMemoryDisplay ? `<span class="group-stat group-memory" title="RAM - Total memory usage">💾 ${stackMemoryDisplay}</span>` : ''}
                     ${stackCpuDisplay ? `<span class="group-stat group-cpu ${stackCpuClass}" title="CPU - Max usage">⚡ ${stackCpuDisplay}</span>` : ''}
                     ${stackGpuDisplay}

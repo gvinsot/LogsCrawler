@@ -303,11 +303,19 @@ async def list_containers_grouped(
                 except Exception as e:
                     logger.warning("Failed to get stacks from Swarm manager", host=swarm_manager_host, error=str(e))
         
-        # Initialize grouped structure with all known stacks from manager
-        # This ensures stacks are shown even if they have no containers yet
+        # Initialize grouped structure with all known stacks and services from manager
+        # This ensures stacks/services are shown even if they have no containers
         grouped: Dict[str, Dict[str, List[ContainerInfo]]] = {}
-        for stack_name in stack_services_map.keys():
+        for stack_name, services in stack_services_map.items():
             grouped[stack_name] = {}
+            for service_full_name in services:
+                # Service names from docker stack services are like "stackname_servicename"
+                # Extract just the service part for the key
+                if service_full_name.startswith(stack_name + "_"):
+                    service_short = service_full_name[len(stack_name) + 1:]
+                else:
+                    service_short = service_full_name
+                grouped[stack_name][service_short] = []
         
         # Group containers by their stack
         for container in containers:
@@ -394,12 +402,8 @@ async def list_containers_grouped(
             
             grouped[stack_name][service_name].append(container)
         
-        # Remove empty stacks (stacks from manager that have no containers)
-        # But keep stacks that have containers even if not in manager list
-        empty_stacks = [stack for stack, services in grouped.items() 
-                       if not services and stack in stack_services_map]
-        for stack in empty_stacks:
-            del grouped[stack]
+        # Keep all stacks from manager, even those with no containers
+        # (services may exist but have 0 running replicas)
     else:
         # Group by host -> compose_project (default)
         grouped: Dict[str, Dict[str, List[ContainerInfo]]] = {}
