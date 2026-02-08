@@ -599,12 +599,16 @@ async function apiGetWithRetry(endpoint, retryCallback = null) {
 
 async function apiPost(endpoint, data) {
     try {
-        const response = await fetch(`${API_BASE}${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const opts = { method: 'POST' };
+        if (data !== undefined) {
+            opts.headers = { 'Content-Type': 'application/json' };
+            opts.body = JSON.stringify(data);
+        }
+        const response = await fetch(`${API_BASE}${endpoint}`, opts);
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
         return await response.json();
     } catch (error) {
         console.error(`API Error (${endpoint}):`, error);
@@ -2501,10 +2505,16 @@ async function submitBuild() {
             url += `&commit=${encodeURIComponent(commit)}`;
         }
         
-        const response = await apiPost(url);
-        if (response && response.action_id) {
+        const repoName = currentBuildRepo;
+        const response = await fetch(`${API_BASE}${url}`, { method: 'POST' });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        if (data && data.action_id) {
             closeBuildModal();
-            trackBackgroundAction(response.action_id, 'Build', currentBuildRepo);
+            trackBackgroundAction(data.action_id, 'Build', repoName);
         } else {
             showNotification('error', 'Failed to start build');
         }
@@ -2728,10 +2738,16 @@ async function submitDeploy() {
             url += `&tag=${encodeURIComponent(tag)}`;
         }
         
-        const response = await apiPost(url);
-        if (response && response.action_id) {
+        const repoName = currentDeployRepo;
+        const response = await fetch(`${API_BASE}${url}`, { method: 'POST' });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        if (data && data.action_id) {
             closeDeployModal();
-            trackBackgroundAction(response.action_id, 'Deploy', currentDeployRepo);
+            trackBackgroundAction(data.action_id, 'Deploy', repoName);
         } else {
             showNotification('error', 'Failed to start deployment');
         }

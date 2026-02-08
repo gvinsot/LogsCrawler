@@ -1019,9 +1019,12 @@ async def build_stack(
             if action.cancel_event.is_set():
                 action.status = "cancelled"
         except Exception as e:
+            import traceback
+            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            logger.exception("Background build failed", repo=repo_name, error=str(e))
             action.status = "failed"
-            action.result = {"success": False, "output": str(e), "action": "build", "repo": repo_name}
-            action.append_output(f"Error: {e}")
+            action.result = {"success": False, "output": error_detail, "action": "build", "repo": repo_name}
+            action.append_output(error_detail)
     
     action.task = asyncio.create_task(_run_build())
     
@@ -1066,9 +1069,12 @@ async def deploy_stack(
             if action.cancel_event.is_set():
                 action.status = "cancelled"
         except Exception as e:
+            import traceback
+            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            logger.exception("Background deploy failed", repo=repo_name, error=str(e))
             action.status = "failed"
-            action.result = {"success": False, "output": str(e), "action": "deploy", "repo": repo_name}
-            action.append_output(f"Error: {e}")
+            action.result = {"success": False, "output": error_detail, "action": "deploy", "repo": repo_name}
+            action.append_output(error_detail)
     
     action.task = asyncio.create_task(_run_deploy())
     
