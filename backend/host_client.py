@@ -39,6 +39,7 @@ class HostClientProtocol(Protocol):
     async def exec_command(self, container_id: str, command: List[str]) -> Tuple[bool, str]: ...
     async def remove_stack(self, stack_name: str) -> Tuple[bool, str]: ...
     async def get_swarm_stacks(self) -> Dict[str, List[str]]: ...
+    async def get_service_logs(self, service_name: str, tail: int = 200) -> List[Any]: ...
     async def close(self) -> None: ...
 
 
@@ -202,6 +203,10 @@ class SwarmProxyClient:
     async def get_swarm_stacks(self) -> Dict[str, List[str]]:
         """Get swarm stacks via manager."""
         return await self._manager.get_swarm_stacks()
+
+    async def get_service_logs(self, service_name: str, tail: int = 200) -> List[Any]:
+        """Get service logs via manager."""
+        return await self._manager.get_service_logs(service_name, tail)
 
     async def close(self) -> None:
         """No-op for proxy client (manager handles connection)."""

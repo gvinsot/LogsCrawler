@@ -544,6 +544,131 @@ class DockerAPIClient:
             error_msg = data if isinstance(data, str) else json.dumps(data) if data else "Unknown error"
             return False, error_msg
 
+    async def get_service_logs(self, service_name: str, tail: int = 200) -> List[Dict[str, Any]]:
+        """Get logs for a Docker Swarm service using the Docker API.
+        
+        Uses /services/{id}/logs endpoint which aggregates logs from all
+        tasks/replicas of the service.
+        
+        Args:
+            service_name: The full service name (e.g., stackname_servicename)
+            tail: Number of log lines to retrieve
+            
+        Returns:
+            List of log entry dicts with timestamp, message, stream, service
+        """
+        params = [
+            "timestamps=true",
+            "stdout=true",
+            "stderr=true",
+            f"tail={tail}",
+        ]
+        
+        endpoint = f"/services/{quote(service_name, safe='')}/logs?{'&'.join(params)}"
+        
+        session = await self._get_session()
+        if not session:
+            return []
+        
+        url = f"{self._base_url}{endpoint}"
+        
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.error("Failed to get service logs", service=service_name, status=response.status)
+                    return []
+                
+                raw_data = await response.read()
+                return self._parse_service_logs(raw_data, service_name)
+                
+        except Exception as e:
+            logger.error("Failed to get service logs", service=service_name, error=str(e))
+            return []
+    
+    def _parse_service_logs(self, raw_data: bytes, service_name: str) -> List[Dict[str, Any]]:
+        """Parse Docker service log stream format.
+        
+        Service logs use the same multiplexed stream format as container logs:
+        [8 bytes header][payload] where header is [stream_type(1), 0, 0, 0, size(4)]
+        """
+        entries = []
+        offset = 0
+        
+        while offset < len(raw_data):
+            if offset + 8 > len(raw_data):
+                break
+            
+            header = raw_data[offset:offset + 8]
+            stream_type = header[0]  # 1=stdout, 2=stderr
+            size = int.from_bytes(header[4:8], byteorder='big')
+            
+            if offset + 8 + size > len(raw_data):
+                break
+            
+            payload = raw_data[offset + 8:offset + 8 + size]
+            offset += 8 + size
+            
+            try:
+                line = payload.decode('utf-8', errors='replace').strip()
+                if not line:
+                    continue
+                
+                # Parse timestamp if present (Docker adds timestamps)
+                timestamp = None
+                message = line
+                if len(line) > 30 and (line[4] == '-' or line[:4].isdigit()):
+                    # Try to extract ISO timestamp
+                    space_idx = line.find(' ')
+                    if space_idx > 20:
+                        try:
+                            timestamp = line[:space_idx]
+                            message = line[space_idx + 1:]
+                        except (ValueError, IndexError):
+                            timestamp = None
+                            message = line
+                
+                entry = {
+                    "timestamp": timestamp or datetime.utcnow().isoformat() + "Z",
+                    "message": message,
+                    "stream": "stderr" if stream_type == 2 else "stdout",
+                    "service": service_name,
+                }
+                entries.append(entry)
+                
+            except Exception:
+                continue
+        
+        # Fallback: if no entries parsed with multiplexed format, try plain text
+        if not entries and raw_data:
+            try:
+                text = raw_data.decode('utf-8', errors='replace')
+                for line in text.strip().split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    timestamp = None
+                    message = line
+                    if len(line) > 30 and (line[4] == '-' or line[:4].isdigit()):
+                        space_idx = line.find(' ')
+                        if space_idx > 20:
+                            try:
+                                timestamp = line[:space_idx]
+                                message = line[space_idx + 1:]
+                            except (ValueError, IndexError):
+                                pass
+                    
+                    entries.append({
+                        "timestamp": timestamp or datetime.utcnow().isoformat() + "Z",
+                        "message": message,
+                        "stream": "stdout",
+                        "service": service_name,
+                    })
+            except Exception:
+                pass
+        
+        return entries
+
     async def get_swarm_stacks(self) -> Dict[str, List[str]]:
         """Get list of Docker Swarm stacks and their services.
         

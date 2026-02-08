@@ -2343,6 +2343,51 @@ a.btn {
     word-break: break-all;
 }
 
+/* Service Logs */
+.service-logs-btn {
+    margin-left: auto;
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.compose-header:hover .service-logs-btn {
+    opacity: 1;
+}
+
+.service-log-viewer {
+    height: 500px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+}
+
+.service-log-viewer .log-line {
+    padding: 1px 4px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.service-log-viewer .log-line.log-error {
+    color: var(--status-error);
+}
+
+.service-log-viewer .log-timestamp {
+    color: var(--text-muted);
+    margin-right: 8px;
+    font-size: 0.8rem;
+}
+
+.service-log-viewer .log-message {
+    color: var(--text-primary);
+}
+
 /* Env editor */
 .env-help-text {
     margin: 0 0 12px 0;

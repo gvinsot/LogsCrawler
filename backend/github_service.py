@@ -557,7 +557,7 @@ class StackDeployer:
 
             return True, "Repository updated successfully"
 
-    async def _run_command(self, command: str) -> tuple[bool, str]:
+    async def _run_command(self, command: str, output_callback=None, cancel_event=None) -> tuple[bool, str]:
         """Run a shell command on the host.
 
         Prefers SSH if configured (for running on Docker host from container).
@@ -565,6 +565,8 @@ class StackDeployer:
 
         Args:
             command: Shell command to run
+            output_callback: Optional callable(str) called for each line of output
+            cancel_event: Optional asyncio.Event, if set the command will be cancelled
 
         Returns:
             Tuple of (success, output)
@@ -574,6 +576,8 @@ class StackDeployer:
             ssh_client = await self._get_ssh_client()
             if ssh_client:
                 try:
+                    if output_callback or cancel_event:
+                        return await self._run_ssh_streaming(ssh_client, command, output_callback, cancel_event)
                     return await ssh_client.run_shell_command(command)
                 except OSError as e:
                     # Handle DNS/network resolution errors
@@ -585,23 +589,92 @@ class StackDeployer:
             
             # Fallback: use the host client if available
             if self.host_client and hasattr(self.host_client, 'run_shell_command'):
+                if output_callback or cancel_event:
+                    return await self._run_local_streaming(command, output_callback, cancel_event)
                 return await self.host_client.run_shell_command(command)
             
-            # Last resort: run locally using asyncio
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-            output = stdout.decode() + stderr.decode()
-            return proc.returncode == 0, output.strip()
+            # Last resort: run locally using asyncio with streaming
+            return await self._run_local_streaming(command, output_callback, cancel_event)
+        except asyncio.CancelledError:
+            msg = "Command cancelled"
+            if output_callback:
+                output_callback(msg)
+            return False, msg
         except Exception as e:
             logger.error("Command execution failed", command=command[:80], error=str(e))
             return False, str(e)
 
+    async def _run_local_streaming(self, command: str, output_callback=None, cancel_event=None) -> tuple[bool, str]:
+        """Run a command locally with streaming output support."""
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        
+        output_lines = []
+        try:
+            while True:
+                # Check cancellation
+                if cancel_event and cancel_event.is_set():
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                    return False, "\n".join(output_lines) + "\n[Cancelled by user]"
+                
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                
+                if not line:
+                    break
+                
+                decoded = line.decode('utf-8', errors='replace').rstrip('\n')
+                output_lines.append(decoded)
+                if output_callback:
+                    output_callback(decoded)
+            
+            await proc.wait()
+            return proc.returncode == 0, "\n".join(output_lines).strip()
+        except asyncio.CancelledError:
+            proc.terminate()
+            raise
+
+    async def _run_ssh_streaming(self, ssh_client, command: str, output_callback=None, cancel_event=None) -> tuple[bool, str]:
+        """Run a command via SSH with streaming output support."""
+        # SSH client doesn't support streaming easily, so run and capture
+        # but still check for cancellation periodically
+        if cancel_event and cancel_event.is_set():
+            return False, "[Cancelled by user]"
+        
+        # Run the SSH command in a task so we can cancel it
+        async def _do_run():
+            return await ssh_client.run_shell_command(command)
+        
+        task = asyncio.create_task(_do_run())
+        
+        while not task.done():
+            if cancel_event and cancel_event.is_set():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                return False, "[Cancelled by user]"
+            await asyncio.sleep(0.5)
+        
+        success, output = task.result()
+        if output_callback:
+            for line in output.split('\n'):
+                output_callback(line)
+        return success, output
+
     async def build(self, repo_name: str, ssh_url: str, version: str = "1.0", 
-                   branch: str = None, commit: str = None) -> Dict[str, Any]:
+                   branch: str = None, commit: str = None,
+                   output_callback=None, cancel_event=None) -> Dict[str, Any]:
         """Build a stack from a repository.
 
         Args:
@@ -610,6 +683,8 @@ class StackDeployer:
             version: Version tag for the build
             branch: Optional branch name to build from
             commit: Optional specific commit hash to build from
+            output_callback: Optional callable(str) for streaming output
+            cancel_event: Optional asyncio.Event for cancellation
 
         Returns:
             Dict with success status, output, and timing info
@@ -652,8 +727,17 @@ class StackDeployer:
                 # If commit is provided without branch, use current branch
                 build_cmd += f" \"\" {commit}"
 
+            if output_callback and clone_msg:
+                for line in clone_msg.split('\n'):
+                    output_callback(line)
+            
+            # Check cancellation before main build
+            if cancel_event and cancel_event.is_set():
+                result["output"] = clone_msg + "\n[Cancelled by user]"
+                return result
+
             logger.info("Running build", repo=repo_name, version=version, branch=branch, commit=commit)
-            success, output = await self._run_command(build_cmd)
+            success, output = await self._run_command(build_cmd, output_callback=output_callback, cancel_event=cancel_event)
 
             result["success"] = success
             result["output"] = f"{clone_msg}\n\n{output}" if clone_msg else output
@@ -669,7 +753,8 @@ class StackDeployer:
         return result
 
     async def deploy(self, repo_name: str, ssh_url: str, version: str = "1.0",
-                    tag: str = None) -> Dict[str, Any]:
+                    tag: str = None,
+                    output_callback=None, cancel_event=None) -> Dict[str, Any]:
         """Deploy a stack from a repository.
 
         Args:
@@ -677,6 +762,8 @@ class StackDeployer:
             ssh_url: SSH URL for cloning if needed
             version: Version tag for deployment
             tag: Optional specific tag to deploy (e.g., v1.0.5)
+            output_callback: Optional callable(str) for streaming output
+            cancel_event: Optional asyncio.Event for cancellation
 
         Returns:
             Dict with success status, output, and timing info
@@ -712,8 +799,17 @@ class StackDeployer:
             scripts_path = self.config.scripts_path
             deploy_cmd = f"cd {scripts_path} && bash deploy-service.sh \"{repo_name}\" {deploy_version}"
 
+            if output_callback and clone_msg:
+                for line in clone_msg.split('\n'):
+                    output_callback(line)
+            
+            # Check cancellation before main deploy
+            if cancel_event and cancel_event.is_set():
+                result["output"] = clone_msg + "\n[Cancelled by user]"
+                return result
+
             logger.info("Running deploy", repo=repo_name, version=deploy_version, tag=tag)
-            success, output = await self._run_command(deploy_cmd)
+            success, output = await self._run_command(deploy_cmd, output_callback=output_callback, cancel_event=cancel_event)
 
             result["success"] = success
             result["output"] = f"{clone_msg}\n\n{output}" if clone_msg else output

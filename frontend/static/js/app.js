@@ -1855,6 +1855,127 @@ async function removeDeployedStack(stackName) {
     }
 }
 
+// ============== Service Logs ==============
+
+let serviceLogsInterval = null;
+let currentServiceLogs = [];
+let currentServiceName = null;
+
+async function openServiceLogs(serviceName) {
+    currentServiceName = serviceName;
+    currentServiceLogs = [];
+    
+    const modal = document.getElementById('service-logs-modal');
+    const title = document.getElementById('service-logs-title');
+    const logViewer = document.getElementById('service-logs-content');
+    const autoRefreshCheckbox = document.getElementById('service-logs-auto-refresh');
+    
+    title.textContent = `Logs: ${serviceName}`;
+    logViewer.innerHTML = '<div class="loading-placeholder">Loading logs...</div>';
+    
+    modal.classList.add('active');
+    
+    // Initial load
+    await refreshServiceLogs();
+    
+    // Start auto-refresh if checkbox is checked
+    if (autoRefreshCheckbox.checked) {
+        startServiceLogsAutoRefresh();
+    }
+}
+
+function closeServiceLogsModal() {
+    stopServiceLogsAutoRefresh();
+    document.getElementById('service-logs-modal').classList.remove('active');
+    currentServiceName = null;
+    currentServiceLogs = [];
+}
+
+async function refreshServiceLogs() {
+    if (!currentServiceName) return;
+    
+    const tail = document.getElementById('service-logs-tail').value || 200;
+    const logs = await apiGet(`/services/${encodeURIComponent(currentServiceName)}/logs?tail=${tail}`);
+    
+    currentServiceLogs = logs || [];
+    renderServiceLogs();
+}
+
+function renderServiceLogs() {
+    const logViewer = document.getElementById('service-logs-content');
+    const filter = document.getElementById('service-logs-filter').value.toLowerCase();
+    const errorsOnly = document.getElementById('service-logs-errors-only').checked;
+    
+    let filteredLogs = currentServiceLogs;
+    
+    if (filter) {
+        filteredLogs = filteredLogs.filter(log => 
+            (log.message || '').toLowerCase().includes(filter)
+        );
+    }
+    
+    if (errorsOnly) {
+        filteredLogs = filteredLogs.filter(log => 
+            log.stream === 'stderr' || 
+            /\b(error|exception|fatal|critical|panic|traceback)\b/i.test(log.message || '')
+        );
+    }
+    
+    if (filteredLogs.length === 0) {
+        logViewer.innerHTML = '<div class="empty-placeholder">No logs found</div>';
+        return;
+    }
+    
+    logViewer.innerHTML = filteredLogs.map(log => {
+        const isError = log.stream === 'stderr' || 
+            /\b(error|exception|fatal|critical|panic|traceback)\b/i.test(log.message || '');
+        const timestamp = log.timestamp ? formatLogTimestamp(log.timestamp) : '';
+        
+        return `<div class="log-line ${isError ? 'log-error' : ''}">` +
+            (timestamp ? `<span class="log-timestamp">${escapeHtml(timestamp)}</span>` : '') +
+            `<span class="log-message">${escapeHtml(log.message || '')}</span>` +
+            `</div>`;
+    }).join('');
+    
+    // Auto-scroll to bottom
+    logViewer.scrollTop = logViewer.scrollHeight;
+}
+
+function formatLogTimestamp(ts) {
+    try {
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return ts.substring(0, 23);
+        return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+    } catch {
+        return ts.substring(0, 23);
+    }
+}
+
+function filterServiceLogs() {
+    renderServiceLogs();
+}
+
+function toggleServiceLogsAutoRefresh() {
+    const checked = document.getElementById('service-logs-auto-refresh').checked;
+    if (checked) {
+        startServiceLogsAutoRefresh();
+    } else {
+        stopServiceLogsAutoRefresh();
+    }
+}
+
+function startServiceLogsAutoRefresh() {
+    stopServiceLogsAutoRefresh();
+    serviceLogsInterval = setInterval(refreshServiceLogs, 3000);
+}
+
+function stopServiceLogsAutoRefresh() {
+    if (serviceLogsInterval) {
+        clearInterval(serviceLogsInterval);
+        serviceLogsInterval = null;
+    }
+}
+
 // ============== Logs Search ==============
 
 // Store last search params for pagination
@@ -2130,6 +2251,16 @@ function renderStacksList() {
                             <span class="group-count">${containers.length}</span>
                             ${serviceMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${serviceMemoryDisplay}</span>` : ''}
                             ${serviceCpuDisplay ? `<span class="group-stat group-cpu ${serviceCpuClass}" title="Max CPU usage">⚡ ${serviceCpuDisplay}</span>` : ''}
+                            <button class="btn btn-sm btn-ghost service-logs-btn" onclick="event.stopPropagation(); openServiceLogs('${escapeHtml(serviceName)}')" title="View service logs">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                    <polyline points="14 2 14 8 20 8"/>
+                                    <line x1="16" y1="13" x2="8" y2="13"/>
+                                    <line x1="16" y1="17" x2="8" y2="17"/>
+                                    <polyline points="10 9 9 9 8 9"/>
+                                </svg>
+                                Logs
+                            </button>
                         </div>
                         <div class="compose-content">
                             <div class="container-list">

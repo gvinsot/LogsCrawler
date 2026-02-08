@@ -1,6 +1,7 @@
 """FastAPI REST API for LogsCrawler."""
 
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -28,6 +29,31 @@ settings: Settings = None
 opensearch: OpenSearchClient = None
 collector: Collector = None
 github_service: GitHubService = None
+
+# ============== Background Actions (Build/Deploy) ==============
+
+class BackgroundAction:
+    """Tracks a background build or deploy action."""
+    
+    def __init__(self, action_id: str, action_type: str, repo_name: str):
+        self.id = action_id
+        self.action_type = action_type  # "build" or "deploy"
+        self.repo_name = repo_name
+        self.status = "running"  # running, completed, failed, cancelled
+        self.output_lines: List[str] = []
+        self.result: Optional[Dict[str, Any]] = None
+        self.started_at = datetime.utcnow()
+        self.cancel_event = asyncio.Event()
+        self.task: Optional[asyncio.Task] = None
+    
+    def append_output(self, line: str):
+        self.output_lines.append(line)
+    
+    def get_output(self) -> str:
+        return "\n".join(self.output_lines)
+
+# Store of running/recent background actions
+_background_actions: Dict[str, BackgroundAction] = {}
 
 
 @asynccontextmanager
@@ -482,6 +508,37 @@ async def remove_stack(stack_name: str, host: Optional[str] = Query(default=None
         return {"success": True, "message": message, "stack_name": stack_name}
     else:
         raise HTTPException(status_code=500, detail=message)
+
+
+@app.get("/api/services/{service_name}/logs")
+async def get_service_logs(
+    service_name: str,
+    tail: int = Query(default=200, ge=1, le=10000),
+    host: Optional[str] = Query(default=None),
+) -> List[Dict[str, Any]]:
+    """Get logs for a Docker Swarm service.
+    
+    Uses the Docker API /services/{id}/logs endpoint to aggregate logs
+    from all tasks/replicas of the given service.
+    """
+    # Find a client that can access the service
+    client = None
+    if host:
+        client = collector.clients.get(host)
+    else:
+        # Use the first available client (manager node)
+        for name, c in collector.clients.items():
+            client = c
+            break
+    
+    if not client:
+        raise HTTPException(status_code=404, detail="No host available")
+    
+    try:
+        logs = await client.get_service_logs(service_name, tail=tail)
+        return logs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============== Logs Search ==============

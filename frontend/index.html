@@ -414,6 +414,52 @@
                     </div>
                 </div>
                 
+                <!-- Service Logs modal -->
+                <div id="service-logs-modal" class="modal">
+                    <div class="modal-content modal-lg">
+                        <div class="modal-header">
+                            <h2 id="service-logs-title">Service Logs</h2>
+                            <button class="modal-close" onclick="closeServiceLogsModal()">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="logs-toolbar">
+                                <div class="logs-toolbar-left">
+                                    <button class="btn btn-sm" onclick="refreshServiceLogs()">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                            <polyline points="23 4 23 10 17 10"/>
+                                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                        </svg>
+                                        Refresh
+                                    </button>
+                                    <input type="number" id="service-logs-tail" value="200" min="10" max="10000" class="small-input">
+                                    <label>lines</label>
+                                    <label class="checkbox-label" style="margin-left: 12px;">
+                                        <input type="checkbox" id="service-logs-auto-refresh" checked onchange="toggleServiceLogsAutoRefresh()">
+                                        Auto-refresh
+                                    </label>
+                                </div>
+                                <div class="logs-toolbar-right">
+                                    <div class="logs-search-wrapper">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                            <circle cx="11" cy="11" r="8"/>
+                                            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                                        </svg>
+                                        <input type="text" id="service-logs-filter" placeholder="Filter logs..." class="logs-filter-input" oninput="filterServiceLogs()">
+                                    </div>
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" id="service-logs-errors-only" onchange="filterServiceLogs()">
+                                        Errors only
+                                    </label>
+                                </div>
+                            </div>
+                            <div id="service-logs-content" class="log-viewer service-log-viewer"></div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary" onclick="closeServiceLogsModal()">Close</button>
+                        </div>
+                    </div>
+                </div>
+                
                 <!-- Build modal -->
                 <div id="stack-build-modal" class="modal">
                     <div class="modal-content modal-md">
