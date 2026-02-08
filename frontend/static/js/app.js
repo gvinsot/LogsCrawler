@@ -2785,8 +2785,8 @@ function trackBackgroundAction(actionId, actionType, repoName) {
     tracker.interval = setInterval(async () => {
         const elapsed = (Date.now() - startTime) / 1000;
         
-        // Show persistent toast after 7 seconds
-        if (!toastShown && elapsed >= 7) {
+        // Show persistent toast immediately
+        if (!toastShown) {
             toastShown = true;
             toastEl = showActionToast(actionId, actionType, repoName);
             tracker.toastEl = toastEl;
