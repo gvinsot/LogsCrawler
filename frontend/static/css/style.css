@@ -2482,6 +2482,11 @@ a.btn {
     padding: 2px 8px;
 }
 
+.service-remove-btn {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+}
+
 .service-log-viewer {
     height: 500px;
     overflow-y: auto;

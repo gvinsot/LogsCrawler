@@ -544,6 +544,29 @@ class DockerAPIClient:
             error_msg = data if isinstance(data, str) else json.dumps(data) if data else "Unknown error"
             return False, error_msg
 
+    async def remove_service(self, service_name: str) -> Tuple[bool, str]:
+        """Remove a Docker Swarm service.
+        
+        Uses the Docker API DELETE /services/{id} endpoint.
+        
+        Args:
+            service_name: The full service name (e.g., stackname_servicename)
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        from urllib.parse import quote
+        safe_name = quote(service_name, safe='')
+        data, status = await self._request("DELETE", f"/services/{safe_name}")
+        
+        if status == 200 or status == 204:
+            return True, f"Service '{service_name}' removed successfully"
+        elif status == 404:
+            return False, f"Service '{service_name}' not found"
+        else:
+            error_msg = data if isinstance(data, str) else str(data)
+            return False, f"Failed to remove service '{service_name}': {error_msg}"
+
     async def get_service_logs(self, service_name: str, tail: int = 200) -> List[Dict[str, Any]]:
         """Get logs for a Docker Swarm service using the Docker API.
         

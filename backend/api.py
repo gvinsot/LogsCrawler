@@ -510,6 +510,39 @@ async def remove_stack(stack_name: str, host: Optional[str] = Query(default=None
         raise HTTPException(status_code=500, detail=message)
 
 
+@app.post("/api/services/{service_name}/remove")
+async def remove_service(
+    service_name: str,
+    host: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """Remove a Docker Swarm service."""
+    # Find the Swarm manager host
+    manager_host = None
+    for host_config in settings.hosts:
+        if host_config.swarm_manager:
+            manager_host = host_config.name
+            break
+    
+    target_host = host or manager_host
+    if not target_host:
+        # Fallback to first available client
+        target_host = next(iter(collector.clients.keys()), None)
+    
+    if not target_host:
+        raise HTTPException(status_code=404, detail="No host available")
+    
+    client = collector.clients.get(target_host)
+    if not client:
+        raise HTTPException(status_code=404, detail=f"Host '{target_host}' not found")
+    
+    success, message = await client.remove_service(service_name)
+    
+    if success:
+        return {"success": True, "message": message, "service_name": service_name}
+    else:
+        raise HTTPException(status_code=500, detail=message)
+
+
 @app.get("/api/services/{service_name}/logs")
 async def get_service_logs(
     service_name: str,

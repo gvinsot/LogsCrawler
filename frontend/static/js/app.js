@@ -1859,6 +1859,38 @@ async function removeDeployedStack(stackName) {
     }
 }
 
+// ============== Remove Service ==============
+
+async function removeService(serviceName) {
+    const confirmMessage = `Are you sure you want to remove the service "${serviceName}"?\n\nThis will stop and remove all containers for this service. This action cannot be undone.`;
+    
+    if (!confirm(confirmMessage)) {
+        return;
+    }
+    
+    try {
+        const url = `/services/${encodeURIComponent(serviceName)}/remove`;
+        const response = await fetch(`${API_BASE}${url}`, { method: 'POST' });
+        
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result && result.success) {
+            showNotification('success', result.message);
+            setTimeout(refreshStacks, 2000);
+        } else {
+            showNotification('error', result?.message || 'Failed to remove service');
+        }
+    } catch (error) {
+        console.error('Failed to remove service:', error);
+        showNotification('error', `Failed to remove service: ${error.message || 'Unknown error'}`);
+    }
+}
+
 // ============== Service Logs ==============
 
 let serviceLogsInterval = null;
@@ -2270,6 +2302,13 @@ function renderStacksList() {
                                     <polyline points="10 9 9 9 8 9"/>
                                 </svg>
                                 Logs
+                            </button>
+                            <button class="btn btn-sm btn-danger service-remove-btn" onclick="event.stopPropagation(); removeService('${escapeHtml(fullServiceName)}')" title="Remove service">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                    <polyline points="3 6 5 6 21 6"/>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                </svg>
+                                Remove
                             </button>
                         </div>
                         <div class="compose-content">
