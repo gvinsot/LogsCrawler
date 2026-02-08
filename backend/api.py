@@ -309,13 +309,9 @@ async def list_containers_grouped(
         for stack_name, services in stack_services_map.items():
             grouped[stack_name] = {}
             for service_full_name in services:
-                # Service names from docker stack services are like "stackname_servicename"
-                # Extract just the service part for the key
-                if service_full_name.startswith(stack_name + "_"):
-                    service_short = service_full_name[len(stack_name) + 1:]
-                else:
-                    service_short = service_full_name
-                grouped[stack_name][service_short] = []
+                # Use the full service name as key (e.g., "logscrawler_backend")
+                # This matches what Docker returns in com.docker.swarm.service.name label
+                grouped[stack_name][service_full_name] = []
         
         # Group containers by their stack
         for container in containers:

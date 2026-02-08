@@ -2265,7 +2265,14 @@ function renderStacksList() {
             containersHtml = `<div class="host-content" id="stack-containers-${escapeHtml(repo.name)}" style="display: ${isExpanded ? 'block' : 'none'};">`;
             
             for (const [serviceName, containers] of Object.entries(stackContainers)) {
-                const displayServiceName = serviceName === '_standalone' ? 'Standalone' : serviceName;
+                // serviceName is the full swarm service name (e.g., "logscrawler_backend")
+                // Extract short display name by removing the stack prefix
+                let displayServiceName = serviceName;
+                if (serviceName === '_standalone') {
+                    displayServiceName = 'Standalone';
+                } else if (serviceName.startsWith(stackName + '_')) {
+                    displayServiceName = serviceName.substring(stackName.length + 1);
+                }
                 const hasContainers = containers.length > 0;
                 
                 // Calculate service stats
@@ -2279,8 +2286,8 @@ function renderStacksList() {
                 const serviceCpuClass = serviceMaxCpu >= 80 ? 'cpu-critical' : (serviceMaxCpu >= 50 ? 'cpu-warning' : '');
                 const serviceCpuDisplay = serviceMaxCpu > 0 ? `${serviceMaxCpu.toFixed(1)}%` : '';
                 
-                // For the service logs button, use the full swarm service name (stack_service)
-                const fullServiceName = `${stackName}_${serviceName}`;
+                // serviceName is already the full swarm service name
+                const fullServiceName = serviceName;
                 
                 containersHtml += `
                     <div class="compose-group${hasContainers ? '' : ' compose-group-empty'}">
