@@ -2459,12 +2459,6 @@ a.btn {
     margin-left: auto;
     font-size: 0.75rem;
     padding: 2px 8px;
-    opacity: 0;
-    transition: opacity 0.15s;
-}
-
-.compose-header:hover .service-logs-btn {
-    opacity: 1;
 }
 
 .service-log-viewer {
