@@ -524,9 +524,11 @@ class SSHClient:
 
     async def update_service_image(self, service_name: str, new_tag: str) -> Tuple[bool, str]:
         """Update a Docker Swarm service's image tag."""
+        print(f"[SSH-CLIENT] update_service_image called: service={service_name}, tag={new_tag}")
         # Get current image
         get_image_cmd = f"docker service inspect {service_name} --format '{{{{.Spec.TaskTemplate.ContainerSpec.Image}}}}'"
         stdout, stderr, code = await self.run_command(get_image_cmd)
+        print(f"[SSH-CLIENT] Get current image: code={code}, stdout={stdout[:100] if stdout else 'None'}")
         
         if code != 0:
             return False, f"Service '{service_name}' not found"
@@ -546,10 +548,13 @@ class SSHClient:
             image_base = current_image
         
         new_image = f"{image_base}:{new_tag}"
+        print(f"[SSH-CLIENT] Updating to new image: {new_image}")
         
         # Update service with new image
         update_cmd = f"docker service update --image {new_image} --force {service_name}"
+        print(f"[SSH-CLIENT] Running: {update_cmd}")
         stdout, stderr, code = await self.run_command(update_cmd)
+        print(f"[SSH-CLIENT] Update result: code={code}")
         
         if code == 0:
             return True, f"Service '{service_name}' updated to image '{new_image}'"

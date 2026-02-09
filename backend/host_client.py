@@ -208,6 +208,7 @@ class SwarmProxyClient:
 
     async def update_service_image(self, service_name: str, new_tag: str) -> Tuple[bool, str]:
         """Update service image via manager."""
+        print(f"[SWARM-PROXY] update_service_image: delegating to manager for service={service_name}, tag={new_tag}")
         return await self._manager.update_service_image(service_name, new_tag)
 
     async def get_swarm_stacks(self) -> Dict[str, List[str]]:

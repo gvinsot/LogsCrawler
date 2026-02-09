@@ -627,10 +627,12 @@ class DockerAPIClient:
         from urllib.parse import quote
         safe_name = quote(service_name, safe='')
         
+        print(f"[DOCKER-CLIENT] update_service_image called: service={service_name}, tag={new_tag}")
         logger.info("update_service_image called", service=service_name, new_tag=new_tag)
         
         # First, get current service spec
         data, status = await self._request("GET", f"/services/{safe_name}")
+        print(f"[DOCKER-CLIENT] Got service spec: status={status}, has_data={bool(data)}")
         logger.info("Got service spec", service=service_name, status=status, has_data=bool(data))
         if status != 200 or not data:
             return False, f"Service '{service_name}' not found"
@@ -644,6 +646,7 @@ class DockerAPIClient:
             container_spec = task_template.get("ContainerSpec", {})
             current_image = container_spec.get("Image", "")
             
+            print(f"[DOCKER-CLIENT] Current image: {current_image}")
             logger.info("Current image", service=service_name, current_image=current_image)
             
             if not current_image:
@@ -664,6 +667,7 @@ class DockerAPIClient:
             new_image = f"{image_base}:{new_tag}"
             container_spec["Image"] = new_image
             
+            print(f"[DOCKER-CLIENT] New image: {new_image}")
             logger.info("New image", service=service_name, new_image=new_image)
             
             # Also increment ForceUpdate to ensure the update is applied
@@ -677,6 +681,7 @@ class DockerAPIClient:
                 json=spec,
             )
             
+            print(f"[DOCKER-CLIENT] Service update result: status={update_status}, response={str(update_data)[:200]}")
             logger.info("Service update result", service=service_name, status=update_status, response=str(update_data)[:200])
             
             if update_status == 200:
@@ -685,6 +690,7 @@ class DockerAPIClient:
                 error_msg = update_data if isinstance(update_data, str) else str(update_data)
                 return False, f"Failed to update service '{service_name}': {error_msg}"
         except Exception as e:
+            print(f"[DOCKER-CLIENT] Exception: {e}")
             logger.error("Exception in update_service_image", service=service_name, error=str(e))
             return False, f"Failed to update service '{service_name}': {e}"
 
