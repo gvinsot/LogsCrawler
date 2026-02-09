@@ -663,6 +663,7 @@ a.btn {
 
 .compose-group {
     border-bottom: 1px solid var(--border-color);
+    margin-left: 20px;
 }
 
 .compose-group:last-child {
@@ -731,7 +732,7 @@ a.btn {
 }
 
 .container-list {
-    padding: 8px 12px;
+    padding: 8px 12px 8px 24px;
 }
 
 .container-item {
