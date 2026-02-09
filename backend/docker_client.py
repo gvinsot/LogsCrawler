@@ -627,8 +627,11 @@ class DockerAPIClient:
         from urllib.parse import quote
         safe_name = quote(service_name, safe='')
         
+        logger.info("update_service_image called", service=service_name, new_tag=new_tag)
+        
         # First, get current service spec
         data, status = await self._request("GET", f"/services/{safe_name}")
+        logger.info("Got service spec", service=service_name, status=status, has_data=bool(data))
         if status != 200 or not data:
             return False, f"Service '{service_name}' not found"
         
@@ -640,6 +643,8 @@ class DockerAPIClient:
             task_template = spec.get("TaskTemplate", {})
             container_spec = task_template.get("ContainerSpec", {})
             current_image = container_spec.get("Image", "")
+            
+            logger.info("Current image", service=service_name, current_image=current_image)
             
             if not current_image:
                 return False, f"Service '{service_name}' has no image configured"
@@ -659,6 +664,8 @@ class DockerAPIClient:
             new_image = f"{image_base}:{new_tag}"
             container_spec["Image"] = new_image
             
+            logger.info("New image", service=service_name, new_image=new_image)
+            
             # Also increment ForceUpdate to ensure the update is applied
             current_force = task_template.get("ForceUpdate", 0)
             task_template["ForceUpdate"] = current_force + 1
@@ -670,12 +677,15 @@ class DockerAPIClient:
                 json=spec,
             )
             
+            logger.info("Service update result", service=service_name, status=update_status, response=str(update_data)[:200])
+            
             if update_status == 200:
                 return True, f"Service '{service_name}' updated to image '{new_image}'"
             else:
                 error_msg = update_data if isinstance(update_data, str) else str(update_data)
                 return False, f"Failed to update service '{service_name}': {error_msg}"
         except Exception as e:
+            logger.error("Exception in update_service_image", service=service_name, error=str(e))
             return False, f"Failed to update service '{service_name}': {e}"
 
     async def get_service_logs(self, service_name: str, tail: int = 200) -> List[Dict[str, Any]]:

@@ -2949,10 +2949,13 @@ async function submitServiceDeploy() {
     
     try {
         const url = `/services/${encodeURIComponent(currentDeployServiceName)}/update-image?tag=${encodeURIComponent(tag)}`;
+        console.log('Deploying service:', currentDeployServiceName, 'with tag:', tag, 'URL:', `${API_BASE}${url}`);
         const response = await fetch(`${API_BASE}${url}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
         });
+        
+        console.log('Deploy response status:', response.status);
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ detail: response.statusText }));
