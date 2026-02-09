@@ -2654,6 +2654,21 @@ a.btn {
     line-height: 1.5;
 }
 
+.current-image-display {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--accent-primary);
+    word-break: break-all;
+}
+
+.current-image-display strong {
+    color: var(--text-primary);
+}
+
 /* Tags list for deploy modal */
 .tags-list {
     max-height: 300px;

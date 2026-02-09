@@ -577,6 +577,44 @@ async def remove_service(
         raise HTTPException(status_code=500, detail=message)
 
 
+@app.post("/api/services/{service_name}/update-image")
+async def update_service_image(
+    service_name: str,
+    tag: str = Query(..., description="New image tag to deploy"),
+    host: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """Update a Docker Swarm service's image tag.
+    
+    This allows deploying a new version of a single service without
+    redeploying the entire stack.
+    """
+    # Find the Swarm manager host
+    manager_host = None
+    for host_config in settings.hosts:
+        if host_config.swarm_manager:
+            manager_host = host_config.name
+            break
+    
+    target_host = host or manager_host
+    if not target_host:
+        # Fallback to first available client
+        target_host = next(iter(collector.clients.keys()), None)
+    
+    if not target_host:
+        raise HTTPException(status_code=404, detail="No host available")
+    
+    client = collector.clients.get(target_host)
+    if not client:
+        raise HTTPException(status_code=404, detail=f"Host '{target_host}' not found")
+    
+    success, message = await client.update_service_image(service_name, tag)
+    
+    if success:
+        return {"success": True, "message": message, "service_name": service_name, "tag": tag}
+    else:
+        raise HTTPException(status_code=500, detail=message)
+
+
 @app.get("/api/services/{service_name}/logs")
 async def get_service_logs(
     service_name: str,

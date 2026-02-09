@@ -611,6 +611,73 @@ class DockerAPIClient:
         except Exception as e:
             return False, f"Failed to restart service '{service_name}': {e}"
 
+    async def update_service_image(self, service_name: str, new_tag: str) -> Tuple[bool, str]:
+        """Update a Swarm service's image tag.
+        
+        Updates the service to use a new image tag while keeping all other
+        settings intact. This triggers a rolling update of the service.
+        
+        Args:
+            service_name: The full service name (e.g., stackname_servicename)
+            new_tag: The new image tag to use (e.g., "v1.2.3" or "latest")
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        from urllib.parse import quote
+        safe_name = quote(service_name, safe='')
+        
+        # First, get current service spec
+        data, status = await self._request("GET", f"/services/{safe_name}")
+        if status != 200 or not data:
+            return False, f"Service '{service_name}' not found"
+        
+        try:
+            version = data.get("Version", {}).get("Index")
+            spec = data.get("Spec", {})
+            
+            # Get current image and update the tag
+            task_template = spec.get("TaskTemplate", {})
+            container_spec = task_template.get("ContainerSpec", {})
+            current_image = container_spec.get("Image", "")
+            
+            if not current_image:
+                return False, f"Service '{service_name}' has no image configured"
+            
+            # Parse image name and replace tag
+            # Handle formats: image:tag, image:tag@sha256:..., registry/image:tag
+            # Remove any digest suffix first
+            if "@sha256:" in current_image:
+                current_image = current_image.split("@sha256:")[0]
+            
+            # Split image name and tag
+            if ":" in current_image:
+                image_base = current_image.rsplit(":", 1)[0]
+            else:
+                image_base = current_image
+            
+            new_image = f"{image_base}:{new_tag}"
+            container_spec["Image"] = new_image
+            
+            # Also increment ForceUpdate to ensure the update is applied
+            current_force = task_template.get("ForceUpdate", 0)
+            task_template["ForceUpdate"] = current_force + 1
+            
+            # Update the service
+            update_data, update_status = await self._request(
+                "POST",
+                f"/services/{safe_name}/update?version={version}",
+                json=spec,
+            )
+            
+            if update_status == 200:
+                return True, f"Service '{service_name}' updated to image '{new_image}'"
+            else:
+                error_msg = update_data if isinstance(update_data, str) else str(update_data)
+                return False, f"Failed to update service '{service_name}': {error_msg}"
+        except Exception as e:
+            return False, f"Failed to update service '{service_name}': {e}"
+
     async def get_service_logs(self, service_name: str, tail: int = 200) -> List[Dict[str, Any]]:
         """Get logs for a Docker Swarm service using the Docker API.
         

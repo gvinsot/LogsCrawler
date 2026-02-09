@@ -2371,6 +2371,9 @@ function renderStacksList() {
                             </div>
                             ` : ''}
                             <div class="container-actions">
+                                <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); openServiceDeploy('${escapeHtml(fullServiceName)}', '${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', '${escapeHtml(c.image)}')" title="Deploy new version">
+                                    Deploy
+                                </button>
                                 <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); quickAction('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', 'restart', '${escapeHtml(c.name)}')">
                                     Restart
                                 </button>
@@ -2764,6 +2767,221 @@ function closeDeployModal() {
     currentDeployRepo = null;
     currentDeploySshUrl = null;
     selectedDeployTag = null;
+}
+
+// ============== Service Deploy (Individual Container) ==============
+
+let currentServiceName = null;
+let currentServiceRepoName = null;
+let currentServiceSshUrl = null;
+let currentServiceImage = null;
+let selectedServiceDeployTag = null;
+
+async function openServiceDeploy(serviceName, repoName, sshUrl, currentImage) {
+    currentServiceName = serviceName;
+    currentServiceRepoName = repoName;
+    currentServiceSshUrl = sshUrl;
+    currentServiceImage = currentImage;
+    selectedServiceDeployTag = null;
+    
+    const modal = document.getElementById('service-deploy-modal');
+    const title = document.getElementById('service-deploy-title');
+    const tagsList = document.getElementById('service-deploy-tags-list');
+    const tagInput = document.getElementById('service-deploy-tag-input');
+    const selectedDisplay = document.getElementById('service-deploy-selected-tag');
+    const currentDisplay = document.getElementById('service-deploy-current');
+    
+    title.textContent = `Deploy: ${serviceName}`;
+    currentDisplay.innerHTML = `<strong>Current image:</strong> ${escapeHtml(currentImage)}`;
+    tagsList.innerHTML = '<div class="loading-placeholder">Loading tags...</div>';
+    tagInput.value = '';
+    selectedDisplay.style.display = 'none';
+    
+    // Reset to select mode
+    const selectRadio = document.querySelector('input[name="service-deploy-source"][value="select"]');
+    if (selectRadio) selectRadio.checked = true;
+    toggleServiceDeploySource('select');
+    
+    modal.classList.add('active');
+    
+    // Extract owner from ssh_url
+    const ownerMatch = sshUrl.match(/[:/]([^/]+)\/[^/]+\.git$/);
+    if (!ownerMatch) {
+        tagsList.innerHTML = '<div class="error-placeholder">Failed to parse repository URL</div>';
+        return;
+    }
+    const owner = ownerMatch[1];
+    
+    // Load tags
+    try {
+        const data = await apiGet(`/stacks/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/tags?limit=20`);
+        if (data && data.tags && data.tags.length > 0) {
+            renderServiceDeployTagsList(data.tags, data.default_branch || 'main');
+        } else {
+            tagsList.innerHTML = `
+                <div class="empty-placeholder">
+                    <p>No tags found in this repository.</p>
+                    <p class="hint">Use the manual input to enter a tag version.</p>
+                </div>
+            `;
+        }
+    } catch (e) {
+        console.error('Failed to load tags:', e);
+        tagsList.innerHTML = `
+            <div class="error-placeholder">
+                <p>Failed to load tags: ${escapeHtml(e.message || 'Unknown error')}</p>
+                <p class="hint">You can still enter a tag manually.</p>
+            </div>
+        `;
+    }
+}
+
+function renderServiceDeployTagsList(tags, defaultBranch) {
+    const tagsList = document.getElementById('service-deploy-tags-list');
+    
+    let html = `
+        <div class="tags-group">
+            <div class="tags-group-header">
+                <span class="branch-name">${escapeHtml(defaultBranch)}</span>
+                <span class="tag-count">${tags.length} tag${tags.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div class="tags-group-items">
+    `;
+    
+    for (const tag of tags) {
+        const timeAgo = formatTimeAgo(tag.created_at);
+        html += `
+            <div class="tag-item" data-tag="${escapeHtml(tag.name)}" onclick="selectServiceDeployTag('${escapeHtml(tag.name)}')">
+                <span class="tag-name">${escapeHtml(tag.name)}</span>
+                <span class="tag-meta">
+                    ${timeAgo ? `<span class="tag-age">${timeAgo}</span>` : ''}
+                    <span class="tag-sha">${escapeHtml(tag.sha.substring(0, 7))}</span>
+                </span>
+            </div>
+        `;
+    }
+    
+    html += `
+            </div>
+        </div>
+    `;
+    
+    tagsList.innerHTML = html;
+}
+
+function selectServiceDeployTag(tagName) {
+    selectedServiceDeployTag = tagName;
+    
+    // Update visual selection in service deploy modal
+    document.querySelectorAll('#service-deploy-tags-list .tag-item').forEach(el => {
+        el.classList.toggle('selected', el.dataset.tag === tagName);
+    });
+    
+    // Show selected tag display
+    const selectedDisplay = document.getElementById('service-deploy-selected-tag');
+    const selectedValue = document.getElementById('service-deploy-selected-tag-value');
+    selectedValue.textContent = tagName;
+    selectedDisplay.style.display = 'flex';
+}
+
+function toggleServiceDeploySource(source) {
+    const selectGroup = document.getElementById('service-deploy-select-group');
+    const manualGroup = document.getElementById('service-deploy-manual-group');
+    const selectedDisplay = document.getElementById('service-deploy-selected-tag');
+    
+    if (source === 'select') {
+        selectGroup.style.display = 'block';
+        manualGroup.style.display = 'none';
+        if (selectedServiceDeployTag) {
+            selectedDisplay.style.display = 'flex';
+        }
+    } else {
+        selectGroup.style.display = 'none';
+        manualGroup.style.display = 'block';
+        selectedDisplay.style.display = 'none';
+    }
+}
+
+function closeServiceDeployModal() {
+    document.getElementById('service-deploy-modal').classList.remove('active');
+    currentServiceName = null;
+    currentServiceRepoName = null;
+    currentServiceSshUrl = null;
+    currentServiceImage = null;
+    selectedServiceDeployTag = null;
+}
+
+async function submitServiceDeploy() {
+    if (!currentServiceName) return;
+    
+    const submitBtn = document.getElementById('service-deploy-submit');
+    const source = document.querySelector('input[name="service-deploy-source"]:checked').value;
+    
+    let tag = null;
+    
+    if (source === 'select') {
+        tag = selectedServiceDeployTag;
+        if (!tag) {
+            showNotification('error', 'Please select a tag to deploy');
+            return;
+        }
+    } else {
+        tag = document.getElementById('service-deploy-tag-input').value.trim();
+        if (!tag) {
+            showNotification('error', 'Please enter a tag to deploy');
+            return;
+        }
+    }
+    
+    // Confirm deployment
+    if (!confirm(`Deploy tag "${tag}" to service "${currentServiceName}"?`)) {
+        return;
+    }
+    
+    // Disable button and show loading
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `
+        <svg class="spinner" viewBox="0 0 24 24" width="14" height="14">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="31.4 31.4" transform="rotate(-90 12 12)"/>
+        </svg>
+        Deploying...
+    `;
+    
+    try {
+        const url = `/api/services/${encodeURIComponent(currentServiceName)}/update-image?tag=${encodeURIComponent(tag)}`;
+        const response = await fetch(`${API_BASE}${url}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showNotification('success', result.message || `Service updated to tag ${tag}`);
+            closeServiceDeployModal();
+            // Refresh stacks view after a short delay
+            setTimeout(refreshStacks, 2000);
+        } else {
+            showNotification('error', result.message || 'Failed to update service');
+        }
+    } catch (error) {
+        console.error('Failed to update service:', error);
+        showNotification('error', `Failed to update service: ${error.message || 'Unknown error'}`);
+    } finally {
+        // Reset button
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+            </svg>
+            Deploy
+        `;
+    }
 }
 
 async function submitDeploy() {

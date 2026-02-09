@@ -590,6 +590,61 @@
                         </div>
                     </div>
                 </div>
+                
+                <!-- Service Deploy modal (for individual container/service tag update) -->
+                <div id="service-deploy-modal" class="modal">
+                    <div class="modal-content modal-md">
+                        <div class="modal-header">
+                            <h2 id="service-deploy-title">Deploy Service</h2>
+                            <button class="modal-close" onclick="closeServiceDeployModal()">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="modal-help-text">Select a new tag to deploy for this service.</p>
+                            <p id="service-deploy-current" class="current-image-display"></p>
+                            
+                            <div class="form-group">
+                                <label class="form-label">Tag Source</label>
+                                <div class="radio-group">
+                                    <label class="radio-label">
+                                        <input type="radio" name="service-deploy-source" value="select" checked onchange="toggleServiceDeploySource('select')">
+                                        <span>Select from list</span>
+                                    </label>
+                                    <label class="radio-label">
+                                        <input type="radio" name="service-deploy-source" value="manual" onchange="toggleServiceDeploySource('manual')">
+                                        <span>Enter manually</span>
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            <div id="service-deploy-select-group" class="form-group">
+                                <label class="form-label">Available Tags</label>
+                                <div id="service-deploy-tags-list" class="tags-list">
+                                    <div class="loading-placeholder">Loading tags...</div>
+                                </div>
+                            </div>
+                            
+                            <div id="service-deploy-manual-group" class="form-group" style="display: none;">
+                                <label class="form-label" for="service-deploy-tag-input">Tag</label>
+                                <input type="text" id="service-deploy-tag-input" class="form-input" placeholder="e.g., v1.0.5 or latest">
+                                <span class="form-hint">Enter the image tag to deploy</span>
+                            </div>
+                            
+                            <div id="service-deploy-selected-tag" class="selected-tag-display" style="display: none;">
+                                <span class="label">Selected:</span>
+                                <span class="tag-value" id="service-deploy-selected-tag-value">-</span>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary" onclick="closeServiceDeployModal()">Cancel</button>
+                            <button class="btn btn-primary" id="service-deploy-submit" onclick="submitServiceDeploy()">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                                </svg>
+                                Deploy
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- Container Detail Modal -->
