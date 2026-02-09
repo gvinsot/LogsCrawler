@@ -2933,11 +2933,6 @@ async function submitServiceDeploy() {
         }
     }
     
-    // Confirm deployment
-    if (!confirm(`Deploy tag "${tag}" to service "${currentDeployServiceName}"?`)) {
-        return;
-    }
-    
     // Disable button and show loading
     submitBtn.disabled = true;
     submitBtn.innerHTML = `
@@ -2948,7 +2943,7 @@ async function submitServiceDeploy() {
     `;
     
     try {
-        const url = `/api/services/${encodeURIComponent(currentDeployServiceName)}/update-image?tag=${encodeURIComponent(tag)}`;
+        const url = `/services/${encodeURIComponent(currentDeployServiceName)}/update-image?tag=${encodeURIComponent(tag)}`;
         const response = await fetch(`${API_BASE}${url}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
