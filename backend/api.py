@@ -607,7 +607,9 @@ async def update_service_image(
     if not client:
         raise HTTPException(status_code=404, detail=f"Host '{target_host}' not found")
     
+    logger.info("Updating service image", service=service_name, tag=tag, host=target_host, client_type=type(client).__name__)
     success, message = await client.update_service_image(service_name, tag)
+    logger.info("Service image update result", service=service_name, success=success, message=message)
     
     if success:
         return {"success": True, "message": message, "service_name": service_name, "tag": tag}

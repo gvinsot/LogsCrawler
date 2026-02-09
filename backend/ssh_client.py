@@ -501,3 +501,107 @@ class SSHClient:
             return True, stdout
         else:
             return False, stderr or "Command failed"
+
+    async def remove_stack(self, stack_name: str) -> Tuple[bool, str]:
+        """Remove a Docker Swarm stack."""
+        cmd = f"docker stack rm {stack_name}"
+        stdout, stderr, code = await self.run_command(cmd)
+        
+        if code == 0:
+            return True, f"Stack '{stack_name}' removed successfully"
+        else:
+            return False, stderr or "Failed to remove stack"
+
+    async def remove_service(self, service_name: str) -> Tuple[bool, str]:
+        """Remove a Docker Swarm service."""
+        cmd = f"docker service rm {service_name}"
+        stdout, stderr, code = await self.run_command(cmd)
+        
+        if code == 0:
+            return True, f"Service '{service_name}' removed successfully"
+        else:
+            return False, stderr or "Failed to remove service"
+
+    async def update_service_image(self, service_name: str, new_tag: str) -> Tuple[bool, str]:
+        """Update a Docker Swarm service's image tag."""
+        # Get current image
+        get_image_cmd = f"docker service inspect {service_name} --format '{{{{.Spec.TaskTemplate.ContainerSpec.Image}}}}'"
+        stdout, stderr, code = await self.run_command(get_image_cmd)
+        
+        if code != 0:
+            return False, f"Service '{service_name}' not found"
+        
+        current_image = stdout.strip()
+        if not current_image:
+            return False, f"Service '{service_name}' has no image configured"
+        
+        # Remove digest if present
+        if "@sha256:" in current_image:
+            current_image = current_image.split("@sha256:")[0]
+        
+        # Get base image name without tag
+        if ":" in current_image:
+            image_base = current_image.rsplit(":", 1)[0]
+        else:
+            image_base = current_image
+        
+        new_image = f"{image_base}:{new_tag}"
+        
+        # Update service with new image
+        update_cmd = f"docker service update --image {new_image} --force {service_name}"
+        stdout, stderr, code = await self.run_command(update_cmd)
+        
+        if code == 0:
+            return True, f"Service '{service_name}' updated to image '{new_image}'"
+        else:
+            return False, f"Failed to update service: {stderr or stdout}"
+
+    async def get_service_logs(self, service_name: str, tail: int = 200) -> List[dict]:
+        """Get logs for a Docker Swarm service."""
+        cmd = f"docker service logs --tail {tail} --timestamps {service_name}"
+        stdout, stderr, code = await self.run_command(cmd)
+        
+        if code != 0:
+            logger.error("Failed to get service logs", service=service_name, error=stderr)
+            return []
+        
+        logs = []
+        for line in stdout.split('\n'):
+            if not line.strip():
+                continue
+            # Parse timestamp and message
+            # Format: service_name.1.xxx@node | 2024-01-01T00:00:00.123456789Z message
+            try:
+                if '|' in line:
+                    prefix, rest = line.split('|', 1)
+                    rest = rest.strip()
+                    if rest and rest[0].isdigit():
+                        ts_end = rest.find(' ')
+                        if ts_end > 0:
+                            timestamp = rest[:ts_end]
+                            message = rest[ts_end+1:]
+                        else:
+                            timestamp = None
+                            message = rest
+                    else:
+                        timestamp = None
+                        message = rest
+                else:
+                    timestamp = None
+                    message = line
+                
+                logs.append({
+                    "timestamp": timestamp,
+                    "message": message,
+                    "service": service_name,
+                    "stream": "stdout",
+                })
+            except Exception:
+                logs.append({
+                    "timestamp": None,
+                    "message": line,
+                    "service": service_name,
+                    "stream": "stdout",
+                })
+        
+        return logs
