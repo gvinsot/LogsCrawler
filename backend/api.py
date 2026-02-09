@@ -449,7 +449,45 @@ async def get_container_env(host: str, container_id: str) -> Dict[str, Any]:
 
 @app.post("/api/containers/action", response_model=ActionResult)
 async def execute_container_action(request: ActionRequest) -> ActionResult:
-    """Execute an action on a container (start, stop, restart, etc.)."""
+    """Execute an action on a container (start, stop, restart, etc.).
+    
+    If an agent is online for the target host, the action is queued for the agent.
+    Otherwise, the action is executed directly via the collector (SSH/Docker API).
+    """
+    # Check if an agent is online for this host
+    agent_id = request.host  # Agent ID matches host name
+    agent_online = await actions_queue.is_agent_online(agent_id)
+    
+    if agent_online:
+        # Use the actions queue - agent will pick up and execute the action
+        action_obj = await actions_queue.create_action(
+            agent_id=agent_id,
+            action_type=ActionType.CONTAINER_ACTION,
+            payload={
+                "container_id": request.container_id,
+                "action": request.action.value,
+            },
+        )
+        
+        # Wait for the action to complete (with timeout)
+        completed_action = await actions_queue.wait_for_action(action_obj.id, timeout=30.0)
+        
+        if not completed_action:
+            return ActionResult(
+                success=False,
+                message="Action timed out waiting for agent",
+                container_id=request.container_id,
+                action=request.action,
+            )
+        
+        return ActionResult(
+            success=completed_action.success or False,
+            message=completed_action.result or "Action completed",
+            container_id=request.container_id,
+            action=request.action,
+        )
+    
+    # No agent online - try direct execution via collector
     success, message = await collector.execute_action(
         request.host, 
         request.container_id, 

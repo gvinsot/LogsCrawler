@@ -567,6 +567,50 @@ class DockerAPIClient:
             error_msg = data if isinstance(data, str) else str(data)
             return False, f"Failed to remove service '{service_name}': {error_msg}"
 
+    async def force_update_service(self, service_name: str) -> Tuple[bool, str]:
+        """Force-update a Swarm service, effectively restarting all its tasks.
+        
+        Equivalent to `docker service update --force <service>`.
+        This works by incrementing the ForceUpdate counter in the task template.
+        
+        Args:
+            service_name: The full service name (e.g., stackname_servicename)
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        from urllib.parse import quote
+        safe_name = quote(service_name, safe='')
+        
+        # First, get current service spec
+        data, status = await self._request("GET", f"/services/{safe_name}")
+        if status != 200 or not data:
+            return False, f"Service '{service_name}' not found"
+        
+        try:
+            version = data.get("Version", {}).get("Index")
+            spec = data.get("Spec", {})
+            
+            # Increment ForceUpdate counter to trigger a rolling restart
+            task_template = spec.get("TaskTemplate", {})
+            current_force = task_template.get("ForceUpdate", 0)
+            task_template["ForceUpdate"] = current_force + 1
+            
+            # Update the service
+            update_data, update_status = await self._request(
+                "POST",
+                f"/services/{safe_name}/update?version={version}",
+                json=spec,
+            )
+            
+            if update_status == 200:
+                return True, f"Service '{service_name}' restarted successfully (force update)"
+            else:
+                error_msg = update_data if isinstance(update_data, str) else str(update_data)
+                return False, f"Failed to restart service '{service_name}': {error_msg}"
+        except Exception as e:
+            return False, f"Failed to restart service '{service_name}': {e}"
+
     async def get_service_logs(self, service_name: str, tail: int = 200) -> List[Dict[str, Any]]:
         """Get logs for a Docker Swarm service using the Docker API.
         

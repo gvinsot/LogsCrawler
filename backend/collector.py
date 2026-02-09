@@ -511,7 +511,7 @@ class Collector:
         """Get current stats for a specific container.
 
         For Swarm containers on worker nodes, stats are fetched by connecting
-        to the worker node (if SSH is configured) or returned as None.
+        to the worker node (if SSH is configured) or falls back to OpenSearch.
         """
         container = await self._find_container(host, container_id)
         if not container:
@@ -529,7 +529,8 @@ class Collector:
         
         if direct_client:
             stats = await direct_client.get_container_stats(container.id, container.name)
-            return stats.model_dump() if stats else None
+            if stats:
+                return stats.model_dump()
         
         # For Swarm worker nodes without direct client, try manager with task info
         if self._swarm_manager_host and task_id:
@@ -540,28 +541,74 @@ class Collector:
                 if stats:
                     return stats.model_dump()
                 # Stats not available for remote Swarm containers without SSH
-                logger.debug("Stats not available for remote Swarm container", 
+                logger.debug("Stats not available for remote Swarm container, falling back to OpenSearch", 
                            container=container_id, host=host)
         
-        return None
+        # Fallback to OpenSearch for the latest stored stats
+        logger.debug("Falling back to OpenSearch for container stats", container=container_id, host=host)
+        opensearch_stats = await self.opensearch.get_latest_stats_for_container(container.id)
+        if opensearch_stats:
+            return opensearch_stats
+        
+        # Return default empty stats if no stats available anywhere (container exists but no metrics)
+        return {
+            "cpu_percent": 0,
+            "memory_percent": 0,
+            "memory_usage_mb": 0,
+            "memory_limit_mb": 0,
+            "network_rx_bytes": 0,
+            "network_tx_bytes": 0,
+            "block_read_bytes": 0,
+            "block_write_bytes": 0,
+        }
     
     async def execute_action(self, host: str, container_id: str, action: str) -> tuple:
         """Execute an action on a container.
 
         If Swarm routing is enabled, actions are executed through the
-        Swarm manager, eliminating the need for direct SSH access.
+        Swarm manager. For containers on worker nodes, uses Swarm API
+        (service update --force for restart) since the manager's Docker
+        socket can only manage local containers.
         """
         from .models import ContainerAction
-
-        # Use routing client (may route through Swarm manager)
-        client = self._get_exec_client(host)
-        if not client:
-            return False, f"Unknown host: {host}"
 
         try:
             container_action = ContainerAction(action)
         except ValueError:
             return False, f"Invalid action: {action}"
+
+        # Check if this is a Swarm container on a remote worker node
+        if self._swarm_routing_enabled and self._swarm_manager_host:
+            container = await self._find_container(host, container_id)
+            is_on_manager = (
+                host == self._swarm_manager_host or
+                host == self._swarm_manager_hostname
+            )
+            
+            # If the container is on a worker node (not on manager), use Swarm API
+            if not is_on_manager and container:
+                service_name = None
+                if container.labels:
+                    service_name = container.labels.get("com.docker.swarm.service.name")
+                
+                if service_name:
+                    manager_client = self.clients.get(self._swarm_manager_host)
+                    if manager_client:
+                        if container_action == ContainerAction.RESTART:
+                            return await manager_client.force_update_service(service_name)
+                        elif container_action in (ContainerAction.STOP, ContainerAction.REMOVE):
+                            # For stop/remove on a Swarm container, scale down or remove service
+                            return False, (
+                                f"Cannot {action} a Swarm container on a worker node directly. "
+                                f"Use 'Remove' on the service '{service_name}' instead."
+                            )
+                        else:
+                            return False, f"Action '{action}' not supported for Swarm containers on worker nodes"
+
+        # Standard path: use routing client
+        client = self._get_exec_client(host)
+        if not client:
+            return False, f"Unknown host: {host}"
 
         return await client.execute_container_action(container_id, container_action)
     

@@ -257,6 +257,56 @@ class OpenSearchClient:
             logger.error("Failed to get latest container stats", error=str(e))
             return {}
     
+    async def get_latest_stats_for_container(self, container_id: str) -> Optional[Dict[str, Any]]:
+        """Get the latest stats for a specific container from OpenSearch.
+        
+        Args:
+            container_id: The container ID to retrieve stats for.
+            
+        Returns:
+            Dict with cpu_percent, memory_percent, memory_usage_mb, memory_limit_mb,
+            network_rx_bytes, network_tx_bytes, block_read_bytes, block_write_bytes or None.
+        """
+        try:
+            body = {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"container_id": container_id}},
+                            {"range": {"timestamp": {"gte": "now-5m"}}}
+                        ]
+                    }
+                },
+                "size": 1,
+                "sort": [{"timestamp": "desc"}],
+                "_source": [
+                    "cpu_percent", "memory_percent", "memory_usage_mb", "memory_limit_mb",
+                    "network_rx_bytes", "network_tx_bytes", "block_read_bytes", "block_write_bytes",
+                    "timestamp"
+                ]
+            }
+            
+            response = await self._client.search(index=self.metrics_index, body=body)
+            hits = response.get("hits", {}).get("hits", [])
+            
+            if hits:
+                source = hits[0]["_source"]
+                return {
+                    "cpu_percent": source.get("cpu_percent", 0) or 0,
+                    "memory_percent": source.get("memory_percent", 0) or 0,
+                    "memory_usage_mb": source.get("memory_usage_mb", 0) or 0,
+                    "memory_limit_mb": source.get("memory_limit_mb", 0) or 0,
+                    "network_rx_bytes": source.get("network_rx_bytes", 0) or 0,
+                    "network_tx_bytes": source.get("network_tx_bytes", 0) or 0,
+                    "block_read_bytes": source.get("block_read_bytes", 0) or 0,
+                    "block_write_bytes": source.get("block_write_bytes", 0) or 0,
+                }
+            
+            return None
+        except Exception as e:
+            logger.error("Failed to get latest stats for container", container_id=container_id, error=str(e))
+            return None
+    
     async def get_latest_host_metrics(self, host_name: str) -> Optional[Dict[str, Any]]:
         """Get the latest metrics for a specific host including GPU.
         
