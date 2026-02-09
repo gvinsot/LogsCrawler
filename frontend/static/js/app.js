@@ -2288,6 +2288,8 @@ function renderStacksList() {
                 
                 // serviceName is already the full swarm service name
                 const fullServiceName = serviceName;
+                // Get image from first container for deploy modal
+                const firstContainerImage = containers.length > 0 ? containers[0].image : '';
                 
                 containersHtml += `
                     <div class="compose-group${hasContainers ? '' : ' compose-group-empty'}">
@@ -2309,6 +2311,12 @@ function renderStacksList() {
                                     <polyline points="10 9 9 9 8 9"/>
                                 </svg>
                                 Logs
+                            </button>
+                            <button class="btn btn-sm btn-primary service-deploy-btn" onclick="event.stopPropagation(); openServiceDeploy('${escapeHtml(fullServiceName)}', '${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', '${escapeHtml(firstContainerImage)}')" title="Deploy new version">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                                </svg>
+                                Deploy
                             </button>
                             <button class="btn btn-sm btn-danger service-remove-btn" onclick="event.stopPropagation(); removeService('${escapeHtml(fullServiceName)}')" title="Remove service">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
@@ -2371,9 +2379,6 @@ function renderStacksList() {
                             </div>
                             ` : ''}
                             <div class="container-actions">
-                                <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); openServiceDeploy('${escapeHtml(fullServiceName)}', '${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', '${escapeHtml(c.image)}')" title="Deploy new version">
-                                    Deploy
-                                </button>
                                 <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); quickAction('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', 'restart', '${escapeHtml(c.name)}')">
                                     Restart
                                 </button>
