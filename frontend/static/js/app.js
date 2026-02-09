@@ -2771,14 +2771,14 @@ function closeDeployModal() {
 
 // ============== Service Deploy (Individual Container) ==============
 
-let currentServiceName = null;
+let currentDeployServiceName = null;
 let currentServiceRepoName = null;
 let currentServiceSshUrl = null;
 let currentServiceImage = null;
 let selectedServiceDeployTag = null;
 
 async function openServiceDeploy(serviceName, repoName, sshUrl, currentImage) {
-    currentServiceName = serviceName;
+    currentDeployServiceName = serviceName;
     currentServiceRepoName = repoName;
     currentServiceSshUrl = sshUrl;
     currentServiceImage = currentImage;
@@ -2904,7 +2904,7 @@ function toggleServiceDeploySource(source) {
 
 function closeServiceDeployModal() {
     document.getElementById('service-deploy-modal').classList.remove('active');
-    currentServiceName = null;
+    currentDeployServiceName = null;
     currentServiceRepoName = null;
     currentServiceSshUrl = null;
     currentServiceImage = null;
@@ -2912,7 +2912,7 @@ function closeServiceDeployModal() {
 }
 
 async function submitServiceDeploy() {
-    if (!currentServiceName) return;
+    if (!currentDeployServiceName) return;
     
     const submitBtn = document.getElementById('service-deploy-submit');
     const source = document.querySelector('input[name="service-deploy-source"]:checked').value;
@@ -2934,7 +2934,7 @@ async function submitServiceDeploy() {
     }
     
     // Confirm deployment
-    if (!confirm(`Deploy tag "${tag}" to service "${currentServiceName}"?`)) {
+    if (!confirm(`Deploy tag "${tag}" to service "${currentDeployServiceName}"?`)) {
         return;
     }
     
@@ -2948,7 +2948,7 @@ async function submitServiceDeploy() {
     `;
     
     try {
-        const url = `/api/services/${encodeURIComponent(currentServiceName)}/update-image?tag=${encodeURIComponent(tag)}`;
+        const url = `/api/services/${encodeURIComponent(currentDeployServiceName)}/update-image?tag=${encodeURIComponent(tag)}`;
         const response = await fetch(`${API_BASE}${url}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
