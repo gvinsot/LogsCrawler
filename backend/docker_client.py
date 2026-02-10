@@ -617,6 +617,10 @@ class DockerAPIClient:
         Updates the service to use a new image tag while keeping all other
         settings intact. This triggers a rolling update of the service.
         
+        NOTE: For private registries, Docker must already be logged in on the
+        Swarm manager. The --with-registry-auth flag (or X-Registry-Auth header)
+        is used to propagate credentials to worker nodes.
+        
         Args:
             service_name: The full service name (e.g., stackname_servicename)
             new_tag: The new image tag to use (e.g., "v1.2.3" or "latest")
@@ -624,18 +628,20 @@ class DockerAPIClient:
         Returns:
             Tuple of (success, message)
         """
+        import base64
         from urllib.parse import quote
         safe_name = quote(service_name, safe='')
         
-        print(f"[DOCKER-CLIENT] update_service_image called: service={service_name}, tag={new_tag}")
-        logger.info("update_service_image called", service=service_name, new_tag=new_tag)
+        logger.info("[DOCKER-CLIENT] update_service_image called", service=service_name, new_tag=new_tag)
         
         # First, get current service spec
         data, status = await self._request("GET", f"/services/{safe_name}")
-        print(f"[DOCKER-CLIENT] Got service spec: status={status}, has_data={bool(data)}")
-        logger.info("Got service spec", service=service_name, status=status, has_data=bool(data))
+        logger.info("[DOCKER-CLIENT] Got service spec", service=service_name, status=status, has_data=bool(data))
+        
         if status != 200 or not data:
-            return False, f"Service '{service_name}' not found"
+            error_msg = f"Service '{service_name}' not found (status={status})"
+            logger.error("[DOCKER-CLIENT] Service not found", service=service_name, status=status)
+            return False, error_msg
         
         try:
             version = data.get("Version", {}).get("Index")
@@ -646,11 +652,12 @@ class DockerAPIClient:
             container_spec = task_template.get("ContainerSpec", {})
             current_image = container_spec.get("Image", "")
             
-            print(f"[DOCKER-CLIENT] Current image: {current_image}")
-            logger.info("Current image", service=service_name, current_image=current_image)
+            logger.info("[DOCKER-CLIENT] Current image", service=service_name, current_image=current_image)
             
             if not current_image:
-                return False, f"Service '{service_name}' has no image configured"
+                error_msg = f"Service '{service_name}' has no image configured"
+                logger.error("[DOCKER-CLIENT] No image configured", service=service_name)
+                return False, error_msg
             
             # Parse image name and replace tag
             # Handle formats: image:tag, image:tag@sha256:..., registry/image:tag
@@ -667,32 +674,94 @@ class DockerAPIClient:
             new_image = f"{image_base}:{new_tag}"
             container_spec["Image"] = new_image
             
-            print(f"[DOCKER-CLIENT] New image: {new_image}")
-            logger.info("New image", service=service_name, new_image=new_image)
+            logger.info("[DOCKER-CLIENT] New image", service=service_name, image_base=image_base, new_tag=new_tag, new_image=new_image)
             
-            # Also increment ForceUpdate to ensure the update is applied
+            # Increment ForceUpdate to ensure the update is applied even if nothing else changed
             current_force = task_template.get("ForceUpdate", 0)
             task_template["ForceUpdate"] = current_force + 1
+            logger.info("[DOCKER-CLIENT] Force update incremented", service=service_name, old_force=current_force, new_force=current_force + 1)
+            
+            # Build registry auth header for private registries
+            # Docker expects base64-encoded JSON: {"username": "...", "password": "...", "serveraddress": "..."}
+            # For images already in the store, this propagates credentials to workers
+            headers = {}
+            
+            # Extract registry from image name
+            registry = None
+            if "/" in image_base:
+                first_part = image_base.split("/")[0]
+                # Check if it looks like a registry (contains '.' or ':' or is 'localhost')
+                if "." in first_part or ":" in first_part or first_part == "localhost":
+                    registry = first_part
+                    logger.info("[DOCKER-CLIENT] Detected registry", registry=registry)
+            
+            # Try to get registry auth from Docker's config.json
+            # This is what docker login stores and what --with-registry-auth uses
+            try:
+                import os
+                docker_config_path = os.path.expanduser("~/.docker/config.json")
+                if os.path.exists(docker_config_path):
+                    with open(docker_config_path, 'r') as f:
+                        docker_config = json.load(f)
+                    
+                    auths = docker_config.get("auths", {})
+                    auth_key = registry or "https://index.docker.io/v1/"
+                    
+                    # Try exact match first, then try with/without https://
+                    auth_entry = auths.get(auth_key) or auths.get(f"https://{registry}") or auths.get(registry)
+                    
+                    if auth_entry and auth_entry.get("auth"):
+                        # The "auth" field is already base64 encoded "user:password"
+                        auth_data = {
+                            "identitytoken": "",  # For OAuth tokens
+                            "registrytoken": ""   # For bearer tokens
+                        }
+                        
+                        # Decode the auth to get username and password
+                        try:
+                            decoded = base64.b64decode(auth_entry["auth"]).decode('utf-8')
+                            if ":" in decoded:
+                                username, password = decoded.split(":", 1)
+                                auth_data["username"] = username
+                                auth_data["password"] = password
+                                auth_data["serveraddress"] = registry or "https://index.docker.io/v1/"
+                                
+                                # Encode for X-Registry-Auth header
+                                auth_json = json.dumps(auth_data)
+                                headers["X-Registry-Auth"] = base64.b64encode(auth_json.encode()).decode()
+                                logger.info("[DOCKER-CLIENT] Registry auth added", registry=registry, username=username[:3] + "***")
+                        except Exception as e:
+                            logger.warning("[DOCKER-CLIENT] Failed to decode registry auth", error=str(e))
+                    else:
+                        logger.info("[DOCKER-CLIENT] No registry auth found for", registry=auth_key)
+            except Exception as e:
+                logger.warning("[DOCKER-CLIENT] Could not read Docker config", error=str(e))
             
             # Update the service
+            logger.info("[DOCKER-CLIENT] Sending service update request", service=service_name, version=version, has_auth=bool(headers))
+            
             update_data, update_status = await self._request(
                 "POST",
                 f"/services/{safe_name}/update?version={version}",
                 json=spec,
+                headers=headers if headers else None,
             )
             
-            print(f"[DOCKER-CLIENT] Service update result: status={update_status}, response={str(update_data)[:200]}")
-            logger.info("Service update result", service=service_name, status=update_status, response=str(update_data)[:200])
+            logger.info("[DOCKER-CLIENT] Service update result", service=service_name, status=update_status, response=str(update_data)[:300] if update_data else '')
             
             if update_status == 200:
-                return True, f"Service '{service_name}' updated to image '{new_image}'"
+                success_msg = f"Service '{service_name}' updated to image '{new_image}'"
+                logger.info("[DOCKER-CLIENT] Service updated successfully", service=service_name, new_image=new_image)
+                return True, success_msg
             else:
                 error_msg = update_data if isinstance(update_data, str) else str(update_data)
+                logger.error("[DOCKER-CLIENT] Service update failed", service=service_name, status=update_status, error=error_msg[:500])
                 return False, f"Failed to update service '{service_name}': {error_msg}"
         except Exception as e:
-            print(f"[DOCKER-CLIENT] Exception: {e}")
-            logger.error("Exception in update_service_image", service=service_name, error=str(e))
-            return False, f"Failed to update service '{service_name}': {e}"
+            import traceback
+            error_detail = f"{type(e).__name__}: {e}"
+            logger.error("[DOCKER-CLIENT] Exception in update_service_image", service=service_name, error=error_detail, traceback=traceback.format_exc())
+            return False, f"Failed to update service '{service_name}': {error_detail}"
 
     async def get_service_logs(self, service_name: str, tail: int = 200) -> List[Dict[str, Any]]:
         """Get logs for a Docker Swarm service using the Docker API.

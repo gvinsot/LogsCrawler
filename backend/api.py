@@ -586,37 +586,60 @@ async def update_service_image(
     """Update a Docker Swarm service's image tag.
     
     This allows deploying a new version of a single service without
-    redeploying the entire stack.
+    redeploying the entire stack. Uses --with-registry-auth to propagate
+    registry credentials to all Swarm nodes.
     """
+    logger.info("[API] update_service_image request", service=service_name, tag=tag, requested_host=host)
+    
     # Find the Swarm manager host
     manager_host = None
     for host_config in settings.hosts:
         if host_config.swarm_manager:
             manager_host = host_config.name
+            logger.info("[API] Found Swarm manager", manager=host_config.name, mode=host_config.mode)
             break
     
     target_host = host or manager_host
     if not target_host:
         # Fallback to first available client
         target_host = next(iter(collector.clients.keys()), None)
+        logger.info("[API] Using fallback host", target_host=target_host)
     
     if not target_host:
+        logger.error("[API] No host available for service update")
         raise HTTPException(status_code=404, detail="No host available")
     
     client = collector.clients.get(target_host)
     if not client:
+        logger.error("[API] Host not found", target_host=target_host, available_hosts=list(collector.clients.keys()))
         raise HTTPException(status_code=404, detail=f"Host '{target_host}' not found")
     
-    print(f"[UPDATE-IMAGE] Updating service '{service_name}' to tag '{tag}' via host '{target_host}' (client: {type(client).__name__})")
-    logger.info("Updating service image", service=service_name, tag=tag, host=target_host, client_type=type(client).__name__)
-    success, message = await client.update_service_image(service_name, tag)
-    print(f"[UPDATE-IMAGE] Result: success={success}, message={message}")
-    logger.info("Service image update result", service=service_name, success=success, message=message)
+    client_type = type(client).__name__
+    logger.info("[API] Calling update_service_image", 
+               service=service_name, tag=tag, host=target_host, client_type=client_type)
     
-    if success:
-        return {"success": True, "message": message, "service_name": service_name, "tag": tag}
-    else:
-        raise HTTPException(status_code=500, detail=message)
+    try:
+        success, message = await client.update_service_image(service_name, tag)
+        
+        logger.info("[API] update_service_image completed", 
+                   service=service_name, tag=tag, success=success, 
+                   message=message[:200] if message else '')
+        
+        if success:
+            return {"success": True, "message": message, "service_name": service_name, "tag": tag}
+        else:
+            logger.error("[API] Service image update failed", 
+                        service=service_name, tag=tag, error=message)
+            raise HTTPException(status_code=500, detail=message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"{type(e).__name__}: {e}"
+        logger.error("[API] Exception during service update", 
+                    service=service_name, tag=tag, error=error_detail, 
+                    traceback=traceback.format_exc())
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 @app.get("/api/services/{service_name}/logs")
