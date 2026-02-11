@@ -632,6 +632,10 @@ class DockerAPIClient:
         from urllib.parse import quote
         safe_name = quote(service_name, safe='')
         
+        # Strip leading 'v' from tag if present (GitHub tags are v1.0.5, Docker images are 1.0.5)
+        if new_tag.startswith('v'):
+            new_tag = new_tag[1:]
+        
         logger.info("[DOCKER-CLIENT] update_service_image called", service=service_name, new_tag=new_tag)
         
         # First, get current service spec

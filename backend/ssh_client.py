@@ -528,6 +528,10 @@ class SSHClient:
         Uses --with-registry-auth to propagate registry credentials to all
         Swarm nodes so they can pull the new image from private registries.
         """
+        # Strip leading 'v' from tag if present (GitHub tags are v1.0.5, Docker images are 1.0.5)
+        if new_tag.startswith('v'):
+            new_tag = new_tag[1:]
+        
         logger.info("[SSH-CLIENT] update_service_image called", service=service_name, tag=new_tag)
         
         # Get current image
