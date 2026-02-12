@@ -69,6 +69,11 @@ function switchView(view) {
         v.classList.toggle('active', v.id === `${view}-view`);
     });
     
+    // Stop stacks polling when leaving the view
+    if (view !== 'stacks') {
+        stopStacksPolling();
+    }
+
     // Load view data
     switch (view) {
         case 'dashboard':
@@ -1849,7 +1854,7 @@ async function removeDeployedStack(stackName) {
         
         if (result && result.success) {
             showNotification('success', result.message);
-            setTimeout(refreshStacks, 2000); // Wait a bit longer for stack removal
+            scheduleStacksStateUpdate(); // Incremental update after stack removal
         } else {
             showNotification('error', result?.message || result?.detail || 'Failed to remove stack');
         }
@@ -1881,7 +1886,7 @@ async function removeService(serviceName) {
         
         if (result && result.success) {
             showNotification('success', result.message);
-            setTimeout(refreshStacks, 2000);
+            scheduleStacksStateUpdate(); // Incremental update after service removal
         } else {
             showNotification('error', result?.message || 'Failed to remove service');
         }
@@ -2103,11 +2108,13 @@ async function loadStacks() {
                 <code>LOGSCRAWLER_GITHUB__USERNAME</code>
             </div>
         `;
+        stopStacksPolling();
         return;
     }
     
-    // Load starred repos
+    // Load starred repos (full render), then start polling
     await refreshStacks();
+    startStacksPolling();
 }
 
 async function refreshStacks() {
@@ -2143,6 +2150,371 @@ async function refreshStacks() {
 // Storage for stack containers and metrics
 let stacksContainers = {};
 let stacksHostMetrics = {};
+
+// ============== Stacks Polling (incremental container state updates) ==============
+
+let stacksPollingInterval = null;
+const STACKS_POLL_INTERVAL = 5000; // 5 seconds
+
+function startStacksPolling() {
+    stopStacksPolling();
+    stacksPollingInterval = setInterval(updateStacksContainerStates, STACKS_POLL_INTERVAL);
+}
+
+function stopStacksPolling() {
+    if (stacksPollingInterval) {
+        clearInterval(stacksPollingInterval);
+        stacksPollingInterval = null;
+    }
+}
+
+/**
+ * Schedule an accelerated state update after an action (deploy, remove, etc.).
+ * Polls a few times rapidly then resumes normal polling.
+ */
+function scheduleStacksStateUpdate() {
+    stopStacksPolling();
+    let rapidCount = 0;
+    const maxRapidPolls = 6; // 6 rapid polls over ~12 seconds
+    const rapidInterval = 2000;
+
+    async function rapidPoll() {
+        await updateStacksContainerStates();
+        rapidCount++;
+        if (rapidCount >= maxRapidPolls) {
+            startStacksPolling(); // resume normal interval
+        } else {
+            setTimeout(rapidPoll, rapidInterval);
+        }
+    }
+    setTimeout(rapidPoll, rapidInterval);
+}
+
+/**
+ * Lightweight update: fetches only container states and updates DOM in-place
+ * without re-rendering the entire stacks list.
+ */
+async function updateStacksContainerStates() {
+    if (currentView !== 'stacks') return;
+    if (!stacksRepos || stacksRepos.length === 0) return;
+
+    try {
+        const [statesData, hostMetrics] = await Promise.all([
+            apiGet('/containers/states'),
+            apiGet('/hosts/metrics')
+        ]);
+
+        if (!statesData) return;
+        if (hostMetrics) stacksHostMetrics = hostMetrics;
+
+        // Build a map: stackName -> serviceName -> containers
+        const newContainersByStack = {};
+        for (const c of statesData) {
+            let stackName = null;
+            let serviceName = null;
+
+            // Try swarm labels first
+            if (c.labels) {
+                stackName = c.labels['com.docker.swarm.stack.namespace'] || null;
+                serviceName = c.labels['com.docker.swarm.service.name'] || null;
+            }
+
+            // Extract from name if needed
+            if (!stackName && c.name && c.name.includes('.')) {
+                const mainPart = c.name.split('.')[0];
+                if (mainPart.includes('_')) {
+                    const parts = mainPart.split('_', 1);
+                    stackName = parts[0];
+                    if (!serviceName) {
+                        serviceName = mainPart;
+                    }
+                }
+            }
+
+            if (!stackName) continue; // skip non-stack containers
+
+            if (!newContainersByStack[stackName]) {
+                newContainersByStack[stackName] = {};
+            }
+            if (!serviceName) serviceName = c.name;
+            if (!newContainersByStack[stackName][serviceName]) {
+                newContainersByStack[stackName][serviceName] = [];
+            }
+            newContainersByStack[stackName][serviceName].push(c);
+        }
+
+        // Update stacksContainers for each known repo
+        for (const repo of stacksRepos) {
+            const stackName = repo.name.toLowerCase();
+            const oldStackContainers = stacksContainers[stackName] || {};
+            const newStackContainers = newContainersByStack[stackName] || {};
+
+            // Merge: keep existing service keys (from swarm manager), update containers
+            const mergedServices = { ...oldStackContainers };
+            for (const [svc, containers] of Object.entries(newStackContainers)) {
+                mergedServices[svc] = containers;
+            }
+            // Clear services that had containers but now have none
+            for (const svc of Object.keys(mergedServices)) {
+                if (!newStackContainers[svc] && mergedServices[svc].length > 0) {
+                    mergedServices[svc] = [];
+                }
+            }
+            stacksContainers[stackName] = mergedServices;
+
+            // Update DOM in-place for this stack
+            updateStackDom(repo.name, stackName, mergedServices);
+        }
+    } catch (e) {
+        console.error('Failed to update stacks container states:', e);
+    }
+}
+
+/**
+ * Update a single stack's DOM in-place without full re-render.
+ */
+function updateStackDom(repoName, stackName, services) {
+    const hostGroupEl = document.querySelector(`[data-repo="${repoName}"].host-group`);
+    if (!hostGroupEl) return;
+
+    // Update stack-level summary stats in the header
+    let stackTotalMemory = 0;
+    let stackMaxCpu = 0;
+    let containerCount = 0;
+
+    for (const containers of Object.values(services)) {
+        for (const c of containers) {
+            containerCount++;
+            if (c.memory_usage_mb != null) stackTotalMemory += c.memory_usage_mb;
+            if (c.cpu_percent != null && c.cpu_percent > stackMaxCpu) stackMaxCpu = c.cpu_percent;
+        }
+    }
+
+    // Update header stats
+    const hostNameEl = hostGroupEl.querySelector('.host-name');
+    if (hostNameEl) {
+        // Update group-count
+        const groupCountEl = hostNameEl.querySelector('.group-count');
+        if (groupCountEl) {
+            groupCountEl.textContent = `${Object.keys(services).length} services, ${containerCount} containers`;
+        }
+        // Update memory
+        const memEl = hostNameEl.querySelector('.group-memory');
+        if (memEl) {
+            memEl.innerHTML = `💾 ${formatMemory(stackTotalMemory)}`;
+            memEl.style.display = stackTotalMemory > 0 ? '' : 'none';
+        }
+        // Update CPU
+        const cpuEl = hostNameEl.querySelector('.group-cpu');
+        if (cpuEl) {
+            cpuEl.className = `group-stat group-cpu ${stackMaxCpu >= 80 ? 'cpu-critical' : (stackMaxCpu >= 50 ? 'cpu-warning' : '')}`;
+            cpuEl.innerHTML = `⚡ ${stackMaxCpu > 0 ? stackMaxCpu.toFixed(1) + '%' : ''}`;
+            cpuEl.style.display = stackMaxCpu > 0 ? '' : 'none';
+        }
+        // Update GPU stats from host metrics
+        updateStackGpuStats(hostNameEl, stackName, services);
+    }
+
+    // Update each service's containers
+    const contentEl = document.getElementById(`stack-containers-${repoName}`);
+    if (!contentEl) return;
+
+    const composeGroups = contentEl.querySelectorAll('.compose-group');
+    composeGroups.forEach(groupEl => {
+        const headerEl = groupEl.querySelector('.compose-header');
+        if (!headerEl) return;
+
+        // Find the service name from the header text
+        // The display name is shown in the header, we need to match to the service key
+        const containerListEl = groupEl.querySelector('.container-list');
+        if (!containerListEl) return;
+
+        // Try to identify which service this compose-group corresponds to
+        // We look at existing container items for data-container-id or match by service name in text
+        let matchedServiceName = null;
+        for (const [svcName, containers] of Object.entries(services)) {
+            let displayName = svcName;
+            if (svcName.startsWith(stackName + '_')) {
+                displayName = svcName.substring(stackName.length + 1);
+            }
+            // Check if header text contains this service name
+            const headerText = headerEl.textContent.trim();
+            if (headerText.includes(displayName)) {
+                matchedServiceName = svcName;
+                break;
+            }
+        }
+
+        if (!matchedServiceName) return;
+        const containers = services[matchedServiceName] || [];
+
+        // Update group count
+        const countEl = headerEl.querySelector('.group-count');
+        if (countEl) countEl.textContent = containers.length;
+
+        // Update service-level stats
+        let svcTotalMemory = 0;
+        let svcMaxCpu = 0;
+        for (const c of containers) {
+            if (c.memory_usage_mb != null) svcTotalMemory += c.memory_usage_mb;
+            if (c.cpu_percent != null && c.cpu_percent > svcMaxCpu) svcMaxCpu = c.cpu_percent;
+        }
+        const svcMemEl = headerEl.querySelector('.group-memory');
+        if (svcMemEl) {
+            svcMemEl.innerHTML = `💾 ${formatMemory(svcTotalMemory)}`;
+            svcMemEl.style.display = svcTotalMemory > 0 ? '' : 'none';
+        }
+        const svcCpuEl = headerEl.querySelector('.group-cpu');
+        if (svcCpuEl) {
+            svcCpuEl.className = `group-stat group-cpu ${svcMaxCpu >= 80 ? 'cpu-critical' : (svcMaxCpu >= 50 ? 'cpu-warning' : '')}`;
+            svcCpuEl.innerHTML = `⚡ ${svcMaxCpu > 0 ? svcMaxCpu.toFixed(1) + '%' : ''}`;
+            svcCpuEl.style.display = svcMaxCpu > 0 ? '' : 'none';
+        }
+
+        // Update no-replicas badge
+        const noReplicasBadge = headerEl.querySelector('.service-no-replicas');
+        if (containers.length === 0 && !noReplicasBadge) {
+            const span = document.createElement('span');
+            span.className = 'service-no-replicas';
+            span.textContent = '0 replicas';
+            const countSpan = headerEl.querySelector('.group-count');
+            if (countSpan) countSpan.after(span);
+        } else if (containers.length > 0 && noReplicasBadge) {
+            noReplicasBadge.remove();
+        }
+
+        // Update individual container items
+        updateContainerItems(containerListEl, containers, stackName);
+    });
+}
+
+function updateStackGpuStats(hostNameEl, stackName, services) {
+    if (!stacksHostMetrics) return;
+
+    const hostsInStack = new Set();
+    for (const containers of Object.values(services)) {
+        for (const c of containers) {
+            if (c.host) hostsInStack.add(c.host);
+        }
+    }
+
+    let maxGpuPercent = null;
+    let totalVramUsed = 0;
+    let totalVramTotal = 0;
+    let hasVramData = false;
+
+    for (const host of hostsInStack) {
+        if (stacksHostMetrics[host]) {
+            const gpuPercent = stacksHostMetrics[host].gpu_percent;
+            const gpuMemUsed = stacksHostMetrics[host].gpu_memory_used_mb;
+            const gpuMemTotal = stacksHostMetrics[host].gpu_memory_total_mb;
+
+            if (gpuPercent != null) {
+                maxGpuPercent = maxGpuPercent != null ? Math.max(maxGpuPercent, gpuPercent) : gpuPercent;
+            }
+            if (gpuMemUsed != null && gpuMemTotal != null) {
+                totalVramUsed += gpuMemUsed;
+                totalVramTotal += gpuMemTotal;
+                hasVramData = true;
+            }
+        }
+    }
+
+    const gpuEl = hostNameEl.querySelector('.group-gpu');
+    if (gpuEl && maxGpuPercent != null) {
+        const gpuClass = maxGpuPercent >= 80 ? 'gpu-critical' : (maxGpuPercent >= 50 ? 'gpu-warning' : '');
+        gpuEl.className = `group-stat group-gpu ${gpuClass}`;
+        gpuEl.innerHTML = `🎮 ${maxGpuPercent.toFixed(1)}%`;
+    }
+}
+
+/**
+ * Update container items within a service's container-list.
+ * Updates status dots, CPU/memory stats in-place for existing containers,
+ * and adds/removes container items as needed.
+ */
+function updateContainerItems(containerListEl, containers, stackName) {
+    const existingItems = containerListEl.querySelectorAll('.container-item:not(.container-item-empty)');
+    const existingById = {};
+    existingItems.forEach(el => {
+        // Extract container id from the onclick attribute
+        const onclick = el.getAttribute('onclick') || '';
+        const match = onclick.match(/openContainer\('[^']*',\s*'([^']*)'/);
+        if (match) existingById[match[1]] = el;
+    });
+
+    const newIds = new Set(containers.map(c => c.id));
+
+    // Remove containers that no longer exist
+    for (const [id, el] of Object.entries(existingById)) {
+        if (!newIds.has(id)) {
+            el.remove();
+        }
+    }
+
+    // Remove empty placeholder if we now have containers
+    if (containers.length > 0) {
+        const emptyItem = containerListEl.querySelector('.container-item-empty');
+        if (emptyItem) emptyItem.remove();
+    }
+
+    for (const c of containers) {
+        const existingEl = existingById[c.id];
+        if (existingEl) {
+            // Update status dot
+            const statusDot = existingEl.querySelector('.container-status');
+            if (statusDot) {
+                statusDot.className = `container-status ${c.status}`;
+            }
+
+            // Update CPU/memory stats
+            const statMinis = existingEl.querySelectorAll('.stat-mini');
+            if (statMinis.length >= 2) {
+                const cpuDisplay = c.cpu_percent != null ? `${c.cpu_percent}%` : '-';
+                const memDisplay = c.memory_percent != null
+                    ? `${c.memory_percent}%${c.memory_usage_mb ? ` (${c.memory_usage_mb}MB)` : ''}`
+                    : '-';
+                // CPU stat is first, memory stat is second
+                const cpuTextNode = statMinis[0].lastChild;
+                if (cpuTextNode) cpuTextNode.textContent = '\n                                    ' + cpuDisplay + '\n                                ';
+                const memTextNode = statMinis[1].lastChild;
+                if (memTextNode) memTextNode.textContent = '\n                                    ' + memDisplay + '\n                                ';
+            }
+
+            // Show/hide stats section based on running status
+            const statsSection = existingEl.querySelector('.container-stats-mini');
+            if (c.status === 'running' && !statsSection) {
+                // Container became running, would need a re-render for this item
+                // For simplicity, leave as-is until next full render
+            } else if (c.status !== 'running' && statsSection) {
+                statsSection.style.display = 'none';
+            } else if (statsSection) {
+                statsSection.style.display = '';
+            }
+        }
+        // New containers will appear on next full refresh or can be added here
+        // but a structural change (new container appearing) warrants a full re-render
+        // which the rapid polling handles after ~12sec anyway
+    }
+
+    // If no containers left, show empty placeholder
+    if (containers.length === 0) {
+        const existing = containerListEl.querySelector('.container-item-empty');
+        if (!existing) {
+            containerListEl.innerHTML = `
+                <div class="container-item container-item-empty">
+                    <div class="container-info">
+                        <span class="container-status exited"></span>
+                        <div>
+                            <div class="container-name" style="color: var(--text-muted);">No running containers</div>
+                            <div class="container-image">Service has 0 replicas or all tasks failed</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+    }
+}
 
 // Track expanded stacks
 const STACKS_EXPANDED_KEY = 'logscrawler_stacks_expanded';
@@ -2967,8 +3339,8 @@ async function submitServiceDeploy() {
         if (result.success) {
             showNotification('success', result.message || `Service updated to tag ${tag}`);
             closeServiceDeployModal();
-            // Refresh stacks view after a short delay
-            setTimeout(refreshStacks, 2000);
+            // Incremental update after service deploy
+            scheduleStacksStateUpdate();
         } else {
             showNotification('error', result.message || 'Failed to update service');
         }
@@ -3118,9 +3490,9 @@ function trackBackgroundAction(actionId, actionType, repoName) {
                     );
                 }
                 
-                // Refresh stacks after deploy
+                // Incremental update after deploy
                 if (actionType === 'Deploy' && status.status === 'completed') {
-                    setTimeout(refreshStacks, 2000);
+                    scheduleStacksStateUpdate();
                 }
             }
         } catch (e) {

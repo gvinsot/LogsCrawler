@@ -260,6 +260,45 @@ async def list_containers(
     return containers
 
 
+@app.get("/api/containers/states")
+async def get_containers_states(
+    refresh: bool = Query(default=True),
+) -> List[Dict[str, Any]]:
+    """Get lightweight container states (id, name, host, status, cpu, memory).
+    
+    This endpoint is designed for frequent polling to update UI without
+    fetching the full container info and re-rendering everything.
+    """
+    containers = await collector.get_all_containers(refresh=refresh)
+
+    # Fetch latest stats
+    latest_stats = await opensearch.get_latest_container_stats()
+
+    result = []
+    for c in containers:
+        stats = latest_stats.get(c.id, {})
+        result.append({
+            "id": c.id,
+            "name": c.name,
+            "host": c.host,
+            "status": c.status.value,
+            "image": c.image,
+            "created": c.created.isoformat() if c.created else None,
+            "cpu_percent": stats.get("cpu_percent", c.cpu_percent),
+            "memory_percent": stats.get("memory_percent", c.memory_percent),
+            "memory_usage_mb": stats.get("memory_usage_mb", c.memory_usage_mb),
+            "labels": {
+                k: v for k, v in c.labels.items()
+                if k in (
+                    "com.docker.swarm.stack.namespace",
+                    "com.docker.swarm.service.name",
+                )
+            },
+        })
+
+    return result
+
+
 @app.get("/api/containers/grouped")
 async def list_containers_grouped(
     refresh: bool = Query(default=False),
