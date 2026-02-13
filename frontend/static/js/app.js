@@ -640,21 +640,46 @@ async function apiPut(endpoint, data) {
 }
 
 function showNotification(type, message) {
-    // Remove any existing notification
-    const existing = document.querySelector('.notification');
+    // Use the shared action-toast-container for consistent positioning
+    let container = document.getElementById('action-toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'action-toast-container';
+        document.body.appendChild(container);
+    }
+    
+    // Remove any existing notification toast (keep action toasts)
+    const existing = container.querySelector('.action-toast-notification');
     if (existing) existing.remove();
     
-    const notification = document.createElement('div');
-    notification.className = `notification notification-${type}`;
-    notification.innerHTML = `
-        <span class="notification-message">${escapeHtml(message)}</span>
-        <button class="notification-close" onclick="this.parentElement.remove()">&times;</button>
+    const iconMap = {
+        success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+        error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+        warning: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
+    };
+    
+    const toast = document.createElement('div');
+    toast.className = `action-toast action-toast-notification action-toast-${type}`;
+    toast.innerHTML = `
+        <div class="action-toast-content">
+            <div class="action-toast-info">
+                <span class="action-toast-icon action-toast-icon-${type}">${iconMap[type] || ''}</span>
+                <span class="action-toast-text">${escapeHtml(message)}</span>
+                <button class="action-toast-close" onclick="this.closest('.action-toast').classList.add('toast-exit'); setTimeout(() => this.closest('.action-toast')?.remove(), 300)">&times;</button>
+            </div>
+        </div>
     `;
     
-    document.body.appendChild(notification);
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('toast-visible'));
     
     // Auto-remove after 5 seconds
-    setTimeout(() => notification.remove(), 5000);
+    setTimeout(() => {
+        if (toast.parentElement) {
+            toast.classList.add('toast-exit');
+            setTimeout(() => toast.remove(), 300);
+        }
+    }, 5000);
 }
 
 // ============== Dashboard ==============
