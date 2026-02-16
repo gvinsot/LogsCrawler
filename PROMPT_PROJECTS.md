@@ -354,7 +354,7 @@ services:
 
 Pour déployer un service sur un nœud avec GPU, vous devez :
 
-1. **Ajouter la variable d'environnement** pour exposer les devices GPU :
+1. **Ajouter la variable d'environnement** pour exposer les devices GPU AMD:
 ```yaml
 services:
   gpu-service:
@@ -362,17 +362,25 @@ services:
       - AMD_VISIBLE_DEVICES=all
 ```
 
-2. **Ajouter la contrainte de placement** pour cibler les nœuds avec GPU :
+2. **Ajouter la contrainte de placement** pour cibler les nœuds avec GPU AMD:
 ```yaml
 deploy:
   replicas: 1
   placement:
     constraints:
-      - node.labels.gpu == true
+      - node.labels.gpu == amd
+```
+**Ajouter la contrainte de placement** pour cibler les nœuds avec GPU NVIDIA:
+```yaml
+deploy:
+  replicas: 1
+  placement:
+    constraints:
+      - node.labels.gpu == nvidia
 ```
 
 > **Pour exclure les nœuds GPU** (déployer uniquement sur les nœuds sans GPU) :
 > ```yaml
 > constraints:
->   - node.labels.gpu != true
+>   - node.labels.gpu == none
 > ```

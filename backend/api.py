@@ -686,11 +686,13 @@ async def get_service_logs(
     service_name: str,
     tail: int = Query(default=200, ge=1, le=10000),
     host: Optional[str] = Query(default=None),
-) -> List[Dict[str, Any]]:
+) -> Any:
     """Get logs for a Docker Swarm service.
     
     Uses the Docker API /services/{id}/logs endpoint to aggregate logs
     from all tasks/replicas of the given service.
+    
+    If the service tasks are not scheduled, returns task status info instead.
     """
     # Find a client that can access the service
     client = None
@@ -706,8 +708,12 @@ async def get_service_logs(
         raise HTTPException(status_code=404, detail="No host available")
     
     try:
-        logs = await client.get_service_logs(service_name, tail=tail)
-        return logs
+        result = await client.get_service_logs(service_name, tail=tail)
+        # If get_service_logs detected an unscheduled task, it returns a dict
+        # with service task status info instead of a log list
+        if isinstance(result, dict) and result.get("type") == "service_tasks":
+            return result
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

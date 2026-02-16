@@ -802,7 +802,21 @@ class DockerAPIClient:
                     return []
                 
                 raw_data = await response.read()
-                return self._parse_service_logs(raw_data, service_name)
+                logs = self._parse_service_logs(raw_data, service_name)
+                
+                # Detect if logs contain "incomplete log stream" / "has not been scheduled" error
+                # This happens when the service's tasks are not running (e.g., not deployed)
+                if logs and any(
+                    "incomplete log stream" in (entry.get("message", ""))
+                    or "has not been scheduled" in (entry.get("message", ""))
+                    for entry in logs
+                ):
+                    # Return task status info instead of the unhelpful error
+                    task_info = await self.get_service_tasks(service_name)
+                    if task_info:
+                        return {"type": "service_tasks", "tasks": task_info, "service": service_name}
+                
+                return logs
                 
         except Exception as e:
             logger.error("Failed to get service logs", service=service_name, error=str(e))
@@ -891,6 +905,62 @@ class DockerAPIClient:
                 pass
         
         return entries
+
+    async def get_service_tasks(self, service_name: str) -> List[Dict[str, Any]]:
+        """Get all tasks for a specific service (equivalent to docker service ps --no-trunc).
+        
+        Returns all tasks including failed, pending, and shutdown tasks,
+        providing diagnostic info when a service is not running.
+        
+        Args:
+            service_name: The full service name (e.g., stackname_servicename)
+            
+        Returns:
+            List of task info dicts with id, state, desired_state, error, node, timestamps
+        """
+        import json as json_mod
+        filters = json_mod.dumps({"service": [service_name]})
+        data, status = await self._request("GET", f"/tasks?filters={quote(filters, safe='')}")
+        
+        if status != 200 or not data:
+            return []
+        
+        # Fetch nodes for hostname resolution
+        nodes = await self.get_swarm_nodes()
+        node_hostnames = {n["id"]: n["hostname"] for n in nodes}
+        # Also map full IDs
+        nodes_raw, _ = await self._request("GET", "/nodes")
+        full_node_map = {}
+        if nodes_raw:
+            for n in nodes_raw:
+                full_node_map[n.get("ID", "")] = n.get("Description", {}).get("Hostname", "unknown")
+        
+        tasks = []
+        for task in data:
+            task_status = task.get("Status", {})
+            container_status = task_status.get("ContainerStatus", {})
+            task_spec = task.get("Spec", {})
+            container_spec = task_spec.get("ContainerSpec", {})
+            node_id = task.get("NodeID", "")
+            
+            task_info = {
+                "id": task.get("ID", ""),
+                "node": full_node_map.get(node_id, node_id[:12] if node_id else "(no node)"),
+                "desired_state": task.get("DesiredState", "unknown"),
+                "state": task_status.get("State", "unknown"),
+                "error": task_status.get("Err", ""),
+                "message": task_status.get("Message", ""),
+                "image": container_spec.get("Image", "unknown"),
+                "created_at": task.get("CreatedAt", ""),
+                "updated_at": task.get("UpdatedAt", ""),
+                "container_id": container_status.get("ContainerID", ""),
+            }
+            tasks.append(task_info)
+        
+        # Sort by updated_at descending (most recent first)
+        tasks.sort(key=lambda t: t.get("updated_at", ""), reverse=True)
+        
+        return tasks
 
     async def get_swarm_stacks(self) -> Dict[str, List[str]]:
         """Get list of Docker Swarm stacks and their services.

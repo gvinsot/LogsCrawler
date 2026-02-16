@@ -1961,9 +1961,16 @@ async function refreshServiceLogs() {
     if (!currentServiceName) return;
     
     const tail = document.getElementById('service-logs-tail').value || 200;
-    const logs = await apiGet(`/services/${encodeURIComponent(currentServiceName)}/logs?tail=${tail}`);
+    const result = await apiGet(`/services/${encodeURIComponent(currentServiceName)}/logs?tail=${tail}`);
     
-    currentServiceLogs = logs || [];
+    // Check if the response is service task status info (service not running)
+    if (result && result.type === 'service_tasks') {
+        currentServiceLogs = [];
+        renderServiceTasks(result.tasks, result.service);
+        return;
+    }
+    
+    currentServiceLogs = result || [];
     renderServiceLogs();
 }
 
@@ -2005,6 +2012,65 @@ function renderServiceLogs() {
     
     // Auto-scroll to bottom
     logViewer.scrollTop = logViewer.scrollHeight;
+}
+
+function renderServiceTasks(tasks, serviceName) {
+    const logViewer = document.getElementById('service-logs-content');
+    
+    if (!tasks || tasks.length === 0) {
+        logViewer.innerHTML = '<div class="empty-placeholder">No task information available for this service</div>';
+        return;
+    }
+    
+    const stateColors = {
+        'running': '#4caf50',
+        'complete': '#2196f3',
+        'ready': '#ff9800',
+        'starting': '#ff9800',
+        'preparing': '#ff9800',
+        'assigned': '#ff9800',
+        'accepted': '#ff9800',
+        'pending': '#ff9800',
+        'new': '#ff9800',
+        'failed': '#f44336',
+        'rejected': '#f44336',
+        'shutdown': '#999',
+        'orphaned': '#f44336',
+        'remove': '#999',
+    };
+    
+    let html = `<div style="padding: 12px; font-family: monospace; font-size: 13px;">`;
+    html += `<div style="color: #ff9800; margin-bottom: 12px; font-size: 14px;">`;
+    html += `&#9888; Service logs unavailable — showing task status (docker service ps)</div>`;
+    html += `<table style="width: 100%; border-collapse: collapse; color: #e0e0e0;">`;
+    html += `<thead><tr style="border-bottom: 1px solid #444; text-align: left;">`;
+    html += `<th style="padding: 6px 10px;">ID</th>`;
+    html += `<th style="padding: 6px 10px;">Node</th>`;
+    html += `<th style="padding: 6px 10px;">Desired State</th>`;
+    html += `<th style="padding: 6px 10px;">Current State</th>`;
+    html += `<th style="padding: 6px 10px;">Error</th>`;
+    html += `<th style="padding: 6px 10px;">Updated</th>`;
+    html += `</tr></thead><tbody>`;
+    
+    for (const task of tasks) {
+        const stateColor = stateColors[task.state] || '#999';
+        const desiredColor = stateColors[task.desired_state] || '#999';
+        const errorText = task.error || task.message || '';
+        const updatedAt = task.updated_at ? new Date(task.updated_at).toLocaleString() : '';
+        const taskIdShort = (task.id || '').substring(0, 12);
+        
+        html += `<tr style="border-bottom: 1px solid #333;">`;
+        html += `<td style="padding: 6px 10px; font-family: monospace; font-size: 12px;">${escapeHtml(taskIdShort)}</td>`;
+        html += `<td style="padding: 6px 10px;">${escapeHtml(task.node || '')}</td>`;
+        html += `<td style="padding: 6px 10px; color: ${desiredColor};">${escapeHtml(task.desired_state || '')}</td>`;
+        html += `<td style="padding: 6px 10px; color: ${stateColor};">${escapeHtml(task.state || '')}</td>`;
+        html += `<td style="padding: 6px 10px; color: #f44336; max-width: 400px; word-break: break-word;">${escapeHtml(errorText)}</td>`;
+        html += `<td style="padding: 6px 10px; white-space: nowrap;">${escapeHtml(updatedAt)}</td>`;
+        html += `</tr>`;
+    }
+    
+    html += `</tbody></table></div>`;
+    logViewer.innerHTML = html;
 }
 
 function formatLogTimestamp(ts) {
