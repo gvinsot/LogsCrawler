@@ -713,6 +713,13 @@ async def get_service_logs(
         # with service task status info instead of a log list
         if isinstance(result, dict) and result.get("type") == "service_tasks":
             return result
+        # Fallback: if no logs returned, try to show service task status
+        # (equivalent to `docker service ps <service> --no-trunc`)
+        if not result:
+            if hasattr(client, "get_service_tasks"):
+                tasks = await client.get_service_tasks(service_name)
+                if tasks:
+                    return {"type": "service_tasks", "tasks": tasks, "service": service_name}
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import asyncssh
 import structlog
@@ -583,6 +583,55 @@ class SSHClient:
             error_msg = f"Failed to update service: {output}"
             logger.error("[SSH-CLIENT] Service update failed", service=service_name, error=error_msg)
             return False, error_msg
+
+    async def get_service_tasks(self, service_name: str) -> List[Dict[str, Any]]:
+        """Get all tasks for a service (equivalent to docker service ps --no-trunc).
+        
+        Returns task status information useful as a fallback when service logs
+        are unavailable (e.g., service not fully deployed).
+        """
+        cmd = (
+            f"docker service ps {service_name} --no-trunc "
+            f"--format '{{{{.ID}}}}\t{{{{.Node}}}}\t{{{{.DesiredState}}}}\t{{{{.CurrentState}}}}\t{{{{.Error}}}}\t{{{{.Image}}}}'"
+        )
+        stdout, stderr, code = await self.run_command(cmd)
+        
+        if code != 0:
+            logger.error("Failed to get service tasks", service=service_name, error=stderr)
+            return []
+        
+        tasks = []
+        for line in stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            parts = line.split('\t')
+            if len(parts) < 4:
+                continue
+            
+            task_id = parts[0] if len(parts) > 0 else ''
+            node = parts[1] if len(parts) > 1 else ''
+            desired_state = parts[2] if len(parts) > 2 else ''
+            current_state = parts[3] if len(parts) > 3 else ''
+            error = parts[4] if len(parts) > 4 else ''
+            image = parts[5] if len(parts) > 5 else ''
+            
+            # Parse state from current_state (e.g., "Running 2 hours ago" -> "running")
+            state = current_state.split()[0].lower() if current_state else 'unknown'
+            
+            tasks.append({
+                "id": task_id,
+                "node": node,
+                "desired_state": desired_state.lower(),
+                "state": state,
+                "error": error,
+                "message": current_state,
+                "image": image,
+                "created_at": "",
+                "updated_at": "",
+                "container_id": "",
+            })
+        
+        return tasks
 
     async def get_service_logs(self, service_name: str, tail: int = 200) -> List[dict]:
         """Get logs for a Docker Swarm service."""
