@@ -10,17 +10,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install AMD ROCm SMI for GPU monitoring
-# ROCm repository setup for Debian/Ubuntu
+# Install AMD ROCm SMI for GPU monitoring (non-fatal if repo unavailable)
 RUN curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /usr/share/keyrings/rocm-archive-keyring.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/rocm-archive-keyring.gpg] https://repo.radeon.com/rocm/apt/latest jammy main" > /etc/apt/sources.list.d/rocm.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends rocm-smi-lib \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    || (echo "ROCm install skipped (non-AMD host or repo unavailable)" && rm -rf /var/lib/apt/lists/*)
 
-# Add ROCm to PATH
+# Add ROCm to PATH (no-op if not installed)
 ENV PATH="/opt/rocm/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH}"
+
+# NVIDIA GPU: nvidia-smi is injected at runtime by the NVIDIA Container Toolkit.
+# No install needed here — just ensure NVIDIA_VISIBLE_DEVICES is set in docker-compose.
 
 # Install Python dependencies
 COPY agent/requirements.txt .

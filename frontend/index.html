@@ -9,6 +9,10 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css?v=15">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 </head>
 <body>
     <div class="app">
@@ -68,6 +72,13 @@
                         <line x1="16" y1="17" x2="8" y2="17"/>
                     </svg>
                     <span>Logs Search</span>
+                </a>
+                <a href="#" class="nav-item" data-view="terminal">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="4 17 10 11 4 5"/>
+                        <line x1="12" y1="19" x2="20" y2="19"/>
+                    </svg>
+                    <span>Terminal</span>
                 </a>
             </nav>
             
@@ -645,6 +656,24 @@
                         </div>
                     </div>
                 </div>
+            </section>
+
+            <!-- Terminal View -->
+            <section id="terminal-view" class="view">
+                <header class="view-header">
+                    <h1>Terminal</h1>
+                    <div class="terminal-controls">
+                        <span id="terminal-status" class="terminal-status disconnected">Disconnected</span>
+                        <button class="btn btn-secondary" id="terminal-reconnect-btn" onclick="reconnectTerminal()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                                <polyline points="23 4 23 10 17 10"/>
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                            </svg>
+                            Reconnect
+                        </button>
+                    </div>
+                </header>
+                <div id="terminal-container" class="terminal-wrapper"></div>
             </section>
 
             <!-- Container Detail Modal -->
