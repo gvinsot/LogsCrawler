@@ -1,7 +1,4 @@
-"""Main entry point for LogsCrawler.
-
-Build: 2026-03-02-force-redeploy
-"""
+"""Main entry point for LogsCrawler."""
 
 import logging
 import uvicorn
