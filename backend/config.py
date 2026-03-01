@@ -108,6 +108,8 @@ class AuthConfig(BaseModel):
     password: str = "changeme"
     jwt_secret: str = ""
     jwt_expiry_hours: int = 24
+    # Shared key for agent-to-backend API authentication
+    agent_key: str = ""
 
 
 class Settings(BaseSettings):
@@ -224,9 +226,13 @@ def load_config() -> Settings:
     load_env(settings.auth, "password", "LOGSCRAWLER_AUTH__PASSWORD")
     load_env(settings.auth, "jwt_secret", "LOGSCRAWLER_AUTH__JWT_SECRET")
     load_env(settings.auth, "jwt_expiry_hours", "LOGSCRAWLER_AUTH__JWT_EXPIRY_HOURS", int)
+    load_env(settings.auth, "agent_key", "LOGSCRAWLER_AUTH__AGENT_KEY")
     # Auto-generate JWT secret if not provided
     if not settings.auth.jwt_secret:
         settings.auth.jwt_secret = uuid.uuid4().hex
+    # Auto-generate agent key if not provided
+    if not settings.auth.agent_key:
+        settings.auth.agent_key = uuid.uuid4().hex
 
     # GitHub settings
     load_env(settings.github, "token", "LOGSCRAWLER_GITHUB__TOKEN")

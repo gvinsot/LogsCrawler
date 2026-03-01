@@ -98,9 +98,10 @@ services:
 
       # Authentication
       - LOGSCRAWLER_AUTH__USERNAME=${LOGSCRAWLER_AUTH__USERNAME:-admin}
-      - LOGSCRAWLER_AUTH__PASSWORD=${LOGSCRAWLER_AUTH__PASSWORD}
-      - LOGSCRAWLER_AUTH__JWT_SECRET=${LOGSCRAWLER_AUTH__JWT_SECRET}
+      - LOGSCRAWLER_AUTH__PASSWORD=${LOGSCRAWLER_AUTH__PASSWORD:-changeme}
+      - LOGSCRAWLER_AUTH__JWT_SECRET=${LOGSCRAWLER_AUTH__JWT_SECRET:-}
       - LOGSCRAWLER_AUTH__JWT_EXPIRY_HOURS=${LOGSCRAWLER_AUTH__JWT_EXPIRY_HOURS:-24}
+      - LOGSCRAWLER_AUTH__AGENT_KEY=${LOGSCRAWLER_AUTH__AGENT_KEY:-}
 
       # Swarm manager config - queries Swarm API to list all containers/services
       # Collection is disabled (agents_only=true), this is only for listing
@@ -193,6 +194,9 @@ services:
 
       # Initial log lines to fetch
       - AGENT_LOG_LINES_PER_FETCH=500
+
+      # Authentication key for backend API (must match LOGSCRAWLER_AUTH__AGENT_KEY)
+      - AGENT_AUTH_KEY=${LOGSCRAWLER_AUTH__AGENT_KEY:-}
     networks:
       - internal
     depends_on:

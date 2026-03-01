@@ -22,18 +22,26 @@ class ActionPoller:
         agent_id: str,
         docker_collector: DockerCollector,
         poll_interval: int = 2,
+        auth_key: str = "",
     ):
         self.backend_url = backend_url.rstrip("/")
         self.agent_id = agent_id
         self.docker = docker_collector
         self.poll_interval = poll_interval
+        self.auth_key = auth_key
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
+
+    def _auth_headers(self) -> dict:
+        """Return auth headers for backend requests."""
+        if self.auth_key:
+            return {"Authorization": f"Bearer {self.auth_key}"}
+        return {}
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(headers=self._auth_headers())
         return self._session
 
     async def close(self):

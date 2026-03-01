@@ -80,6 +80,7 @@ class Agent:
             agent_id=self.config.agent_id,
             docker_collector=self.docker,
             poll_interval=self.config.action_poll_interval,
+            auth_key=self.config.auth_key,
         )
 
     async def start(self):

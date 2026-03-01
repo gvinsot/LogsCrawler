@@ -38,6 +38,9 @@ class AgentSettings(BaseSettings):
     # Collection settings
     log_lines_per_fetch: int = 500
 
+    # Authentication key for backend API
+    auth_key: str = ""
+
     class Config:
         env_prefix = "AGENT_"
         env_nested_delimiter = "__"
@@ -92,5 +95,8 @@ def load_agent_config() -> AgentSettings:
     load_env(settings, "metrics_interval", "AGENT_METRICS_INTERVAL", int)
     load_env(settings, "action_poll_interval", "AGENT_ACTION_POLL_INTERVAL", int)
     load_env(settings, "log_lines_per_fetch", "AGENT_LOG_LINES_PER_FETCH", int)
+
+    # Auth
+    load_env(settings, "auth_key", "AGENT_AUTH_KEY")
 
     return settings

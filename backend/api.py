@@ -112,13 +112,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# CORS middleware - restricted to same-origin; only needed for dev/proxy setups
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -128,15 +128,38 @@ app.add_middleware(
 _AUTH_EXEMPT_PREFIXES = (
     "/api/auth/login",
     "/api/health",
-    "/api/agent/",
     "/static/",
 )
 _AUTH_EXEMPT_EXACT = ("/", "/api/health")
 
+# Login rate limiting (in-memory)
+_login_attempts: Dict[str, List[float]] = {}
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW_SECONDS = 60
+
+
+def _is_rate_limited(client_ip: str) -> bool:
+    """Check if a client IP is rate-limited for login attempts."""
+    import time
+    now = time.time()
+    attempts = _login_attempts.get(client_ip, [])
+    # Remove old attempts outside the window
+    attempts = [t for t in attempts if now - t < _LOGIN_WINDOW_SECONDS]
+    _login_attempts[client_ip] = attempts
+    return len(attempts) >= _LOGIN_MAX_ATTEMPTS
+
+
+def _record_login_attempt(client_ip: str):
+    """Record a failed login attempt."""
+    import time
+    if client_ip not in _login_attempts:
+        _login_attempts[client_ip] = []
+    _login_attempts[client_ip].append(time.time())
+
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Verify JWT token on all /api/ endpoints (except exempt paths)."""
+    """Verify authentication on all /api/ endpoints."""
     path = request.url.path
 
     # Skip auth for exempt paths
@@ -147,8 +170,15 @@ async def auth_middleware(request: Request, call_next):
     if not path.startswith("/api/"):
         return await call_next(request)
 
-    # Extract Bearer token
     auth_header = request.headers.get("Authorization", "")
+
+    # Agent endpoints: validate shared agent key
+    if path.startswith("/api/agent/"):
+        if not auth_header.startswith("Bearer ") or auth_header[7:] != settings.auth.agent_key:
+            return JSONResponse(status_code=401, content={"detail": "Invalid agent key"})
+        return await call_next(request)
+
+    # All other /api/ endpoints: validate JWT Bearer token
     if not auth_header.startswith("Bearer "):
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
 
@@ -167,6 +197,11 @@ async def auth_middleware(request: Request, call_next):
 @app.post("/api/auth/login")
 async def auth_login(request: Request):
     """Authenticate and return a JWT token."""
+    client_ip = request.client.host if request.client else "unknown"
+
+    if _is_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+
     body = await request.json()
     username = body.get("username", "")
     password = body.get("password", "")
@@ -175,6 +210,8 @@ async def auth_login(request: Request):
         token = create_token(username, settings.auth.jwt_secret, settings.auth.jwt_expiry_hours)
         return {"token": token}
 
+    _record_login_attempt(client_ip)
+    logger.warning("Failed login attempt", username=username, client_ip=client_ip)
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
@@ -1269,8 +1306,8 @@ async def build_stack(
                 action.status = "cancelled"
         except Exception as e:
             import traceback
-            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            logger.exception("Background build failed", repo=repo_name, error=str(e))
+            error_detail = f"{type(e).__name__}: {e}"
+            logger.exception("Background build failed", repo=repo_name, error=str(e), traceback=traceback.format_exc())
             action.status = "failed"
             action.result = {"success": False, "output": error_detail, "action": "build", "repo": repo_name}
             action.append_output(error_detail)
@@ -1319,8 +1356,8 @@ async def deploy_stack(
                 action.status = "cancelled"
         except Exception as e:
             import traceback
-            error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            logger.exception("Background deploy failed", repo=repo_name, error=str(e))
+            error_detail = f"{type(e).__name__}: {e}"
+            logger.exception("Background deploy failed", repo=repo_name, error=str(e), traceback=traceback.format_exc())
             action.status = "failed"
             action.result = {"success": False, "output": error_detail, "action": "deploy", "repo": repo_name}
             action.append_output(error_detail)
