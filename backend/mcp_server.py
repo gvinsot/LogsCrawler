@@ -359,5 +359,9 @@ def _get_deployer_and_host():
 
 
 def get_mcp_app():
-    """Return the ASGI app for the MCP server (to be mounted on FastAPI at /mcp)."""
-    return mcp.streamable_http_app(path="/mcp")
+    """Return the ASGI app for the MCP server.
+
+    The SDK serves internally on /mcp, and FastAPI mounts this at /ai,
+    so the full endpoint is /ai/mcp.
+    """
+    return mcp.streamable_http_app()

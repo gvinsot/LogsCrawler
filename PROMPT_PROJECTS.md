@@ -53,24 +53,21 @@ networks:
 Pour créer une solution intégrée avec le swarm, il faut créer:
 - un dossier devops
 
-Puis dans ce dossier devops ajouter 
+Puis dans ce dossier devops ajouter
 - un fichier docker-compose.swarm.yml qui contiendra la description des déploiements pour le projet.
-- des fichier docker-compose.pre.sh et docker-compose.post.sh qui seront automatiquement exécutés respectivement avant et après le déploiement du docker-compose.swarm.yml
 
 **Example de structure de fichiers**
 
 ```
 mon-projet/
 ├── devops/
-│   ├── docker-compose.pre.sh          # Script exécuté avant le déploiement (optionnel)
 │   ├── docker-compose.swarm.yml       # Fichier de stack Docker Swarm (requis)
-│   ├── docker-compose.post.sh         # Script exécuté après le déploiement (optionnel)
 │   ├── .env.example                   # Exemple de fichier .env
 │   └── .env                           # Variables d'environnement pour le déploiement
 ├── my-app/
 │   ├── Dockerfile                     # Dockerfile pour construire l'image
 │   └─── src/                           # Code source de l'application
-│       └── ...       
+│       └── ...
 ├── .env                               # Variables d'environnement pour le déploiement
 ├── .env.example                       # Exemple de fichier .env
 └── README.md                          # Documentation du projet
@@ -384,3 +381,55 @@ deploy:
 > constraints:
 >   - node.labels.gpu == none
 > ```
+
+## Opérations via MCP (Model Context Protocol)
+
+LogsCrawler expose un serveur MCP permettant aux agents IA d'interagir avec la plateforme. Le MCP est sécurisé par authentification Bearer token.
+
+### Endpoint
+
+```
+POST https://<TRAEFIK_HOST>/ai/mcp
+```
+
+### Authentification
+
+Chaque requête MCP nécessite un header `Authorization: Bearer <token>`.
+Deux types de tokens sont acceptés :
+- **Clé API MCP** : configurée via `LOGSCRAWLER_MCP__API_KEY` (auto-générée au démarrage si non fournie, affichée dans les logs)
+- **JWT** : les mêmes tokens utilisés par l'interface web (obtenus via `/api/auth/login`)
+
+### Tools disponibles
+
+| Tool | Description | Paramètres |
+|------|-------------|------------|
+| `list_stacks` | Lister les stacks disponibles (repos GitHub starred) | aucun |
+| `build_stack` | Builder une image Docker depuis un repo GitHub | `repo_name`, `ssh_url`, `version`, `branch?`, `commit?` |
+| `deploy_stack` | Déployer une stack sur Docker Swarm | `repo_name`, `ssh_url`, `version`, `tag?` |
+| `list_containers` | Lister les containers et leur état | `host?`, `status?` |
+| `list_computers` | Lister les hosts/machines monitorés | aucun |
+| `search_logs` | Rechercher dans les logs collectés | `query?`, `hosts?`, `containers?`, `levels?`, `start_time?`, `end_time?`, `size?` |
+| `get_action_status` | Vérifier le statut d'un build/deploy | `action_id` |
+
+### Configuration dans Claude Desktop
+
+```json
+{
+  "mcpServers": {
+    "logscrawler": {
+      "url": "https://<TRAEFIK_HOST>/ai/mcp",
+      "transport": "streamable-http",
+      "headers": {
+        "Authorization": "Bearer <MCP_API_KEY>"
+      }
+    }
+  }
+}
+```
+
+### Variables d'environnement MCP
+
+| Variable | Description | Défaut |
+|----------|-------------|--------|
+| `LOGSCRAWLER_MCP__ENABLED` | Activer/désactiver le serveur MCP | `true` |
+| `LOGSCRAWLER_MCP__API_KEY` | Clé API dédiée pour le MCP | auto-générée (UUID) |

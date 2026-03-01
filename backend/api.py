@@ -120,8 +120,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Mount MCP server at /mcp with its own authentication middleware
-app.mount("/mcp", MCPAuthMiddleware(get_mcp_app()))
+# Mount MCP server at /ai with its own authentication middleware
+# The SDK serves internally on /mcp, so the full endpoint is /ai/mcp
+app.mount("/ai", MCPAuthMiddleware(get_mcp_app()))
 
 # CORS middleware - restricted to same-origin; only needed for dev/proxy setups
 app.add_middleware(
@@ -140,7 +141,7 @@ _AUTH_EXEMPT_PREFIXES = (
     "/api/auth/login",
     "/api/health",
     "/static/",
-    "/mcp",  # MCP has its own auth middleware
+    "/ai",  # MCP has its own auth middleware
 )
 _AUTH_EXEMPT_EXACT = ("/", "/api/health")
 
