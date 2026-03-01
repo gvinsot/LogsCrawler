@@ -1770,8 +1770,13 @@ async def _handle_local_terminal(websocket, cols, rows, session_id):
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
+    if settings.run_user:
+        shell_cmd = ["/bin/su", "-", settings.run_user]
+    else:
+        shell_cmd = ["/bin/bash", "--login"]
+
     process = await asyncio.create_subprocess_exec(
-        "/bin/bash", "--login",
+        *shell_cmd,
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=slave_fd,

@@ -4055,6 +4055,8 @@ let terminalInstance = null;
 let terminalFitAddon = null;
 let terminalSocket = null;
 let terminalInitialized = false;
+let terminalDataDisposable = null;
+let terminalResizeDisposable = null;
 
 function initTerminal() {
     if (terminalInitialized) return;
@@ -4135,12 +4137,14 @@ function connectTerminal() {
 
     terminalSocket.onopen = () => {
         updateTerminalStatus('connected');
-        terminalInstance.onData((data) => {
+        if (terminalDataDisposable) terminalDataDisposable.dispose();
+        if (terminalResizeDisposable) terminalResizeDisposable.dispose();
+        terminalDataDisposable = terminalInstance.onData((data) => {
             if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
                 terminalSocket.send(data);
             }
         });
-        terminalInstance.onResize(({ cols, rows }) => {
+        terminalResizeDisposable = terminalInstance.onResize(({ cols, rows }) => {
             if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
                 terminalSocket.send(JSON.stringify({ type: 'resize', cols, rows }));
             }

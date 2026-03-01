@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # OS user for running terminal and git commands locally (via su)
+    run_user: Optional[str] = None
+
     # OpenSearch
     opensearch: OpenSearchConfig = OpenSearchConfig()
 
@@ -234,6 +237,9 @@ def load_config() -> Settings:
     if not settings.auth.agent_key:
         settings.auth.agent_key = uuid.uuid4().hex
 
+    # Run user
+    load_env(settings, "run_user", "LOGSCRAWLER_RUN_USER")
+
     # GitHub settings
     load_env(settings.github, "token", "LOGSCRAWLER_GITHUB__TOKEN")
     load_env(settings.github, "username", "LOGSCRAWLER_GITHUB__USERNAME")
@@ -253,3 +259,11 @@ def load_config() -> Settings:
 
 # Global settings instance
 settings = load_config()
+
+
+def wrap_command_for_user(command: str) -> str:
+    """Wrap a shell command with su if LOGSCRAWLER_RUN_USER is set."""
+    if settings.run_user:
+        escaped = command.replace("'", "'\"'\"'")
+        return f"su - {settings.run_user} -c '{escaped}'"
+    return command

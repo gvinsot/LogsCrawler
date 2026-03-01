@@ -606,8 +606,9 @@ class StackDeployer:
 
     async def _run_local_streaming(self, command: str, output_callback=None, cancel_event=None) -> tuple[bool, str]:
         """Run a command locally with streaming output support."""
+        from .config import wrap_command_for_user
         proc = await asyncio.create_subprocess_shell(
-            command,
+            wrap_command_for_user(command),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
