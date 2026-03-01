@@ -1,6 +1,6 @@
-# Web Framework
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
+# Web Framework (pinned - auth middleware depends on starlette 0.35.x behavior)
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
 python-multipart>=0.0.9
 
 # SSH & System
@@ -18,8 +18,8 @@ aiohttp>=3.9.1
 # Scheduling
 apscheduler>=3.10.4
 
-# Authentication
-PyJWT>=2.8.0
+# Authentication (pinned - newer versions may change jwt.decode behavior)
+PyJWT==2.8.0
 passlib[bcrypt]>=1.7.4
 
 # MCP (Model Context Protocol)
