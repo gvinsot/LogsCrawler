@@ -438,6 +438,31 @@ DEPLOY_COMPOSE="$DEVOPS_PATH/${COMPOSE_FILE%.yml}.deploy.yml"
 log_info "Updating image tags to version: $VERSION"
 update_image_tags "$COMPOSE_PATH" "$VERSION" "$DEPLOY_COMPOSE"
 
+# ----------------------------------------------------------------------------
+# Convert sensitive env vars (*_SECRET, *_KEY, *_TOKEN, *_PASSWORD) into
+# Docker secrets and rewrite the compose file accordingly.
+# ----------------------------------------------------------------------------
+SECRETS_PROCESSOR="$SCRIPT_DIR/process_secrets.py"
+if [ -f "$SECRETS_PROCESSOR" ]; then
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+    if [ -n "$PYTHON_BIN" ]; then
+        log_info "Converting sensitive env vars into Docker secrets..."
+        TMP_PROCESSED="${DEPLOY_COMPOSE}.processed"
+        if "$PYTHON_BIN" "$SECRETS_PROCESSOR" "$DEPLOY_COMPOSE" "$TMP_PROCESSED" "$STACK_NAME"; then
+            mv "$TMP_PROCESSED" "$DEPLOY_COMPOSE"
+            log_success "Sensitive env vars processed"
+        else
+            log_error "Failed to process secrets — aborting deployment"
+            rm -f "$DEPLOY_COMPOSE" "$TMP_PROCESSED"
+            exit 1
+        fi
+    else
+        log_warning "python not found — skipping Docker secrets conversion"
+    fi
+else
+    log_warning "process_secrets.py not found at $SECRETS_PROCESSOR — skipping"
+fi
+
 # Function to resolve environment variables in image names
 # If the image has a version tag, use it; otherwise resolve variables
 resolve_image_name() {

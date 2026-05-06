@@ -20,6 +20,12 @@ from typing import List, Optional
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
+from shared.secrets import load_docker_secrets_into_env
+
+# Load Docker secrets (mounted at /run/secrets/<NAME>) into the environment so
+# the existing pydantic / os.environ based loading picks them up transparently.
+load_docker_secrets_into_env()
+
 
 class HostConfig(BaseModel):
     """Configuration for a single host."""
