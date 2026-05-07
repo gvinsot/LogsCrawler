@@ -615,6 +615,20 @@ run_hook "$POST_SCRIPT_PATH" "$POST_SCRIPT" "$DEVOPS_PATH" || {
 }
 
 # ============================================================================
+# Step 8b: Force-update privatenetwork_traefik to resync reverse proxy
+# ============================================================================
+# Traefik can keep stale backend container IPs after a redeploy, causing 502s.
+# Skip when deploying the privatenetwork stack itself (already updated above).
+if [ "$STACK_NAME" != "privatenetwork" ] && docker service inspect privatenetwork_traefik >/dev/null 2>&1; then
+    log_info "Force-updating privatenetwork_traefik to resync reverse proxy..."
+    if docker service update --force privatenetwork_traefik >/dev/null 2>&1; then
+        log_success "privatenetwork_traefik resynced"
+    else
+        log_warning "Could not force-update privatenetwork_traefik (continuing)"
+    fi
+fi
+
+# ============================================================================
 # Step 9: Cleanup and restore
 # ============================================================================
 # Remove temporary deploy file
