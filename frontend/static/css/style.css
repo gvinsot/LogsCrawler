@@ -3568,6 +3568,7 @@ a.btn {
 .transition-badge.badge-manual { background: rgba(251, 191, 36, 0.2); color: var(--status-warning); }
 .transition-badge.badge-agent { background: rgba(139, 92, 246, 0.2); color: var(--accent-primary); }
 .transition-badge.badge-auto { background: rgba(14, 165, 233, 0.15); color: var(--accent-secondary); }
+.transition-badge.badge-qa { background: rgba(34, 197, 94, 0.18); color: var(--status-success); }
 
 /* Transition config modal */
 .transition-mode-options {

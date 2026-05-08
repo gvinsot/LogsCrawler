@@ -1221,7 +1221,7 @@ class StackDeployer:
         return result
 
     async def deploy(self, repo_name: str, ssh_url: str, version: str = "1.0",
-                    tag: str = None,
+                    tag: str = None, qa: bool = False,
                     output_callback=None, cancel_event=None) -> Dict[str, Any]:
         """Deploy a stack from a repository.
 
@@ -1230,6 +1230,8 @@ class StackDeployer:
             ssh_url: SSH URL for cloning if needed
             version: Version tag for deployment
             tag: Optional specific tag to deploy (e.g., v1.0.5)
+            qa: When True, deploy to the isolated QA environment (stack
+                prefixed with 'qa-', domains prefixed with 'qa.').
             output_callback: Optional callable(str) for streaming output
             cancel_event: Optional asyncio.Event for cancellation
 
@@ -1237,7 +1239,7 @@ class StackDeployer:
             Dict with success status, output, and timing info
         """
         start_time = datetime.utcnow()
-        
+
         # If tag is provided, extract version from it (e.g., v1.0.5 -> 1.0.5)
         deploy_version = tag if tag else version
         # Strip leading 'v' from version if present
@@ -1249,12 +1251,14 @@ class StackDeployer:
         checkout_ref = tag
         if not checkout_ref and deploy_version:
             checkout_ref = f"v{deploy_version}"
-        
+
+        action_label = "qa-deploy" if qa else "deploy"
         result = {
-            "action": "deploy",
+            "action": action_label,
             "repo": repo_name,
             "version": deploy_version,
             "tag": tag,
+            "qa": qa,
             "success": False,
             "output": "",
             "started_at": start_time.isoformat(),
@@ -1275,21 +1279,22 @@ class StackDeployer:
             repo_path = f"{repos_path}/{repo_name}"
 
             # Pass absolute repo_path to avoid path computation mismatch
-            # Script format: deploy-service.sh <folder> <version> [branch/tag]
-            deploy_cmd = f"cd {_shell_quote_path(scripts_path)} && bash deploy-service.sh {_shell_quote_path(repo_path)} {shlex.quote(deploy_version)}"
+            # Script format: deploy-service.sh [--qa] <folder> <version> [branch/tag]
+            qa_flag = "--qa " if qa else ""
+            deploy_cmd = f"cd {_shell_quote_path(scripts_path)} && bash deploy-service.sh {qa_flag}{_shell_quote_path(repo_path)} {shlex.quote(deploy_version)}"
             if checkout_ref:
                 deploy_cmd += f" {shlex.quote(checkout_ref)}"
 
             if output_callback and clone_msg:
                 for line in clone_msg.split('\n'):
                     output_callback(line)
-            
+
             # Check cancellation before main deploy
             if cancel_event and cancel_event.is_set():
                 result["output"] = clone_msg + "\n[Cancelled by user]"
                 return result
 
-            logger.info("Running deploy", repo=repo_name, version=deploy_version, tag=tag)
+            logger.info("Running deploy", repo=repo_name, version=deploy_version, tag=tag, qa=qa)
             success, output = await self._run_command(deploy_cmd, output_callback=output_callback, cancel_event=cancel_event)
 
             result["success"] = success
@@ -1297,7 +1302,7 @@ class StackDeployer:
 
         except Exception as e:
             result["output"] = str(e)
-            logger.error("Deploy failed", repo=repo_name, error=str(e))
+            logger.error("Deploy failed", repo=repo_name, error=str(e), qa=qa)
 
         end_time = datetime.utcnow()
         result["completed_at"] = end_time.isoformat()

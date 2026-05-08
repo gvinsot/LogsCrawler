@@ -2219,6 +2219,7 @@ def _set_pipeline(
     version: str,
     build_id=_UNSET,
     test_id=_UNSET,
+    qa_id=_UNSET,
     deploy_id=_UNSET,
     log_lines: Optional[List[str]] = None,
 ) -> None:
@@ -2229,9 +2230,9 @@ def _set_pipeline(
     """
     pipeline_state.set_pipeline(
         repo_name, stage, status, version,
-        build_id=build_id, test_id=test_id, deploy_id=deploy_id,
+        build_id=build_id, test_id=test_id, qa_id=qa_id, deploy_id=deploy_id,
     )
-    if log_lines and stage in ("build", "test", "deploy"):
+    if log_lines and stage in ("build", "test", "qa", "deploy"):
         pipeline_state.update_log(repo_name, stage, log_lines)
 
 
@@ -3042,13 +3043,50 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
                     pipeline_state.record_gate(repo_name, "test_to_deploy", True, "Agent mode but no LLM configured, auto-approved", version=built_version)
             # else: "auto" or "auto_with_success" — proceed (success already checked above)
 
+            deploy_tag = tag if tag else (f"v{built_version}" if built_version else None)
+
+            # ── Optional Step 2.5: QA deploy (when test_to_deploy.qa_enabled) ──
+            qa_id = None
+            qa_enabled = bool(_td_cfg.get("qa_enabled", False)) if _td_cfg else False
+            if qa_enabled:
+                qa_id = str(uuid.uuid4())[:8]
+                qa_action = BackgroundAction(qa_id, "qa-deploy", repo_name)
+                _background_actions[qa_id] = qa_action
+                _set_pipeline(repo_name, "qa", "running", built_version,
+                              build_id=build_id, test_id=test_id, qa_id=qa_id, deploy_id=None)
+
+                logger.info("Pipeline: starting QA deploy", repo=repo_name, action_id=qa_id, tag=deploy_tag)
+                qa_result = await deployer.deploy(
+                    repo_name, ssh_url, version=built_version,
+                    tag=deploy_tag, qa=True,
+                    output_callback=qa_action.append_output,
+                    cancel_event=qa_action.cancel_event,
+                )
+                qa_result["host"] = host_name
+                qa_result["auto_triggered"] = True
+                qa_action.result = qa_result
+                qa_action.status = "completed" if qa_result.get("success") else "failed"
+
+                if not qa_result.get("success"):
+                    _set_pipeline(repo_name, "qa", "failed", built_version,
+                                  build_id=build_id, test_id=test_id, qa_id=qa_id, deploy_id=None,
+                                  log_lines=qa_action.output_lines)
+                    logger.warning("Pipeline: QA deploy failed", repo=repo_name)
+                    await _notify_agent_failure("qa", repo_name, built_version or "", qa_result.get("output", ""))
+                    return
+
+                _set_pipeline(repo_name, "qa", "success", built_version,
+                              build_id=build_id, test_id=test_id, qa_id=qa_id, deploy_id=None,
+                              log_lines=qa_action.output_lines)
+                logger.info("Pipeline: QA deploy succeeded", repo=repo_name, version=built_version)
+
             # ── Step 3: Deploy ──
             deploy_id = str(uuid.uuid4())[:8]
             deploy_action = BackgroundAction(deploy_id, "deploy", repo_name)
             _background_actions[deploy_id] = deploy_action
-            _set_pipeline(repo_name, "deploy", "running", built_version, build_id=build_id, test_id=test_id, deploy_id=deploy_id)
+            _set_pipeline(repo_name, "deploy", "running", built_version,
+                          build_id=build_id, test_id=test_id, qa_id=qa_id, deploy_id=deploy_id)
 
-            deploy_tag = tag if tag else (f"v{built_version}" if built_version else None)
             logger.info("Pipeline: starting deploy", repo=repo_name, action_id=deploy_id, tag=deploy_tag)
             deploy_result = await deployer.deploy(
                 repo_name, ssh_url, version=built_version,
@@ -3062,10 +3100,10 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
             deploy_action.status = "completed" if deploy_result.get("success") else "failed"
 
             if deploy_result.get("success"):
-                _set_pipeline(repo_name, "done", "success", built_version, build_id=build_id, test_id=test_id, deploy_id=deploy_id, log_lines=deploy_action.output_lines)
+                _set_pipeline(repo_name, "done", "success", built_version, build_id=build_id, test_id=test_id, qa_id=qa_id, deploy_id=deploy_id, log_lines=deploy_action.output_lines)
                 logger.info("Pipeline: deploy succeeded", repo=repo_name, version=built_version)
             else:
-                _set_pipeline(repo_name, "deploy", "failed", built_version, build_id=build_id, test_id=test_id, deploy_id=deploy_id, log_lines=deploy_action.output_lines)
+                _set_pipeline(repo_name, "deploy", "failed", built_version, build_id=build_id, test_id=test_id, qa_id=qa_id, deploy_id=deploy_id, log_lines=deploy_action.output_lines)
                 await _notify_agent_failure("deploy", repo_name, built_version or "", deploy_result.get("output", ""))
 
         except Exception as e:
@@ -3225,7 +3263,12 @@ async def get_transition_config(repo_name: str, transition: str):
 
 @app.put("/api/stacks/pipeline/{repo_name}/transition/{transition}")
 async def set_transition_config(repo_name: str, transition: str, request: Request):
-    """Set per-project transition config for a specific transition."""
+    """Set per-project transition config for a specific transition.
+
+    For test_to_deploy, accepts an optional ``qa_enabled`` boolean: when true,
+    the pipeline runs an isolated QA deploy (stack prefixed ``qa-``, domains
+    prefixed ``qa.``) before the production deploy.
+    """
     valid = {"version_to_build", "build_to_test", "test_to_deploy"}
     if transition not in valid:
         return JSONResponse({"error": "Invalid transition"}, status_code=400)
@@ -3234,9 +3277,13 @@ async def set_transition_config(repo_name: str, transition: str, request: Reques
     valid_modes = {"auto", "auto_with_success", "agent", "manual"}
     if mode not in valid_modes:
         return JSONResponse({"error": f"Invalid mode. Valid: {', '.join(sorted(valid_modes))}"}, status_code=400)
-    pipeline_state.set_transition_config(repo_name, transition, {"mode": mode})
-    logger.info("Transition config updated", repo=repo_name, transition=transition, mode=mode)
-    return {"saved": True, "repo": repo_name, "transition": transition, "mode": mode}
+    cfg: Dict[str, Any] = {"mode": mode}
+    if transition == "test_to_deploy":
+        cfg["qa_enabled"] = bool(body.get("qa_enabled", False))
+    pipeline_state.set_transition_config(repo_name, transition, cfg)
+    logger.info("Transition config updated", repo=repo_name, transition=transition,
+                mode=mode, qa_enabled=cfg.get("qa_enabled"))
+    return {"saved": True, "repo": repo_name, "transition": transition, **cfg}
 
 
 @app.get("/api/stacks/auto-build/status")

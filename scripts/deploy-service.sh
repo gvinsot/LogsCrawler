@@ -5,7 +5,14 @@
 # Deploys a service stack using previously built and tagged Docker images
 #
 # Usage:
-#   ./deploy-service.sh <folder> <version> [branch] [commit]
+#   ./deploy-service.sh [--qa] <folder> <version> [branch] [commit]
+#
+# Options:
+#   --qa    Deploy as QA environment: prefix the stack name with "qa-" and
+#           prepend "qa." to TRAEFIK_HOST and any *_HOST / *_DOMAIN variables.
+#           This produces a fully isolated environment alongside production
+#           (e.g. https://pulsarteam.io → https://qa.pulsarteam.io,
+#           stack "pulsarcd" → "qa-pulsarcd").
 #
 # Arguments:
 #   folder  - Repository folder name (e.g., "Art Retrainer") or full path
@@ -15,7 +22,7 @@
 #
 # Examples:
 #   ./deploy-service.sh "Art Retrainer" 42
-#   ./deploy-service.sh "Art Retrainer" 42 main
+#   ./deploy-service.sh --qa "Art Retrainer" 42 main
 #   ./deploy-service.sh "Art Retrainer" 42 main abc1234
 #   ./deploy-service.sh "Art Retrainer" main          # Deploy using branch tag
 #
@@ -43,6 +50,11 @@ DEVOPS_FOLDER="devops"
 COMPOSE_FILE="docker-compose.swarm.yml"
 PRE_SCRIPT="docker-compose.pre.sh"
 POST_SCRIPT="docker-compose.post.sh"
+
+# QA mode flags (set via --qa)
+QA_MODE=false
+QA_STACK_PREFIX="qa-"
+QA_DOMAIN_PREFIX="qa."
 
 # Colors for output
 RED='\033[0;31m'
@@ -72,7 +84,10 @@ log_error() {
 }
 
 show_usage() {
-    echo "Usage: $0 <folder> <version> [branch] [commit]"
+    echo "Usage: $0 [--qa] <folder> <version> [branch] [commit]"
+    echo ""
+    echo "Options:"
+    echo "  --qa    Deploy as QA environment (stack prefixed 'qa-', domains 'qa.')"
     echo ""
     echo "Arguments:"
     echo "  folder  - Repository folder name (sibling to this repo) or full path"
@@ -184,6 +199,30 @@ run_hook() {
 # Main Script
 # ============================================================================
 
+# Parse optional flags. Accept --qa anywhere before/among the positional args.
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --qa)
+            QA_MODE=true
+            shift
+            ;;
+        --help|-h)
+            show_usage
+            ;;
+        --)
+            shift
+            while [ $# -gt 0 ]; do POSITIONAL+=("$1"); shift; done
+            break
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
+
 # Check arguments
 if [ $# -lt 2 ]; then
     log_error "Missing required arguments"
@@ -227,16 +266,26 @@ else
 fi
 
 # Derive stack name from the resolved REPO_PATH (not raw REPO_FOLDER)
-STACK_NAME=$(get_stack_name "$REPO_PATH")
+BASE_STACK_NAME=$(get_stack_name "$REPO_PATH")
+if [ "$QA_MODE" = "true" ]; then
+    STACK_NAME="${QA_STACK_PREFIX}${BASE_STACK_NAME}"
+else
+    STACK_NAME="$BASE_STACK_NAME"
+fi
 
 echo ""
 echo "=============================================="
-echo "  Deploy Service"
+if [ "$QA_MODE" = "true" ]; then
+    echo "  Deploy Service (QA environment)"
+else
+    echo "  Deploy Service"
+fi
 echo "=============================================="
 echo ""
 log_info "Repository: $REPO_PATH"
 log_info "DevOps folder: $DEVOPS_PATH"
 log_info "Stack name: $STACK_NAME"
+[ "$QA_MODE" = "true" ] && log_info "Mode: QA (domains will be prefixed with '${QA_DOMAIN_PREFIX}')"
 log_info "Version: $VERSION"
 [ -n "$BRANCH" ] && log_info "Branch: $BRANCH"
 [ -n "$COMMIT" ] && log_info "Commit: $COMMIT"
@@ -421,6 +470,53 @@ export DEPLOY_REGISTRY="$REGISTRY"
 export REGISTRY_URL="${REGISTRY_URL:-$REGISTRY}"
 export DOCKER_REGISTRY_URL="${DOCKER_REGISTRY_URL:-$REGISTRY}"
 export REPO_NAME="${REPO_NAME:-$STACK_NAME}"
+
+# ============================================================================
+# QA mode: prepend "qa." to host/domain env vars so the QA stack runs on
+# qa.<domain> instead of <domain>. Skip values that already start with "qa.".
+# ============================================================================
+if [ "$QA_MODE" = "true" ]; then
+    export DEPLOY_ENV="qa"
+
+    apply_qa_domain_prefix() {
+        local var_name="$1"
+        local cur_value="${!var_name:-}"
+        if [ -z "$cur_value" ]; then
+            return 0
+        fi
+        # Already prefixed? leave it alone
+        if [[ "$cur_value" == ${QA_DOMAIN_PREFIX}* ]]; then
+            return 0
+        fi
+        local new_value="${QA_DOMAIN_PREFIX}${cur_value}"
+        export "$var_name"="$new_value"
+        log_info "QA: ${var_name} = ${cur_value} → ${new_value}"
+    }
+
+    # Always rewrite TRAEFIK_HOST when present (most common case)
+    apply_qa_domain_prefix "TRAEFIK_HOST"
+
+    # Auto-detect any other *_HOST or *_DOMAIN env vars that look like
+    # public hostnames (contain a dot) and prefix them too.
+    while IFS='=' read -r name value; do
+        # Only consider matching variable names
+        case "$name" in
+            *_HOST|*_DOMAIN|HOST|DOMAIN)
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        # Skip already-handled and skip non-public values
+        [ "$name" = "TRAEFIK_HOST" ] && continue
+        # Must contain a dot (looks like a real domain) and no slashes/spaces
+        if [[ "$value" == *.* && "$value" != *" "* && "$value" != *"/"* ]]; then
+            apply_qa_domain_prefix "$name"
+        fi
+    done < <(env)
+else
+    export DEPLOY_ENV="prod"
+fi
 
 # ============================================================================
 # Step 4: Run pre-deployment script if it exists

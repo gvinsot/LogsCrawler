@@ -114,7 +114,9 @@ _MAX_GATE_DECISIONS = 10
 class PipelineEntry:
     """Pipeline state for a single repository."""
 
-    STAGES = ("build", "test", "deploy")
+    # The "qa" stage is optional and only used when the test_to_deploy transition
+    # has qa_enabled=true. It always exists in state but stays idle when disabled.
+    STAGES = ("build", "test", "qa", "deploy")
 
     def __init__(self):
         self.stages: Dict[str, StageState] = {
@@ -190,6 +192,7 @@ class PipelineEntry:
             "deployed_version": self.stages["deploy"].current_version,
             "build_action_id": self.stages["build"].action_id,
             "test_action_id": self.stages["test"].action_id,
+            "qa_action_id": self.stages["qa"].action_id,
             "deploy_action_id": self.stages["deploy"].action_id,
             "skip_build": self.skip_build,
             "project_name": self.project_name,
@@ -323,6 +326,7 @@ class PipelineStateManager:
         version: str,
         build_id=_UNSET,
         test_id=_UNSET,
+        qa_id=_UNSET,
         deploy_id=_UNSET,
     ):
         """Backward-compatible wrapper matching the old _set_pipeline signature.
@@ -337,6 +341,8 @@ class PipelineStateManager:
             entry.stages["build"].action_id = build_id
         if test_id is not _UNSET:
             entry.stages["test"].action_id = test_id
+        if qa_id is not _UNSET:
+            entry.stages["qa"].action_id = qa_id
         if deploy_id is not _UNSET:
             entry.stages["deploy"].action_id = deploy_id
 
@@ -414,7 +420,8 @@ class PipelineStateManager:
         Args:
             repo_name: Repository name
             transition: "version_to_build", "build_to_test" or "test_to_deploy"
-            config: {"mode": "auto"|"auto_with_success"|"agent"|"manual"}
+            config: {"mode": "auto"|"auto_with_success"|"agent"|"manual",
+                     "qa_enabled": bool (test_to_deploy only)}
         """
         valid_transitions = {"version_to_build", "build_to_test", "test_to_deploy"}
         valid_modes = {"auto", "auto_with_success", "agent", "manual"}
@@ -424,7 +431,11 @@ class PipelineStateManager:
         if mode not in valid_modes:
             return
         entry = self.get_or_create(repo_name)
-        entry.transition_configs[transition] = {"mode": mode}
+        new_config: Dict[str, Any] = {"mode": mode}
+        # test_to_deploy supports an optional QA-pre-deploy step
+        if transition == "test_to_deploy":
+            new_config["qa_enabled"] = bool(config.get("qa_enabled", False))
+        entry.transition_configs[transition] = new_config
         self._save()
 
     def get_transition_config(self, repo_name: str, transition: str) -> Dict[str, Any]:

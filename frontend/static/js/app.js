@@ -3947,9 +3947,15 @@ function renderStacksList() {
 
         // Pipeline step states
         const pipeline = stacksPipelineState[repo.name];
-        const stageOrder = { build: 1, test: 2, deploy: 3, done: 4 };
+        // Stage order: build → test → (qa) → deploy → done. QA is skipped unless enabled.
+        const stageOrder = { build: 1, test: 2, qa: 3, deploy: 4, done: 5 };
         const isBuildable = stacksBuildable[repo.name] !== false;  // default true if unknown
-        let versionStep = 'idle', buildStep = isBuildable ? 'idle' : 'skipped', testStep = 'idle', deployStep = 'idle';
+        // QA stage is enabled per-project via the test_to_deploy transition config
+        const qaEnabled = !!(pipeline && pipeline.transition_configs
+                          && pipeline.transition_configs.test_to_deploy
+                          && pipeline.transition_configs.test_to_deploy.qa_enabled);
+        let versionStep = 'idle', buildStep = isBuildable ? 'idle' : 'skipped',
+            testStep = 'idle', qaStep = qaEnabled ? 'idle' : 'skipped', deployStep = 'idle';
 
         // Whether build/test steps were part of this pipeline
         const hadBuild = pipeline ? !!pipeline.build_action_id : false;
@@ -3964,57 +3970,71 @@ function renderStacksList() {
         const effectiveHadTest = hadTest || versionAlreadyBuilt;
 
         const skipBuild = !isBuildable || (pipeline && pipeline.skip_build);
+        // QA step state derives from stageOrder index 3.
+        const _qa = (state) => qaEnabled ? state : 'skipped';
         if (pipeline && pipeline.status === 'running') {
             const cs = stageOrder[pipeline.stage] || 0;
             versionStep = 'success';
             buildStep = skipBuild ? 'skipped' : (cs === 1 ? 'running' : (effectiveHadBuild && cs > 1 ? 'success' : (cs > 1 ? 'idle' : 'pending')));
             testStep = cs === 2 ? 'running' : (effectiveHadTest && cs > 2 ? 'success' : (cs > 2 ? 'idle' : 'pending'));
-            deployStep = cs === 3 ? 'running' : 'pending';
+            qaStep = _qa(cs === 3 ? 'running' : (cs > 3 ? 'success' : 'pending'));
+            deployStep = cs === 4 ? 'running' : (cs > 4 ? 'success' : 'pending');
         } else if (pipeline && pipeline.status === 'gate_rejected') {
             const cs = stageOrder[pipeline.stage] || 0;
             versionStep = 'success';
             buildStep = skipBuild ? 'skipped' : (cs >= 1 ? 'success' : 'pending');
             testStep = cs === 1 ? 'gate_rejected' : (cs >= 2 ? 'success' : 'pending');
+            qaStep = _qa(cs >= 3 ? 'success' : 'pending');
             deployStep = cs === 2 ? 'gate_rejected' : 'pending';
         } else if (pipeline && pipeline.status === 'failed') {
             const cs = stageOrder[pipeline.stage] || 0;
             versionStep = 'success';
             buildStep = skipBuild ? 'skipped' : (cs === 1 ? 'failed' : (effectiveHadBuild && cs > 1 ? 'success' : (cs > 1 ? 'idle' : 'pending')));
             testStep = cs === 2 ? 'failed' : (effectiveHadTest && cs > 2 ? 'success' : (cs > 2 ? 'idle' : 'pending'));
-            deployStep = cs === 3 ? 'failed' : (cs > 3 ? 'success' : 'pending');
+            qaStep = _qa(cs === 3 ? 'failed' : (cs > 3 ? 'success' : 'pending'));
+            deployStep = cs === 4 ? 'failed' : (cs > 4 ? 'success' : 'pending');
         } else if (pipeline && pipeline.stage === 'done') {
             versionStep = 'success';
             buildStep = skipBuild ? 'skipped' : (effectiveHadBuild ? 'success' : 'idle');
             // Use actual per-stage status: if test failed but deploy was forced, show warning
             const testStageStatus = pipeline.stages && pipeline.stages.test ? pipeline.stages.test.status : null;
             testStep = testStageStatus === 'failed' ? 'warning' : (effectiveHadTest ? 'success' : 'idle');
+            const qaStageStatus = pipeline.stages && pipeline.stages.qa ? pipeline.stages.qa.status : null;
+            qaStep = _qa(qaStageStatus === 'success' ? 'success' : (qaStageStatus === 'failed' ? 'warning' : 'idle'));
             deployStep = 'success';
         } else if (pipeline && pipeline.status === 'success') {
             const cs = stageOrder[pipeline.stage] || 0;
             versionStep = 'success';
             buildStep = skipBuild ? 'skipped' : (effectiveHadBuild && cs >= 1 ? 'success' : (cs >= 1 ? 'idle' : 'pending'));
             testStep = effectiveHadTest && cs >= 2 ? 'success' : (cs >= 2 ? 'idle' : 'pending');
-            deployStep = cs >= 3 ? 'success' : 'pending';
+            qaStep = _qa(cs >= 3 ? 'success' : 'pending');
+            deployStep = cs >= 4 ? 'success' : 'pending';
         } else if (hasUpdate) {
-            versionStep = 'success'; buildStep = skipBuild ? 'skipped' : 'success'; testStep = 'success'; deployStep = 'pending';
+            versionStep = 'success'; buildStep = skipBuild ? 'skipped' : 'success'; testStep = 'success';
+            qaStep = _qa('pending'); deployStep = 'pending';
         } else if (untaggedCount > 0) {
-            versionStep = 'pending'; buildStep = skipBuild ? 'skipped' : 'pending'; testStep = 'pending'; deployStep = 'pending';
+            versionStep = 'pending'; buildStep = skipBuild ? 'skipped' : 'pending'; testStep = 'pending';
+            qaStep = _qa('pending'); deployStep = 'pending';
         } else if (pipeline && pipeline.status === 'idle' && isDeployed) {
             // Pipeline exists but is idle (e.g. after restart) — show per-stage statuses or success fallback
             const ds = pipeline.stages && pipeline.stages.deploy ? pipeline.stages.deploy.status : null;
             const bs = pipeline.stages && pipeline.stages.build ? pipeline.stages.build.status : null;
             const ts = pipeline.stages && pipeline.stages.test ? pipeline.stages.test.status : null;
+            const qs = pipeline.stages && pipeline.stages.qa ? pipeline.stages.qa.status : null;
             versionStep = 'success';
             buildStep = skipBuild ? 'skipped' : (bs === 'failed' ? 'failed' : (effectiveHadBuild ? 'success' : 'idle'));
             testStep = ts === 'failed' ? 'failed' : (effectiveHadTest ? 'success' : 'idle');
+            qaStep = _qa(qs === 'failed' ? 'failed' : (qs === 'success' ? 'success' : 'idle'));
             deployStep = ds === 'failed' ? 'failed' : 'success';
         } else if (isDeployed) {
-            versionStep = 'success'; buildStep = skipBuild ? 'skipped' : 'success'; testStep = 'success'; deployStep = 'success';
+            versionStep = 'success'; buildStep = skipBuild ? 'skipped' : 'success'; testStep = 'success';
+            qaStep = _qa('success'); deployStep = 'success';
         }
 
         const pipelineVersion = (pipeline && pipeline.version) ? pipeline.version : (latestBuilt ? normalizeVersion(latestBuilt) : (deployedTag || '–'));
         const buildActionId = pipeline ? pipeline.build_action_id : null;
         const testActionId = pipeline ? pipeline.test_action_id : null;
+        const qaActionId = pipeline ? pipeline.qa_action_id : null;
         const deployActionId = pipeline ? pipeline.deploy_action_id : null;
 
         // Build containers HTML (similar to Computers view compose-group style)
@@ -4302,10 +4322,21 @@ function renderStacksList() {
                             ${testActionId ? `<span class="pipeline-log-btn" onclick="event.stopPropagation(); openActionLogs('${testActionId}', 'Test Logs', '${escapeHtml(repo.name)}')" title="View test logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
                             ${testStep === 'running' && testActionId ? `<span class="pipeline-stop-btn" onclick="event.stopPropagation(); cancelAction('${testActionId}')" title="Stop test"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="10" height="10"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></span>` : ''}
                         </div>
-                        <span class="pipeline-transition-btn ${_gateArrowClass(pipeline, 'test', testStep, deployStep)}${gateTestDeploy ? ' has-gate' : ''}${_transitionModeClass(pipeline, 'test_to_deploy')}" onclick="event.stopPropagation(); openTransitionConfig('${escapeHtml(repo.name)}', 'test_to_deploy')" title="Test → Deploy transition (click to configure)">
+                        <span class="pipeline-transition-btn ${_gateArrowClass(pipeline, 'test', testStep, qaEnabled ? qaStep : deployStep)}${gateTestDeploy ? ' has-gate' : ''}${_transitionModeClass(pipeline, 'test_to_deploy')}" onclick="event.stopPropagation(); openTransitionConfig('${escapeHtml(repo.name)}', 'test_to_deploy')" title="Test → ${qaEnabled ? 'QA → ' : ''}Deploy transition (click to configure)">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
                             ${_transitionModeIcon(pipeline, 'test_to_deploy')}
+                            ${qaEnabled ? '<span class="transition-badge badge-qa" title="QA pre-deploy enabled">QA</span>' : ''}
                         </span>
+                        ${qaEnabled ? `
+                        <div class="pipeline-step step-${qaStep}" title="QA deploy (qa-${escapeHtml(stackName)} on qa.&lt;domain&gt;)">
+                            ${stepIcon(qaStep)}
+                            <span>QA</span>
+                            ${qaActionId ? `<span class="pipeline-log-btn" onclick="event.stopPropagation(); openActionLogs('${qaActionId}', 'QA Deploy Logs', '${escapeHtml(repo.name)}')" title="View QA deploy logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
+                            ${qaStep === 'running' && qaActionId ? `<span class="pipeline-stop-btn" onclick="event.stopPropagation(); cancelAction('${qaActionId}')" title="Stop QA deploy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="10" height="10"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></span>` : ''}
+                        </div>
+                        <span class="pipeline-transition-btn ${_gateArrowClass(pipeline, 'qa', qaStep, deployStep)}" title="QA → Deploy">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                        </span>` : ''}
                         <div class="pipeline-step step-${deployStep}" onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'deploy')" title="Deploy">
                             ${stepIcon(deployStep)}
                             <span>Deploy</span>
@@ -4477,6 +4508,22 @@ async function openTransitionConfig(repoName, transition) {
                                 </div>
                             </label>
                         </div>
+                        <div id="transition-qa-section" style="margin-top: 20px; display: none; padding: 14px 16px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary);">
+                            <label style="display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
+                                <input type="checkbox" id="transition-qa-enabled" style="margin-top: 3px;">
+                                <span>
+                                    <div style="font-weight: 600; margin-bottom: 4px;">Enable QA pre-deploy step</div>
+                                    <div style="font-size: 12px; color: var(--text-muted); line-height: 1.5;">
+                                        Before the production deploy, also deploy an isolated QA copy of the stack.
+                                        The QA stack name is prefixed with <code>qa-</code> and any
+                                        <code>TRAEFIK_HOST</code> / <code>*_HOST</code> / <code>*_DOMAIN</code>
+                                        env vars are prefixed with <code>qa.</code>
+                                        (e.g. <code>https://pulsarteam.io</code> → <code>https://qa.pulsarteam.io</code>).
+                                        The production deploy only runs if the QA deploy succeeds.
+                                    </div>
+                                </span>
+                            </label>
+                        </div>
                         <div id="transition-ai-logs-section" style="margin-top: 20px; display: none;">
                             <div style="margin-bottom: 8px; font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Last AI Decision</div>
                             <div id="transition-ai-decision-info" style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 10px 14px; background: var(--bg-tertiary); border-radius: 8px; flex-wrap: wrap;">
@@ -4527,6 +4574,17 @@ async function openTransitionConfig(repoName, transition) {
             };
         });
 
+        // QA option only applies to the test_to_deploy transition
+        const qaSection = document.getElementById('transition-qa-section');
+        const qaCheckbox = document.getElementById('transition-qa-enabled');
+        if (transition === 'test_to_deploy') {
+            qaSection.style.display = '';
+            qaCheckbox.checked = !!config.qa_enabled;
+        } else {
+            qaSection.style.display = 'none';
+            qaCheckbox.checked = false;
+        }
+
         // Show AI decision logs if available
         const aiSection = document.getElementById('transition-ai-logs-section');
         if (lastDecision) {
@@ -4562,7 +4620,12 @@ async function saveTransitionConfig() {
     saveBtn.textContent = 'Saving...';
 
     try {
-        await apiPut(`/stacks/pipeline/${encodeURIComponent(repoName)}/transition/${encodeURIComponent(transition)}`, { mode: selected.value });
+        const body = { mode: selected.value };
+        if (transition === 'test_to_deploy') {
+            const qaCb = document.getElementById('transition-qa-enabled');
+            body.qa_enabled = !!(qaCb && qaCb.checked);
+        }
+        await apiPut(`/stacks/pipeline/${encodeURIComponent(repoName)}/transition/${encodeURIComponent(transition)}`, body);
         modal.classList.remove('active');
         // Refresh stacks view to reflect new config
         if (typeof refreshStacks === 'function') refreshStacks();
