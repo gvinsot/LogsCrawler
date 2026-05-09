@@ -228,6 +228,95 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# ============== Global Error Handling ==============
+
+def _is_production() -> bool:
+    """Return True when the API should hide internal error details from clients.
+
+    Production mode hides stack traces and raw exception messages.
+    Order of resolution:
+    1. PULSARCD_DEBUG / settings.debug — when truthy, treat as dev (expose details)
+    2. NODE_ENV / PYTHON_ENV / ENV / ENVIRONMENT containing "prod" — treat as prod
+    3. Default: production (safe-by-default)
+    """
+    import os
+    s = settings  # may be None during early startup
+    if s is not None and getattr(s, "debug", False):
+        return False
+    env = (
+        os.environ.get("PULSARCD_ENV")
+        or os.environ.get("ENVIRONMENT")
+        or os.environ.get("ENV")
+        or os.environ.get("PYTHON_ENV")
+        or os.environ.get("NODE_ENV")
+        or ""
+    ).lower()
+    if env in ("dev", "development", "test", "testing", "local"):
+        return False
+    return True
+
+
+# Common exception → HTTP status code mapping (used for unhandled exceptions).
+_EXCEPTION_STATUS_MAP: Dict[type, int] = {
+    ValueError: 400,
+    TypeError: 400,
+    KeyError: 404,
+    LookupError: 404,
+    FileNotFoundError: 404,
+    PermissionError: 403,
+    NotImplementedError: 501,
+    TimeoutError: 504,
+}
+
+
+def _status_for_exception(exc: BaseException) -> int:
+    """Resolve an HTTP status code for an unhandled exception."""
+    for exc_type, code in _EXCEPTION_STATUS_MAP.items():
+        if isinstance(exc, exc_type):
+            return code
+    return 500
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """Sanitize unhandled exceptions to avoid leaking internals in production.
+
+    - Generates a request_id for cross-referencing with server logs.
+    - Logs the full exception (with stack trace) server-side.
+    - In production: returns a generic message + request_id only.
+    - In dev: returns the exception type, message and stack trace.
+    """
+    request_id = uuid.uuid4().hex
+    status_code = _status_for_exception(exc)
+
+    # Always log the full details server-side for forensics.
+    logger.error(
+        "Unhandled exception",
+        request_id=request_id,
+        path=request.url.path,
+        method=request.method,
+        status_code=status_code,
+        exc_type=type(exc).__name__,
+        exc_message=str(exc),
+        stack=traceback.format_exc(),
+    )
+
+    if _is_production():
+        body: Dict[str, Any] = {
+            "error": "Internal server error" if status_code >= 500 else "Request error",
+            "request_id": request_id,
+        }
+    else:
+        body = {
+            "error": type(exc).__name__,
+            "message": str(exc),
+            "stack": traceback.format_exc(),
+            "request_id": request_id,
+        }
+    return JSONResponse(status_code=status_code, content=body, headers={"X-Request-ID": request_id})
+
+
 # Mount MCP servers with authentication middleware
 # Read MCP: /ai/mcp (list_stacks, list_containers, list_computers, logs, get_action_status)
 # Actions MCP: /ai/actions/mcp (build_stack, deploy_stack)
