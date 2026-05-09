@@ -3984,8 +3984,9 @@ function renderStacksList() {
             versionStep = 'success';
             buildStep = skipBuild ? 'skipped' : (cs >= 1 ? 'success' : 'pending');
             testStep = cs === 1 ? 'gate_rejected' : (cs >= 2 ? 'success' : 'pending');
-            qaStep = _qa(cs >= 3 ? 'success' : 'pending');
-            deployStep = cs === 2 ? 'gate_rejected' : 'pending';
+            // qa rejected = QA succeeded but qa→deploy manual gate is waiting
+            qaStep = _qa(cs === 3 ? 'success' : (cs > 3 ? 'success' : 'pending'));
+            deployStep = (cs === 2 || cs === 3) ? 'gate_rejected' : 'pending';
         } else if (pipeline && pipeline.status === 'failed') {
             const cs = stageOrder[pipeline.stage] || 0;
             versionStep = 'success';

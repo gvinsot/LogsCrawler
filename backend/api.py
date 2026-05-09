@@ -3169,6 +3169,18 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
                               log_lines=qa_action.output_lines)
                 logger.info("Pipeline: QA deploy succeeded", repo=repo_name, version=built_version)
 
+                # ── Gate: QA → Deploy (always manual) ──
+                # After a successful QA deploy, production deploy must be triggered
+                # explicitly by the user. Stop here unconditionally.
+                logger.info("Pipeline: qa→deploy manual gate, stopping for user approval", repo=repo_name)
+                pipeline_state.record_gate(repo_name, "qa_to_deploy", False,
+                                           "Manual transition — waiting for user approval after QA",
+                                           version=built_version)
+                _set_pipeline(repo_name, "qa", "gate_rejected", built_version,
+                              build_id=build_id, test_id=test_id, qa_id=qa_id, deploy_id=None,
+                              log_lines=qa_action.output_lines)
+                return
+
             # ── Step 3: Deploy ──
             deploy_id = str(uuid.uuid4())[:8]
             deploy_action = BackgroundAction(deploy_id, "deploy", repo_name)
