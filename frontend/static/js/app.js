@@ -4329,7 +4329,7 @@ function renderStacksList() {
                             ${qaEnabled ? '<span class="transition-badge badge-qa" title="QA pre-deploy enabled">QA</span>' : ''}
                         </span>
                         ${qaEnabled ? `
-                        <div class="pipeline-step step-${qaStep}" title="QA deploy (qa-${escapeHtml(stackName)} on qa.&lt;domain&gt;)">
+                        <div class="pipeline-step step-${qaStep}" onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'qa')" title="QA deploy (qa-${escapeHtml(stackName)} on qa.&lt;domain&gt;)" style="cursor:pointer">
                             ${stepIcon(qaStep)}
                             <span>QA</span>
                             ${qaActionId ? `<span class="pipeline-log-btn" onclick="event.stopPropagation(); openActionLogs('${qaActionId}', 'QA Deploy Logs', '${escapeHtml(repo.name)}')" title="View QA deploy logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
@@ -4372,10 +4372,11 @@ function pipelineStepClick(repoName, sshUrl, step) {
         let actionId = null;
         if (step === 'build' && pipeline.stage === 'build') actionId = pipeline.build_action_id;
         else if (step === 'test' && pipeline.stage === 'test') actionId = pipeline.test_action_id;
+        else if (step === 'qa' && pipeline.stage === 'qa') actionId = pipeline.qa_action_id;
         else if (step === 'deploy' && pipeline.stage === 'deploy') actionId = pipeline.deploy_action_id;
 
         if (actionId) {
-            const label = step.charAt(0).toUpperCase() + step.slice(1);
+            const label = step === 'qa' ? 'QA' : (step.charAt(0).toUpperCase() + step.slice(1));
             openActionLogs(actionId, `${label} Logs`, repoName);
             return;
         }
@@ -4385,6 +4386,7 @@ function pipelineStepClick(repoName, sshUrl, step) {
     if (step === 'version') pipelineStack(repoName, sshUrl);
     else if (step === 'build') buildStack(repoName, sshUrl);
     else if (step === 'test') testStack(repoName, sshUrl);
+    else if (step === 'qa') deployStack(repoName, sshUrl, true);
     else if (step === 'deploy') deployStack(repoName, sshUrl);
 }
 
@@ -4446,7 +4448,16 @@ function showGateDecision(repoName, transition) {
 // ============== Transition Config Modal ==============
 
 async function openTransitionConfig(repoName, transition) {
-    const label = transition === 'version_to_build' ? 'Version → Build' : transition === 'build_to_test' ? 'Build → Test' : 'Test → Deploy';
+    let label = transition === 'version_to_build' ? 'Version → Build' : transition === 'build_to_test' ? 'Build → Test' : 'Test → Deploy';
+    // When QA is enabled on the test_to_deploy transition, the configured mode applies
+    // to Test → QA (not Test → Prod) — QA → Prod is always manual.
+    if (transition === 'test_to_deploy') {
+        const pipeline = stacksPipelineState && stacksPipelineState[repoName];
+        const qaEnabled = pipeline && pipeline.transition_configs
+            && pipeline.transition_configs.test_to_deploy
+            && pipeline.transition_configs.test_to_deploy.qa_enabled;
+        if (qaEnabled) label = 'Test → QA';
+    }
 
     // Create modal if not exists
     let modal = document.getElementById('transition-config-modal');
@@ -4520,7 +4531,12 @@ async function openTransitionConfig(repoName, transition) {
                                         <code>TRAEFIK_HOST</code> / <code>*_HOST</code> / <code>*_DOMAIN</code>
                                         env vars are prefixed with <code>qa.</code>
                                         (e.g. <code>https://pulsarteam.io</code> → <code>https://qa.pulsarteam.io</code>).
-                                        The production deploy only runs if the QA deploy succeeds.
+                                        <br><br>
+                                        When enabled, the mode selected above applies to the
+                                        <strong>Test → QA</strong> transition. The
+                                        <strong>QA → Production</strong> transition is
+                                        <em>always manual</em>: after a successful QA deploy,
+                                        you must explicitly trigger the production deploy.
                                     </div>
                                 </span>
                             </label>
@@ -5343,20 +5359,22 @@ async function submitTest() {
 
 let currentDeployRepo = null;
 let currentDeploySshUrl = null;
+let currentDeployIsQa = false;
 let selectedDeployTag = null;
 
-async function deployStack(repoName, sshUrl) {
+async function deployStack(repoName, sshUrl, qa = false) {
     currentDeployRepo = repoName;
     currentDeploySshUrl = sshUrl;
+    currentDeployIsQa = !!qa;
     selectedDeployTag = null;
-    
+
     const modal = document.getElementById('stack-deploy-modal');
     const title = document.getElementById('stack-deploy-title');
     const tagsList = document.getElementById('deploy-tags-list');
     const tagInput = document.getElementById('deploy-tag-input');
     const selectedDisplay = document.getElementById('deploy-selected-tag');
-    
-    title.textContent = `Deploy: ${repoName}`;
+
+    title.textContent = currentDeployIsQa ? `QA Deploy: ${repoName}` : `Deploy: ${repoName}`;
     tagsList.innerHTML = '<div class="loading-placeholder">Loading tags...</div>';
     tagInput.value = '';
     selectedDisplay.style.display = 'none';
@@ -5757,8 +5775,12 @@ async function submitDeploy() {
         if (tag) {
             url += `&tag=${encodeURIComponent(tag)}`;
         }
-        
+        if (currentDeployIsQa) {
+            url += `&qa=true`;
+        }
+
         const repoName = currentDeployRepo;
+        const isQa = currentDeployIsQa;
         const response = await fetch(`${API_BASE}${url}`, { method: 'POST', headers: authHeaders() });
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -5767,7 +5789,7 @@ async function submitDeploy() {
         const data = await response.json();
         if (data && data.action_id) {
             closeDeployModal();
-            trackBackgroundAction(data.action_id, 'Deploy', repoName);
+            trackBackgroundAction(data.action_id, isQa ? 'QA Deploy' : 'Deploy', repoName);
         } else {
             showNotification('error', 'Failed to start deployment');
         }

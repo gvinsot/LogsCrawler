@@ -2429,23 +2429,25 @@ async def deploy_stack(
     ssh_url: str = Query(..., description="SSH URL for cloning"),
     version: str = Query(default="1.0", description="Version tag"),
     tag: str = Query(default=None, description="Specific tag to deploy (format: vX.X.X)"),
+    qa: bool = Query(default=False, description="Deploy to the isolated QA environment (stack prefixed 'qa-')"),
 ):
     """Deploy a stack from a GitHub repository. Runs in background, returns action ID."""
     if not github_service.is_configured():
         raise HTTPException(status_code=400, detail="GitHub integration not configured")
-    
+
     if tag:
         if not re.match(r'^v?\d+(\.\d+){0,2}$', tag):
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Invalid tag format: '{tag}'. Expected format: vX.X.X (e.g., v1.0.5) or X.X.X"
             )
-    
+
     deployer, host_name = _get_deployer_and_host()
-    
+
     # Create background action
+    action_type = "qa-deploy" if qa else "deploy"
     action_id = str(uuid.uuid4())[:8]
-    action = BackgroundAction(action_id, "deploy", repo_name)
+    action = BackgroundAction(action_id, action_type, repo_name)
     _background_actions[action_id] = action
 
     # Use the tag as display version when deploying a specific tag
@@ -2453,12 +2455,16 @@ async def deploy_stack(
     # When deploying a specific tag (no prior build), clear build_action_id
     prev_build_id = pipeline_state.get_legacy(repo_name).get("build_action_id") if not tag else None
 
-    _set_pipeline(repo_name, "deploy", "running", deploy_version, build_id=prev_build_id, deploy_id=action_id)
+    pipeline_stage = "qa" if qa else "deploy"
+    if qa:
+        _set_pipeline(repo_name, pipeline_stage, "running", deploy_version, build_id=prev_build_id, qa_id=action_id)
+    else:
+        _set_pipeline(repo_name, pipeline_stage, "running", deploy_version, build_id=prev_build_id, deploy_id=action_id)
 
     async def _run_deploy():
         try:
             result = await deployer.deploy(
-                repo_name, ssh_url, version, tag=tag,
+                repo_name, ssh_url, version, tag=tag, qa=qa,
                 output_callback=action.append_output,
                 cancel_event=action.cancel_event,
             )
@@ -2468,22 +2474,36 @@ async def deploy_stack(
             if action.cancel_event.is_set():
                 action.status = "cancelled"
             if result.get("success"):
-                _set_pipeline(repo_name, "done", "success", deploy_version, deploy_id=action_id, log_lines=action.output_lines)
+                if qa:
+                    # QA succeeded → always-manual gate before production deploy
+                    pipeline_state.record_gate(repo_name, "qa_to_deploy", False,
+                                               "Manual transition — waiting for user approval after QA",
+                                               version=deploy_version)
+                    _set_pipeline(repo_name, "qa", "gate_rejected", deploy_version,
+                                  qa_id=action_id, log_lines=action.output_lines)
+                else:
+                    _set_pipeline(repo_name, "done", "success", deploy_version, deploy_id=action_id, log_lines=action.output_lines)
             else:
-                _set_pipeline(repo_name, "deploy", "failed", deploy_version, deploy_id=action_id, log_lines=action.output_lines)
-                await _notify_agent_failure("deploy", repo_name, deploy_version, result.get("output", ""))
+                _set_pipeline(repo_name, pipeline_stage, "failed", deploy_version,
+                              deploy_id=None if qa else action_id,
+                              qa_id=action_id if qa else None,
+                              log_lines=action.output_lines)
+                await _notify_agent_failure(pipeline_stage, repo_name, deploy_version, result.get("output", ""))
         except Exception as e:
             error_detail = f"{type(e).__name__}: {e}"
             logger.exception("Background deploy failed", repo=repo_name, error=str(e), traceback=traceback.format_exc())
             action.status = "failed"
-            action.result = {"success": False, "output": error_detail, "action": "deploy", "repo": repo_name}
+            action.result = {"success": False, "output": error_detail, "action": action_type, "repo": repo_name}
             action.append_output(error_detail)
-            _set_pipeline(repo_name, "deploy", "failed", deploy_version, deploy_id=action_id, log_lines=action.output_lines)
-            await _notify_agent_failure("deploy", repo_name, deploy_version, error_detail)
+            _set_pipeline(repo_name, pipeline_stage, "failed", deploy_version,
+                          deploy_id=None if qa else action_id,
+                          qa_id=action_id if qa else None,
+                          log_lines=action.output_lines)
+            await _notify_agent_failure(pipeline_stage, repo_name, deploy_version, error_detail)
 
     action.task = asyncio.create_task(_run_deploy())
 
-    return {"action_id": action_id, "action_type": "deploy", "repo": repo_name}
+    return {"action_id": action_id, "action_type": action_type, "repo": repo_name}
 
 
 @app.post("/api/stacks/test")
