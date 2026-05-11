@@ -3362,6 +3362,7 @@ function exportLogs() {
 
 let stacksRepos = [];
 let stacksDeployedTags = {};
+let stacksQaDeployedTags = {};
 let stacksLatestBuilt = {};
 let stacksPipelineState = {};
 let stacksAutoBuildState = {};
@@ -3415,6 +3416,7 @@ async function refreshStacks() {
 
     stacksRepos = reposData.repos;
     stacksDeployedTags = (tagsData && tagsData.tags) ? tagsData.tags : {};
+    stacksQaDeployedTags = (tagsData && tagsData.qa_tags) ? tagsData.qa_tags : {};
     stacksLatestBuilt = (tagsData && tagsData.latest_built) ? tagsData.latest_built : {};
     stacksContainers = containersData || {};
     stacksHostMetrics = hostMetrics || {};
@@ -3513,10 +3515,12 @@ async function updateStacksContainerStates() {
         let needsRerender = false;
         if (tagsData) {
             const oldDeployed = JSON.stringify(stacksDeployedTags);
+            const oldQa = JSON.stringify(stacksQaDeployedTags);
             const oldBuilt = JSON.stringify(stacksLatestBuilt);
             stacksDeployedTags = (tagsData.tags) ? tagsData.tags : {};
+            stacksQaDeployedTags = (tagsData.qa_tags) ? tagsData.qa_tags : {};
             stacksLatestBuilt = (tagsData.latest_built) ? tagsData.latest_built : {};
-            if (JSON.stringify(stacksDeployedTags) !== oldDeployed || JSON.stringify(stacksLatestBuilt) !== oldBuilt) {
+            if (JSON.stringify(stacksDeployedTags) !== oldDeployed || JSON.stringify(stacksQaDeployedTags) !== oldQa || JSON.stringify(stacksLatestBuilt) !== oldBuilt) {
                 needsRerender = true;
             }
         }
@@ -3538,15 +3542,24 @@ async function updateStacksContainerStates() {
         // Update stacksContainers from server-grouped data (same source as refreshStacks)
         for (const repo of stacksRepos) {
             const stackName = repoToStackName(repo.name);
+            const qaStackName = 'qa-' + stackName;
             const newStackContainers = containersData[stackName] || {};
+            const newQaStackContainers = containersData[qaStackName] || {};
 
             // If this stack had no entry in the response at all but had containers before,
             // keep the old data — it's likely a transient fetch failure, not a real removal
-            if (!(stackName in containersData) && Object.keys(stacksContainers[stackName] || {}).length > 0) {
-                continue;
+            if (stackName in containersData || !(Object.keys(stacksContainers[stackName] || {}).length > 0)) {
+                stacksContainers[stackName] = newStackContainers;
             }
 
-            stacksContainers[stackName] = newStackContainers;
+            // Track QA stack containers separately. Trigger rerender when the
+            // set of QA services changes (added/removed) so the QA section appears.
+            if (qaStackName in containersData || !(Object.keys(stacksContainers[qaStackName] || {}).length > 0)) {
+                const oldQaKeys = JSON.stringify(Object.keys(stacksContainers[qaStackName] || {}).sort());
+                const newQaKeys = JSON.stringify(Object.keys(newQaStackContainers).sort());
+                if (oldQaKeys !== newQaKeys) needsRerender = true;
+                stacksContainers[qaStackName] = newQaStackContainers;
+            }
         }
 
         if (needsRerender) {
@@ -3554,10 +3567,17 @@ async function updateStacksContainerStates() {
             return;
         }
 
-        // Incremental DOM update for each stack
+        // Incremental DOM update for each stack (merge prod + QA services so
+        // QA compose-groups also receive live container updates).
         for (const repo of stacksRepos) {
             const stackName = repoToStackName(repo.name);
-            updateStackDom(repo.name, stackName, stacksContainers[stackName] || {});
+            const qaStackName = 'qa-' + stackName;
+            const merged = Object.assign(
+                {},
+                stacksContainers[stackName] || {},
+                stacksContainers[qaStackName] || {}
+            );
+            updateStackDom(repo.name, stackName, merged);
         }
     } catch (e) {
         console.error('Failed to update stacks container states:', e);
@@ -3888,7 +3908,13 @@ function renderStacksList() {
         const untaggedCount = (autoBuild && autoBuild.untagged_commits) || 0;
         // Docker stack names: lowercase, non-alphanumeric → hyphens (mirrors deploy-service.sh)
         const stackName = repoToStackName(repo.name);
+        const qaStackName = 'qa-' + stackName;
         const stackContainers = stacksContainers[stackName] || {};
+        const qaStackContainers = stacksContainers[qaStackName] || {};
+        const qaDeployedTag = (pipelineData && pipelineData.stages && pipelineData.stages.qa && pipelineData.stages.qa.current_version)
+            ? pipelineData.stages.qa.current_version
+            : stacksQaDeployedTags[repo.name];
+        const isQaDeployed = !!qaDeployedTag || Object.keys(qaStackContainers).length > 0;
         const isExpanded = expandedStacks[repo.name] || false;
         
         // Calculate stack-level stats
@@ -4041,17 +4067,21 @@ function renderStacksList() {
         // Build containers HTML (similar to Computers view compose-group style)
         let containersHtml = '';
         const serviceCount = Object.keys(stackContainers).length;
-        if (isDeployed && serviceCount > 0) {
+        const qaServiceCount = Object.keys(qaStackContainers).length;
+        const showContainerSection = (isDeployed && serviceCount > 0) || (isQaDeployed && qaServiceCount > 0);
+        if (showContainerSection) {
             containersHtml = `<div class="host-content" id="stack-containers-${escapeHtml(repo.name)}" style="display: ${isExpanded ? 'block' : 'none'};">`;
-            
-            for (const [serviceName, containers] of Object.entries(stackContainers)) {
+
+            const renderServicesBlock = (servicesObj, parentStackName, isQa) => {
+                let html = '';
+                for (const [serviceName, containers] of Object.entries(servicesObj)) {
                 // serviceName is the full swarm service name (e.g., "pulsarcd_backend")
                 // Extract short display name by removing the stack prefix
                 let displayServiceName = serviceName;
                 if (serviceName === '_standalone') {
                     displayServiceName = 'Standalone';
-                } else if (serviceName.startsWith(stackName + '_')) {
-                    displayServiceName = serviceName.substring(stackName.length + 1);
+                } else if (serviceName.startsWith(parentStackName + '_')) {
+                    displayServiceName = serviceName.substring(parentStackName.length + 1);
                 }
                 const hasContainers = containers.length > 0;
                 
@@ -4071,13 +4101,13 @@ function renderStacksList() {
                 // Get image from first container for deploy modal
                 const firstContainerImage = containers.length > 0 ? containers[0].image : '';
                 
-                containersHtml += `
-                    <div class="compose-group${hasContainers ? '' : ' compose-group-empty'}" data-service="${escapeHtml(serviceName)}">
+                html += `
+                    <div class="compose-group${hasContainers ? '' : ' compose-group-empty'}${isQa ? ' compose-group-qa' : ''}" data-service="${escapeHtml(serviceName)}">
                         <div class="compose-header">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
                             </svg>
-                            ${escapeHtml(displayServiceName)}
+                            ${isQa ? '<span class="stack-badge stack-badge-qa" title="QA service">QA</span> ' : ''}${escapeHtml(displayServiceName)}
                             <span class="group-count">${containers.length}</span>
                             ${!hasContainers ? '<span class="service-no-replicas">0 replicas</span>' : ''}
                             ${serviceMemoryDisplay ? `<span class="group-stat group-memory" title="Total memory usage">💾 ${serviceMemoryDisplay}</span>` : ''}
@@ -4098,12 +4128,12 @@ function renderStacksList() {
                                 </svg>
                                 Status
                             </button>
-                            <button class="btn btn-sm btn-primary service-deploy-btn" onclick="event.stopPropagation(); openServiceDeploy('${escapeHtml(fullServiceName)}', '${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', '${escapeHtml(firstContainerImage)}')" title="Deploy new version">
+                            ${isQa ? '' : `<button class="btn btn-sm btn-primary service-deploy-btn" onclick="event.stopPropagation(); openServiceDeploy('${escapeHtml(fullServiceName)}', '${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', '${escapeHtml(firstContainerImage)}')" title="Deploy new version">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                                     <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
                                 </svg>
                                 Deploy
-                            </button>
+                            </button>`}
                             <button class="btn btn-sm btn-danger service-remove-btn" onclick="event.stopPropagation(); removeService('${escapeHtml(fullServiceName)}')" title="Remove service">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
                                     <polyline points="3 6 5 6 21 6"/>
@@ -4117,7 +4147,7 @@ function renderStacksList() {
                 `;
                 
                 if (!hasContainers) {
-                    containersHtml += `
+                    html += `
                         <div class="container-item container-item-empty">
                             <div class="container-info">
                                 <span class="container-status exited"></span>
@@ -4152,7 +4182,7 @@ function renderStacksList() {
                                 </span>`;
                     }
                     
-                    containersHtml += `
+                    html += `
                         <div class="container-item" onclick="openContainer('${escapeHtml(c.host)}', '${escapeHtml(c.id)}', ${JSON.stringify(c).replace(/"/g, '&quot;')})">
                             <div class="container-info">
                                 <span class="container-status ${c.status}"></span>
@@ -4188,13 +4218,28 @@ function renderStacksList() {
                     `;
                 }
                 
-                containersHtml += `
+                html += `
                             </div>
                         </div>
                     </div>
                 `;
+                }
+                return html;
+            };
+
+            containersHtml += renderServicesBlock(stackContainers, stackName, false);
+
+            if (qaServiceCount > 0) {
+                containersHtml += `
+                    <div class="stack-section-divider stack-section-divider-qa">
+                        <span class="stack-badge stack-badge-qa">QA Environment</span>
+                        ${qaDeployedTag ? `<span class="stack-divider-version" title="QA deployed version">${escapeHtml(qaDeployedTag)}</span>` : ''}
+                        <span class="stack-divider-name">qa-${escapeHtml(stackName)}</span>
+                    </div>
+                `;
+                containersHtml += renderServicesBlock(qaStackContainers, qaStackName, true);
             }
-            
+
             containersHtml += `</div>`;
         }
         
@@ -4262,9 +4307,9 @@ function renderStacksList() {
         // Use host-group structure similar to Computers view
         return `
         <div class="host-group ${isExpanded ? '' : 'collapsed'}" data-repo="${escapeHtml(repo.name)}">
-            <div class="host-header ${healthClass}" ${isDeployed ? `onclick="toggleStackExpand('${escapeHtml(repo.name)}')"` : ''}>
+            <div class="host-header ${healthClass}" ${(isDeployed || isQaDeployed) ? `onclick="toggleStackExpand('${escapeHtml(repo.name)}')"` : ''}>
                 <span class="host-name">
-                    ${isDeployed ? `
+                    ${(isDeployed || isQaDeployed) ? `
                     <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="6 9 12 15 18 9"/>
                     </svg>
@@ -4272,6 +4317,7 @@ function renderStacksList() {
                     ${stackIcon}
                     ${escapeHtml(repo.name)}
                     ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : '<span class="stack-badge" style="background: var(--bg-tertiary); color: var(--text-muted);">Not deployed</span>'}
+                    ${qaDeployedTag ? `<span class="stack-badge stack-badge-qa" title="QA deployed version (qa-${escapeHtml(stackName)})">QA: ${escapeHtml(qaDeployedTag)}</span>` : ''}
                     ${pipeline && pipeline.last_deployed_at ? `<span class="stack-deployed-ago" title="${new Date(pipeline.last_deployed_at).toLocaleString()}">${formatTimeAgo(pipeline.last_deployed_at)}</span>` : ''}
                     ${hasUpdate ? `<span class="stack-badge update-available" title="New version available">${escapeHtml(latestBuilt)}</span>` : ''}
                     ${isDeployed ? `<span class="group-count">${Object.keys(stackContainers).length} svc, ${containerCount} ct</span>` : ''}

@@ -1522,8 +1522,16 @@ class StackDeployer:
         return True, fallback_tag or "running"
 
     async def get_all_deployed_stack_tags(self, repo_names: list[str]) -> dict[str, Optional[str]]:
-        """Get deployed image tags for all stacks in a single Docker command.
+        """Get deployed image tags for all production stacks (see _get_all_deployed_tags_with_qa)."""
+        prod, _qa = await self.get_all_deployed_stack_tags_with_qa(repo_names)
+        return prod
 
+    async def get_all_deployed_stack_tags_with_qa(
+        self, repo_names: list[str]
+    ) -> tuple[dict[str, Optional[str]], dict[str, Optional[str]]]:
+        """Get deployed image tags for all stacks (production + QA) in a single Docker command.
+
+        QA stacks are deployed with a ``qa-`` prefix (see deploy-service.sh).
         Runs one 'docker service ls' for all services and matches them to repos,
         avoiding N concurrent SSH calls.
 
@@ -1531,9 +1539,10 @@ class StackDeployer:
             repo_names: List of repository names
 
         Returns:
-            Dict of {repo_name: tag_or_none}
+            Tuple ``(prod_tags, qa_tags)`` where each is ``{repo_name: tag_or_none}``.
         """
-        result: dict[str, Optional[str]] = {name: None for name in repo_names}
+        prod_result: dict[str, Optional[str]] = {name: None for name in repo_names}
+        qa_result: dict[str, Optional[str]] = {name: None for name in repo_names}
 
         # Single command to get all service names and images
         cmd = "docker service ls --format '{{.Name}} {{.Image}}'"
@@ -1541,7 +1550,7 @@ class StackDeployer:
 
         if not success or not output.strip():
             logger.warning("docker service ls failed for bulk query", output=output[:200] if output else "")
-            return result
+            return prod_result, qa_result
 
         registry = self.config.registry_url or ""
 
@@ -1559,24 +1568,28 @@ class StackDeployer:
                 continue
             services.append((parts[0], parts[1]))
 
-        # Match each service to a known stack by prefix
+        # Match each service to a known stack by prefix (production or QA)
         stacks_images: dict[str, list[str]] = {}
+        qa_stacks_images: dict[str, list[str]] = {}
         for service_name, image in services:
             for stack_name in known_stacks:
                 if service_name.startswith(stack_name + '_'):
                     stacks_images.setdefault(stack_name, []).append(image)
                     break
+                if service_name.startswith('qa-' + stack_name + '_'):
+                    qa_stacks_images.setdefault(stack_name, []).append(image)
+                    break
 
-        logger.info("Bulk service discovery", total_services=len(services), matched=sum(len(v) for v in stacks_images.values()), stacks=list(stacks_images.keys()))
+        logger.info(
+            "Bulk service discovery",
+            total_services=len(services),
+            matched=sum(len(v) for v in stacks_images.values()),
+            qa_matched=sum(len(v) for v in qa_stacks_images.values()),
+            stacks=list(stacks_images.keys()),
+            qa_stacks=list(qa_stacks_images.keys()),
+        )
 
-        # Match repos to stacks
-        for repo_name in repo_names:
-            stack_name = self._repo_to_stack_name(repo_name)
-            images = stacks_images.get(stack_name, [])
-            if not images:
-                continue
-
-            # Try to find a registry image first
+        def _pick_tag(images: list[str]) -> Optional[str]:
             tag = None
             for image in images:
                 if registry and not image.startswith(registry):
@@ -1586,15 +1599,21 @@ class StackDeployer:
                 else:
                     tag = "latest"
                 break
-
-            # Fallback: use any image tag
             if tag is None:
                 for image in images:
                     if ':' in image:
                         tag = image.split(':')[-1]
                         break
+            return tag or "running"
 
-            result[repo_name] = tag or "running"
-            logger.debug("Matched stack", repo=repo_name, stack=stack_name, tag=result[repo_name], images=images[:3])
+        # Match repos to stacks
+        for repo_name in repo_names:
+            stack_name = self._repo_to_stack_name(repo_name)
+            images = stacks_images.get(stack_name, [])
+            if images:
+                prod_result[repo_name] = _pick_tag(images)
+            qa_images = qa_stacks_images.get(stack_name, [])
+            if qa_images:
+                qa_result[repo_name] = _pick_tag(qa_images)
 
-        return result
+        return prod_result, qa_result

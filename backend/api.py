@@ -2796,8 +2796,9 @@ async def get_stacks_deployed_tags():
     repos = await github_service.get_starred_repos()
     deployer = StackDeployer(settings.github, None)
 
-    # Fetch all deployed tags in a single SSH command (avoids concurrent SSH issues)
-    all_deployed = await deployer.get_all_deployed_stack_tags(
+    # Fetch all deployed tags in a single SSH command (avoids concurrent SSH issues).
+    # Returns both production and QA stack tags ("qa-<stack>_*" services).
+    all_deployed, all_deployed_qa = await deployer.get_all_deployed_stack_tags_with_qa(
         [repo["name"] for repo in repos]
     )
 
@@ -2808,9 +2809,10 @@ async def get_stacks_deployed_tags():
     latest_results = await asyncio.gather(*[get_latest(r) for r in repos])
 
     deployed_tags = {name: tag for name, tag in all_deployed.items() if tag}
+    deployed_qa_tags = {name: tag for name, tag in all_deployed_qa.items() if tag}
     latest_built = {name: tag for name, tag in latest_results if tag}
 
-    result = {"tags": deployed_tags, "latest_built": latest_built}
+    result = {"tags": deployed_tags, "qa_tags": deployed_qa_tags, "latest_built": latest_built}
     _deployed_tags_cache = result
     _deployed_tags_cache_time = now
     return result
