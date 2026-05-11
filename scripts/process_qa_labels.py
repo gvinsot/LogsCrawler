@@ -11,6 +11,13 @@ This helper rewrites Traefik labels so that every local Traefik identifier
 with the QA stack prefix. Provider-qualified references like ``noop@internal``
 or ``global@file`` are left untouched.
 
+Top-level ``networks:`` entries also get a ``name:`` field prefixed with
+``qa-`` so that QA and prod deployments do not collide on explicitly-named
+networks, and so a QA stack's external references resolve to QA-prefixed
+sibling networks. Well-known shared networks (Traefik proxy, etc.) are
+preserved via a denylist that can be extended through the ``QA_NETWORK_KEEP``
+environment variable (comma-separated network names).
+
 It also rewrites literal hostnames inside Traefik ``rule=`` labels. The apex
 domain (longest dot-suffix shared by every literal hostname found in any
 rule) is replaced with ``qa.<apex>``, so:
@@ -119,6 +126,71 @@ def _rewrite_reference_list(values: str, local_names: set, prefix: str) -> str:
         else:
             out.append(p)
     return ",".join(out)
+
+
+DEFAULT_NETWORK_KEEP = frozenset({
+    "proxy",
+    "traefik-public",
+    "traefik_proxy",
+    "postgresqlcluster_internal",
+})
+
+
+def _qa_network_keep_set():
+    """Names of networks whose `name:` field must NOT be QA-prefixed.
+    Combines the built-in defaults with anything listed in QA_NETWORK_KEEP."""
+    keep = set(DEFAULT_NETWORK_KEEP)
+    extra = os.environ.get("QA_NETWORK_KEEP", "").strip()
+    if extra:
+        keep.update(s.strip() for s in extra.split(",") if s.strip())
+    return keep
+
+
+def _network_effective_name(key, net):
+    """Return the network name Docker would use, or None when Swarm should
+    auto-derive it (non-external, no explicit `name:`).
+
+    Handles both the modern (``external: true`` + ``name: <x>``) and the
+    legacy (``external: { name: <x> }``) forms.
+    """
+    if not isinstance(net, dict):
+        return None
+    external = net.get("external")
+    if isinstance(external, dict) and "name" in external:
+        return str(external["name"])
+    if net.get("name") is not None:
+        return str(net["name"])
+    if external is True:
+        return str(key)
+    return None
+
+
+def _set_network_name(net, new_name):
+    """Write back the new effective name, preserving the original form."""
+    external = net.get("external")
+    if isinstance(external, dict) and "name" in external:
+        external["name"] = new_name
+    else:
+        net["name"] = new_name
+
+
+def _process_networks(data, prefix: str, keep_set):
+    networks = data.get("networks")
+    if not isinstance(networks, dict):
+        return
+    for key, net in networks.items():
+        if not isinstance(net, dict):
+            continue
+        effective = _network_effective_name(key, net)
+        if effective is None:
+            continue  # Swarm auto-prefixes via the (already QA-prefixed) stack name
+        if effective in keep_set:
+            continue
+        if effective.startswith(prefix):
+            continue
+        new_name = prefix + effective
+        sys.stderr.write(f"[qa-labels] Network: {effective} -> {new_name}\n")
+        _set_network_name(net, new_name)
 
 
 def _common_dot_suffix(hosts):
@@ -275,6 +347,8 @@ def process(compose_path: str, output_path: str, prefix: str) -> None:
     for pairs, _, setter in _iter_label_pairs(data):
         new_pairs = _rewrite_pairs(pairs, prefix, apex_original, apex_qa)
         setter(new_pairs)
+
+    _process_networks(data, prefix, _qa_network_keep_set())
 
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False)
