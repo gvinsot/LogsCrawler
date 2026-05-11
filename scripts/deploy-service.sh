@@ -538,9 +538,10 @@ update_image_tags "$COMPOSE_PATH" "$VERSION" "$DEPLOY_COMPOSE"
 # Convert sensitive env vars (*_SECRET, *_KEY, *_TOKEN, *_PASSWORD) into
 # Docker secrets and rewrite the compose file accordingly.
 # ----------------------------------------------------------------------------
+PYTHON_BIN="$(command -v python3 || command -v python || true)"
+
 SECRETS_PROCESSOR="$SCRIPT_DIR/process_secrets.py"
 if [ -f "$SECRETS_PROCESSOR" ]; then
-    PYTHON_BIN="$(command -v python3 || command -v python || true)"
     if [ -n "$PYTHON_BIN" ]; then
         log_info "Converting sensitive env vars into Docker secrets..."
         TMP_PROCESSED="${DEPLOY_COMPOSE}.processed"
@@ -557,6 +558,30 @@ if [ -f "$SECRETS_PROCESSOR" ]; then
     fi
 else
     log_warning "process_secrets.py not found at $SECRETS_PROCESSOR — skipping"
+fi
+
+# ----------------------------------------------------------------------------
+# QA mode: prefix Traefik router/service/middleware names so the QA stack's
+# labels do not clash with the prod stack's. Without this, both stacks declare
+# routers with identical names and Traefik silently drops one — making the QA
+# instance unreachable even when its Host() rule is already qa-prefixed.
+# ----------------------------------------------------------------------------
+if [ "$QA_MODE" = "true" ]; then
+    QA_LABELS_PROCESSOR="$SCRIPT_DIR/process_qa_labels.py"
+    if [ -f "$QA_LABELS_PROCESSOR" ] && [ -n "$PYTHON_BIN" ]; then
+        log_info "Prefixing Traefik labels with '${QA_STACK_PREFIX}' for QA isolation..."
+        TMP_LABELS="${DEPLOY_COMPOSE}.qa-labels"
+        if "$PYTHON_BIN" "$QA_LABELS_PROCESSOR" "$DEPLOY_COMPOSE" "$TMP_LABELS" "$QA_STACK_PREFIX"; then
+            mv "$TMP_LABELS" "$DEPLOY_COMPOSE"
+            log_success "Traefik labels prefixed for QA"
+        else
+            log_error "Failed to prefix Traefik labels — aborting deployment"
+            rm -f "$DEPLOY_COMPOSE" "$TMP_LABELS"
+            exit 1
+        fi
+    elif [ ! -f "$QA_LABELS_PROCESSOR" ]; then
+        log_warning "process_qa_labels.py not found at $QA_LABELS_PROCESSOR — Traefik labels NOT isolated for QA"
+    fi
 fi
 
 # Function to resolve environment variables in image names
