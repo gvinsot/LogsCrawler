@@ -47,7 +47,21 @@ except ImportError:
 
 
 SECRET_SUFFIXES = ("_SECRET", "_KEY", "_TOKEN", "_PASSWORD")
-_VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+# Matches ${NAME} plus the full Compose / POSIX parameter-expansion family:
+#   ${NAME}             - bare reference
+#   ${NAME:-default}    - default if unset OR empty
+#   ${NAME-default}     - default only if unset
+#   ${NAME:?message}    - required, message if unset or empty (Compose errors;
+#                         here we just resolve to the env value)
+#   ${NAME?message}     - required if unset
+#   ${NAME:+alt}        - alt if set AND non-empty
+#   ${NAME+alt}         - alt if set (empty ok)
+_VAR_REF_RE = re.compile(
+    r"\$\{"
+    r"([A-Za-z_][A-Za-z0-9_]*)"   # 1: variable name
+    r"(?:(:?[-?+])([^}]*))?"      # 2: operator (one of - :- ? :? + :+) + 3: operand
+    r"\}"
+)
 
 
 def is_secret_name(name: str) -> bool:
@@ -64,7 +78,12 @@ def parse_env_entry(entry: str):
 
 
 def resolve_value(name: str, raw_value: Optional[str]) -> Optional[str]:
-    """Resolve ${VAR} / ${VAR:-default} substitutions using the current env.
+    """Resolve Compose-style ${VAR...} substitutions using the current env.
+
+    Supports the full parameter-expansion family (see ``_VAR_REF_RE``).
+    The ``:?`` / ``?`` "required" variants don't error here - we just use the
+    env value if it's there; downstream code decides if the missing-secret
+    case matters.
 
     If ``raw_value`` is ``None`` (env entry like ``- FOO`` with no value) the
     value is read directly from the process environment.
@@ -73,8 +92,24 @@ def resolve_value(name: str, raw_value: Optional[str]) -> Optional[str]:
         return os.environ.get(name)
 
     def repl(match: "re.Match[str]") -> str:
-        var, default = match.group(1), match.group(2)
-        return os.environ.get(var, default if default is not None else "")
+        var = match.group(1)
+        op = match.group(2)
+        operand = match.group(3)
+        env_val = os.environ.get(var)
+
+        if op is None:
+            return env_val if env_val is not None else ""
+        if op == ":-":
+            return env_val if env_val else (operand or "")
+        if op == "-":
+            return env_val if env_val is not None else (operand or "")
+        if op in (":?", "?"):
+            return env_val if env_val is not None else ""
+        if op == ":+":
+            return (operand or "") if env_val else ""
+        if op == "+":
+            return (operand or "") if env_val is not None else ""
+        return env_val if env_val is not None else ""
 
     return _VAR_REF_RE.sub(repl, raw_value)
 
