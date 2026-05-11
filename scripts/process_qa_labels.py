@@ -11,6 +11,18 @@ This helper rewrites Traefik labels so that every local Traefik identifier
 with the QA stack prefix. Provider-qualified references like ``noop@internal``
 or ``global@file`` are left untouched.
 
+It also rewrites literal hostnames inside Traefik ``rule=`` labels. The apex
+domain (longest dot-suffix shared by every literal hostname found in any
+rule) is replaced with ``qa.<apex>``, so:
+
+    Host(`www.pulsarteam.io`) || Host(`pulsarteam.io`)
+        -> Host(`www.qa.pulsarteam.io`) || Host(`qa.pulsarteam.io`)
+
+The apex can be overridden by setting ``QA_HOST_APEX`` in the environment
+(value should be the already-QA-prefixed apex, e.g. ``qa.example.com``).
+``HostRegexp`` is left untouched because its argument is a regex, not a
+literal host.
+
 Usage:
     process_qa_labels.py <input_compose> <output_compose> <prefix>
 
@@ -21,6 +33,7 @@ Example with prefix="qa-":
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 
@@ -48,6 +61,12 @@ _LABEL_KEY_RE = re.compile(
     r"^(traefik\.(?:http|tcp|udp)\.(?:routers|services|middlewares)\.)"
     r"([A-Za-z0-9][A-Za-z0-9_-]*)"
     r"(\..+)$"
+)
+
+# A single Host()/HostSNI()/HostHeader() matcher with a backtick-quoted literal arg.
+# HostRegexp is intentionally excluded - its argument is a regex, not a hostname.
+_HOST_MATCHER_RE = re.compile(
+    r"(HostSNI|HostHeader|Host)\(\s*`([^`]+)`\s*\)"
 )
 
 
@@ -102,10 +121,55 @@ def _rewrite_reference_list(values: str, local_names: set, prefix: str) -> str:
     return ",".join(out)
 
 
-def _rewrite_pairs(pairs, prefix: str):
+def _common_dot_suffix(hosts):
+    """Return the apex shared by every host: the shortest hostname that
+    every other hostname equals or ends with ('.' + apex). None if no
+    such apex exists (hosts have unrelated domains).
+    """
+    if not hosts:
+        return None
+    candidate = min(hosts, key=len)
+    for h in hosts:
+        if h == candidate:
+            continue
+        if not h.endswith("." + candidate):
+            return None
+    return candidate
+
+
+def _is_literal_host(host: str) -> bool:
+    """A hostname is literal if it does not embed a shell-style variable
+    reference. The deploy script prefixes such variables in the environment
+    before docker stack deploy substitutes them, so we must not touch them
+    here (otherwise the prefix would be applied twice).
+    """
+    return "$" not in host
+
+
+def _rewrite_host(host: str, apex_original: str, apex_qa: str) -> str:
+    """Map a literal hostname so the apex part swaps from `apex_original` to
+    `apex_qa`. Hostnames that don't share the apex (or aren't literal) are
+    returned unchanged.
+    """
+    if not _is_literal_host(host):
+        return host
+    if host == apex_original:
+        return apex_qa
+    suffix = "." + apex_original
+    if host.endswith(suffix):
+        return host[: -len(apex_original)] + apex_qa
+    return host
+
+
+def _rewrite_rule_value(rule_value: str, apex_original: str, apex_qa: str) -> str:
+    def repl(m):
+        matcher, host = m.group(1), m.group(2)
+        return f"{matcher}(`{_rewrite_host(host, apex_original, apex_qa)}`)"
+    return _HOST_MATCHER_RE.sub(repl, rule_value)
+
+
+def _rewrite_pairs(pairs, prefix: str, apex_original, apex_qa):
     local_names = _collect_local_names(pairs)
-    if not local_names:
-        return pairs
 
     rewritten = []
     for key, value in pairs:
@@ -122,6 +186,8 @@ def _rewrite_pairs(pairs, prefix: str):
                     new_value = prefix + v
             elif key.endswith(".middlewares"):
                 new_value = _rewrite_reference_list(value, local_names, prefix)
+            elif key.endswith(".rule") and apex_original and apex_qa:
+                new_value = _rewrite_rule_value(value, apex_original, apex_qa)
 
         rewritten.append((new_key, new_value))
     return rewritten
@@ -133,32 +199,82 @@ def _emit_labels(pairs, was_dict):
     return [k if v is None else f"{k}={v}" for k, v in pairs]
 
 
-def _process_service(svc: dict, prefix: str) -> None:
-    # Container-level labels (rare for Swarm Traefik but supported)
-    labels = svc.get("labels")
-    pairs, was_dict = _normalise_labels(labels)
-    if pairs is not None:
-        new_pairs = _rewrite_pairs(pairs, prefix)
-        svc["labels"] = _emit_labels(new_pairs, was_dict)
+def _iter_label_pairs(data):
+    """Yield every (pairs, was_dict, setter) for both 'labels' and
+    'deploy.labels' across all services. The setter, called with the rewritten
+    labels collection, stores them back on the containing service/deploy dict.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("services"), dict):
+        return
+    for svc in data["services"].values():
+        if not isinstance(svc, dict):
+            continue
 
-    # Swarm deploy.labels - this is where Traefik reads from in Swarm mode
-    deploy = svc.get("deploy")
-    if isinstance(deploy, dict):
-        dlabels = deploy.get("labels")
-        pairs, was_dict = _normalise_labels(dlabels)
+        labels = svc.get("labels")
+        pairs, was_dict = _normalise_labels(labels)
         if pairs is not None:
-            new_pairs = _rewrite_pairs(pairs, prefix)
-            deploy["labels"] = _emit_labels(new_pairs, was_dict)
+            def _set_svc(new, _svc=svc, _was_dict=was_dict):
+                _svc["labels"] = _emit_labels(new, _was_dict)
+            yield pairs, was_dict, _set_svc
+
+        deploy = svc.get("deploy")
+        if isinstance(deploy, dict):
+            dlabels = deploy.get("labels")
+            pairs, was_dict = _normalise_labels(dlabels)
+            if pairs is not None:
+                def _set_deploy(new, _dep=deploy, _was_dict=was_dict):
+                    _dep["labels"] = _emit_labels(new, _was_dict)
+                yield pairs, was_dict, _set_deploy
+
+
+def _detect_apex(data):
+    """Scan every rule= label in the compose and return the apex domain
+    common to all literal hostnames found, or None if none / no consensus.
+    """
+    hostnames = []
+    for pairs, _, _ in _iter_label_pairs(data):
+        for key, value in pairs:
+            if value is None or not key.endswith(".rule"):
+                continue
+            if not _LABEL_KEY_RE.match(key):
+                continue
+            hostnames.extend(
+                m.group(2)
+                for m in _HOST_MATCHER_RE.finditer(value)
+                if _is_literal_host(m.group(2))
+            )
+    if not hostnames:
+        return None
+    return _common_dot_suffix(hostnames)
 
 
 def process(compose_path: str, output_path: str, prefix: str) -> None:
     with open(compose_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
-    if isinstance(data, dict) and isinstance(data.get("services"), dict):
-        for _, svc in data["services"].items():
-            if isinstance(svc, dict):
-                _process_service(svc, prefix)
+    # Apex resolution: explicit override wins; otherwise auto-detect across rules.
+    override = os.environ.get("QA_HOST_APEX", "").strip() or None
+    if override:
+        apex_qa = override
+        apex_original = override[3:] if override.startswith("qa.") else override
+    else:
+        apex_original = _detect_apex(data)
+        apex_qa = None
+        if apex_original:
+            apex_qa = (
+                apex_original
+                if apex_original.startswith("qa.")
+                else f"qa.{apex_original}"
+            )
+
+    if apex_original and apex_qa:
+        sys.stderr.write(
+            f"[qa-labels] Rewriting hostnames: {apex_original} -> {apex_qa}\n"
+        )
+
+    for pairs, _, setter in _iter_label_pairs(data):
+        new_pairs = _rewrite_pairs(pairs, prefix, apex_original, apex_qa)
+        setter(new_pairs)
 
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False)
