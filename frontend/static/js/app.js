@@ -4327,10 +4327,8 @@ function renderStacksList() {
                     ` : ''}
                     ${stackIcon}
                     ${escapeHtml(repo.name)}
-                    ${deployedTag ? `<span class="stack-badge deployed" title="Deployed version">${escapeHtml(deployedTag)}</span>` : '<span class="stack-badge" style="background: var(--bg-tertiary); color: var(--text-muted);">Not deployed</span>'}
-                    ${qaDeployedTag ? `<span class="stack-badge stack-badge-qa" title="QA deployed version (qa-${escapeHtml(stackName)})">QA: ${escapeHtml(qaDeployedTag)}</span>` : ''}
+                    ${!isDeployed ? '<span class="stack-badge" style="background: var(--bg-tertiary); color: var(--text-muted);">Not deployed</span>' : ''}
                     ${pipeline && pipeline.last_deployed_at ? `<span class="stack-deployed-ago" title="${new Date(pipeline.last_deployed_at).toLocaleString()}">${formatTimeAgo(pipeline.last_deployed_at)}</span>` : ''}
-                    ${hasUpdate ? `<span class="stack-badge update-available" title="New version available">${escapeHtml(latestBuilt)}</span>` : ''}
                     ${isDeployed ? `<span class="group-count">${Object.keys(stackContainers).length} svc, ${containerCount} ct</span>` : ''}
                     ${isDeployed && tooltipLines.length > 0 ? `
                     <span class="stack-monitoring-tooltip">
@@ -6358,6 +6356,15 @@ async function cancelAction(actionId) {
         }
     } catch (e) {
         showNotification('error', `Failed to cancel: ${e.message || 'Unknown error'}`);
+    } finally {
+        // Always refresh pipeline state — even on cancel failure, the action may
+        // already be finished server-side, so the UI must catch up to truth.
+        if (typeof updateStacksContainerStates === 'function') {
+            updateStacksContainerStates();
+        }
+        if (typeof scheduleStacksStateUpdate === 'function') {
+            scheduleStacksStateUpdate();
+        }
     }
 }
 
