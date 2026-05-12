@@ -3685,6 +3685,35 @@ a.btn {
     pointer-events: none;
 }
 
+/* Per-stage version annotation badge inside a pipeline-step */
+.pipeline-step-version {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 5px;
+    margin-left: 2px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.10);
+    color: inherit;
+    font-size: 0.68rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: 0.2px;
+    font-variant-numeric: tabular-nums;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.85;
+}
+.pipeline-step:hover .pipeline-step-version { opacity: 1; }
+.pipeline-step.step-idle .pipeline-step-version { background: rgba(255, 255, 255, 0.06); }
+.pipeline-step.step-pending .pipeline-step-version { background: rgba(14, 165, 233, 0.15); }
+.pipeline-step.step-running .pipeline-step-version { background: rgba(14, 165, 233, 0.22); }
+.pipeline-step.step-success .pipeline-step-version { background: rgba(34, 197, 94, 0.22); }
+.pipeline-step.step-failed .pipeline-step-version { background: rgba(239, 68, 68, 0.22); }
+.pipeline-step.step-warning .pipeline-step-version { background: rgba(251, 146, 60, 0.22); }
+.pipeline-step.step-gate_rejected .pipeline-step-version { background: rgba(251, 191, 36, 0.22); }
+
 .pipeline-spinner { animation: pipeline-spin 1s linear infinite; }
 @keyframes pipeline-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 

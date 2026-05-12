@@ -4064,6 +4064,17 @@ function renderStacksList() {
         const qaActionId = pipeline ? pipeline.qa_action_id : null;
         const deployActionId = pipeline ? pipeline.deploy_action_id : null;
 
+        // Per-stage version annotations shown next to each pipeline step
+        const stageVersions = (pipeline && pipeline.stages) ? pipeline.stages : {};
+        const buildStageVersion = (stageVersions.build && stageVersions.build.current_version)
+            || (latestBuilt ? normalizeVersion(latestBuilt) : null);
+        const testStageVersion = stageVersions.test && stageVersions.test.current_version;
+        const qaStageVersion = (stageVersions.qa && stageVersions.qa.current_version) || qaDeployedTag || null;
+        const deployStageVersion = (stageVersions.deploy && stageVersions.deploy.current_version) || deployedTag || null;
+        const stageVersionLabel = (v, titleText) => v
+            ? `<span class="pipeline-step-version" title="${escapeHtml(titleText)}: ${escapeHtml(v)}">${escapeHtml(v)}</span>`
+            : '';
+
         // Build containers HTML (similar to Computers view compose-group style)
         let containersHtml = '';
         const serviceCount = Object.keys(stackContainers).length;
@@ -4345,17 +4356,19 @@ function renderStacksList() {
                     </button>
 
                     <div class="pipeline-flow">
-                        <div class="pipeline-step step-${versionStep}" onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'version')" title="Version: ${escapeHtml(pipelineVersion)} (click to run full pipeline)" style="cursor:pointer">
+                        <div class="pipeline-step step-${versionStep}" onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'version')" title="Latest available version: ${escapeHtml(pipelineVersion)} (click to run full pipeline)" style="cursor:pointer">
                             ${stepIcon(versionStep)}
-                            <span>${escapeHtml(pipelineVersion)}</span>
+                            <span>Version</span>
+                            <span class="pipeline-step-version" title="Latest available: ${escapeHtml(pipelineVersion)}">${escapeHtml(pipelineVersion)}</span>
                         </div>
                         <span class="pipeline-transition-btn ${_gateArrowClass(pipeline, 'version', versionStep, buildStep)}${gateVersionBuild ? ' has-gate' : ''}${_transitionModeClass(pipeline, 'version_to_build')}" onclick="event.stopPropagation(); openTransitionConfig('${escapeHtml(repo.name)}', 'version_to_build')" title="Version → Build transition (click to configure)">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
                             ${_transitionModeIcon(pipeline, 'version_to_build')}
                         </span>
-                        <div class="pipeline-step step-${buildStep}" ${skipBuild ? 'title="Build: skipped (no build config)"' : `onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'build')" title="Build" style="cursor:pointer"`}>
+                        <div class="pipeline-step step-${buildStep}" ${skipBuild ? 'title="Build: skipped (no build config)"' : `onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'build')" title="Build${buildStageVersion ? ' — last built: ' + escapeHtml(buildStageVersion) : ''}" style="cursor:pointer"`}>
                             ${skipBuild ? `<span class="step-icon">–</span>` : stepIcon(buildStep)}
                             <span>Build</span>
+                            ${!skipBuild ? stageVersionLabel(buildStageVersion, 'Last built') : ''}
                             ${!skipBuild && buildActionId ? `<span class="pipeline-log-btn" onclick="event.stopPropagation(); openActionLogs('${buildActionId}', 'Build Logs', '${escapeHtml(repo.name)}')" title="View build logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
                             ${buildStep === 'running' && buildActionId ? `<span class="pipeline-stop-btn" onclick="event.stopPropagation(); cancelAction('${buildActionId}')" title="Stop build"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="10" height="10"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></span>` : ''}
                         </div>
@@ -4375,18 +4388,20 @@ function renderStacksList() {
                             ${qaEnabled ? '<span class="transition-badge badge-qa" title="QA pre-deploy enabled">QA</span>' : ''}
                         </span>
                         ${qaEnabled ? `
-                        <div class="pipeline-step step-${qaStep}" onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'qa')" title="QA deploy (qa-${escapeHtml(stackName)} on qa.&lt;domain&gt;)" style="cursor:pointer">
+                        <div class="pipeline-step step-${qaStep}" onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'qa')" title="QA deploy (qa-${escapeHtml(stackName)} on qa.&lt;domain&gt;)${qaStageVersion ? ' — current: ' + escapeHtml(qaStageVersion) : ''}" style="cursor:pointer">
                             ${stepIcon(qaStep)}
                             <span>QA</span>
+                            ${stageVersionLabel(qaStageVersion, 'QA deployed')}
                             ${qaActionId ? `<span class="pipeline-log-btn" onclick="event.stopPropagation(); openActionLogs('${qaActionId}', 'QA Deploy Logs', '${escapeHtml(repo.name)}')" title="View QA deploy logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
                             ${qaStep === 'running' && qaActionId ? `<span class="pipeline-stop-btn" onclick="event.stopPropagation(); cancelAction('${qaActionId}')" title="Stop QA deploy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="10" height="10"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></span>` : ''}
                         </div>
                         <span class="pipeline-transition-btn ${_gateArrowClass(pipeline, 'qa', qaStep, deployStep)}" title="QA → Deploy">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
                         </span>` : ''}
-                        <div class="pipeline-step step-${deployStep}" onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'deploy')" title="Deploy">
+                        <div class="pipeline-step step-${deployStep}" onclick="event.stopPropagation(); pipelineStepClick('${escapeHtml(repo.name)}', '${escapeHtml(repo.ssh_url)}', 'deploy')" title="Deploy (prod)${deployStageVersion ? ' — current: ' + escapeHtml(deployStageVersion) : ''}">
                             ${stepIcon(deployStep)}
                             <span>Deploy</span>
+                            ${stageVersionLabel(deployStageVersion, 'Prod deployed')}
                             ${deployActionId ? `<span class="pipeline-log-btn" onclick="event.stopPropagation(); openActionLogs('${deployActionId}', 'Deploy Logs', '${escapeHtml(repo.name)}')" title="View deploy logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>` : ''}
                             ${deployStep === 'running' && deployActionId ? `<span class="pipeline-stop-btn" onclick="event.stopPropagation(); cancelAction('${deployActionId}')" title="Stop deploy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="10" height="10"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></span>` : ''}
                         </div>
