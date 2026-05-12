@@ -736,16 +736,75 @@ run_hook "$POST_SCRIPT_PATH" "$POST_SCRIPT" "$DEVOPS_PATH" || {
 }
 
 # ============================================================================
-# Step 8b: Force-update privatenetwork_traefik to resync reverse proxy
+# Step 8b: Resync privatenetwork_traefik only if the deployed domain
+#          responds with "Bad Gateway" (stale backend IPs after a redeploy).
 # ============================================================================
-# Traefik can keep stale backend container IPs after a redeploy, causing 502s.
 # Skip when deploying the privatenetwork stack itself (already updated above).
 if [ "$STACK_NAME" != "privatenetwork" ] && docker service inspect privatenetwork_traefik >/dev/null 2>&1; then
-    log_info "Force-updating privatenetwork_traefik to resync reverse proxy..."
-    if docker service update --force privatenetwork_traefik >/dev/null 2>&1; then
-        log_success "privatenetwork_traefik resynced"
+    # Collect hostnames to probe:
+    #   1. TRAEFIK_HOST from the loaded .env (already qa-prefixed if applicable)
+    #   2. Host(`...`) rules declared in the deploy compose file
+    CHECK_HOSTS=()
+    if [ -n "${TRAEFIK_HOST:-}" ]; then
+        CHECK_HOSTS+=("$TRAEFIK_HOST")
+    fi
+    if [ -f "$DEPLOY_COMPOSE" ]; then
+        while IFS= read -r host; do
+            [ -n "$host" ] && CHECK_HOSTS+=("$host")
+        done < <(grep -oE 'Host\(`[^`]+`\)' "$DEPLOY_COMPOSE" \
+                    | sed -E 's/Host\(`([^`]+)`\)/\1/' \
+                    | sort -u)
+    fi
+
+    if [ ${#CHECK_HOSTS[@]} -eq 0 ]; then
+        log_info "No deployed host found to probe — skipping Traefik resync check"
     else
-        log_warning "Could not force-update privatenetwork_traefik (continuing)"
+        # De-duplicate while preserving order
+        readarray -t CHECK_HOSTS < <(printf '%s\n' "${CHECK_HOSTS[@]}" | awk 'NF && !seen[$0]++')
+
+        NEEDS_TRAEFIK_RESYNC=false
+        BAD_GATEWAY_HOST=""
+
+        for host in "${CHECK_HOSTS[@]}"; do
+            log_info "Probing https://$host for Bad Gateway..."
+            # Retry a few times so we don't false-positive while replicas
+            # are still starting up after the rolling update.
+            for attempt in 1 2 3; do
+                RESPONSE=$(curl -k -sS \
+                    --connect-timeout 5 --max-time 10 \
+                    -w $'\nHTTP_STATUS:%{http_code}' \
+                    "https://$host" 2>/dev/null || true)
+                STATUS=$(printf '%s' "$RESPONSE" | grep -oE 'HTTP_STATUS:[0-9]+' | tail -1 | cut -d: -f2)
+                BODY=$(printf '%s' "$RESPONSE" | sed '$d')
+
+                if [ "$STATUS" = "502" ] || printf '%s' "$BODY" | grep -qi "Bad Gateway"; then
+                    log_warning "Bad Gateway from $host (HTTP ${STATUS:-?}, attempt ${attempt}/3)"
+                    if [ "$attempt" -lt 3 ]; then
+                        sleep 3
+                        continue
+                    fi
+                    NEEDS_TRAEFIK_RESYNC=true
+                    BAD_GATEWAY_HOST="$host"
+                    break
+                fi
+
+                log_info "Got HTTP ${STATUS:-?} from $host — no Bad Gateway"
+                break
+            done
+
+            [ "$NEEDS_TRAEFIK_RESYNC" = true ] && break
+        done
+
+        if [ "$NEEDS_TRAEFIK_RESYNC" = true ]; then
+            log_info "Persistent Bad Gateway on $BAD_GATEWAY_HOST — force-updating privatenetwork_traefik..."
+            if docker service update --force privatenetwork_traefik >/dev/null 2>&1; then
+                log_success "privatenetwork_traefik resynced"
+            else
+                log_warning "Could not force-update privatenetwork_traefik (continuing)"
+            fi
+        else
+            log_info "No Bad Gateway detected — leaving privatenetwork_traefik untouched"
+        fi
     fi
 fi
 
