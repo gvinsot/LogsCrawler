@@ -3874,15 +3874,53 @@ function toggleStackExpand(stackName) {
     const expanded = getExpandedStacks();
     expanded[stackName] = !expanded[stackName];
     saveExpandedStacks(expanded);
-    
+
     const hostGroupEl = document.querySelector(`[data-repo="${stackName}"].host-group`);
     const contentEl = document.getElementById(`stack-containers-${stackName}`);
-    
+
     if (hostGroupEl) {
         hostGroupEl.classList.toggle('collapsed', !expanded[stackName]);
     }
     if (contentEl) {
         contentEl.style.display = expanded[stackName] ? 'block' : 'none';
+    }
+}
+
+// Per-stack sub-section expansion (prod/qa) used when QA is active.
+const STACKS_SUBSECTION_KEY = 'pulsarcd_stacks_subsections';
+
+function getAllExpandedStackSubSections() {
+    try {
+        const stored = localStorage.getItem(STACKS_SUBSECTION_KEY);
+        return stored ? JSON.parse(stored) : {};
+    } catch {
+        return {};
+    }
+}
+
+function getExpandedStackSubSections(stackName) {
+    const all = getAllExpandedStackSubSections();
+    return all[stackName] || {};
+}
+
+function toggleStackSubSection(stackName, section) {
+    const all = getAllExpandedStackSubSections();
+    const current = all[stackName] || {};
+    // Default state is open (true), so first toggle should close it.
+    const wasOpen = current[section] !== false;
+    current[section] = !wasOpen;
+    all[stackName] = current;
+    try {
+        localStorage.setItem(STACKS_SUBSECTION_KEY, JSON.stringify(all));
+    } catch (e) {
+        console.error('Failed to save stack subsections:', e);
+    }
+
+    const bodyEl = document.getElementById(`stack-subsection-${section}-${stackName}`);
+    if (bodyEl) {
+        bodyEl.style.display = current[section] ? 'block' : 'none';
+        const wrapper = bodyEl.parentElement;
+        if (wrapper) wrapper.classList.toggle('collapsed', !current[section]);
     }
 }
 
@@ -4238,17 +4276,48 @@ function renderStacksList() {
                 return html;
             };
 
-            containersHtml += renderServicesBlock(stackContainers, stackName, false);
+            // When QA is active, render Production and QA as independently
+            // collapsible sub-sections. When QA is not active, render production
+            // services flat (the stack-containers block is already toggled by
+            // the stack header).
+            const qaActive = qaServiceCount > 0;
+            if (qaActive) {
+                const subExpanded = getExpandedStackSubSections(repo.name);
+                const prodOpen = subExpanded.prod !== false; // default open
+                const qaOpen = subExpanded.qa !== false;     // default open
+                const chevronSvg = `<svg class="section-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>`;
 
-            if (qaServiceCount > 0) {
+                if (serviceCount > 0) {
+                    containersHtml += `
+                    <div class="stack-subsection ${prodOpen ? '' : 'collapsed'}" data-subsection="prod">
+                        <div class="stack-section-divider stack-section-toggle" onclick="toggleStackSubSection('${escapeHtml(repo.name)}', 'prod')">
+                            ${chevronSvg}
+                            <span class="stack-badge deployed">Production</span>
+                            ${deployedTag ? `<span class="stack-divider-version" title="Production deployed version">${escapeHtml(deployedTag)}</span>` : ''}
+                            <span class="group-count">${serviceCount} svc</span>
+                            <span class="stack-divider-name">${escapeHtml(stackName)}</span>
+                        </div>
+                        <div class="stack-subsection-body" id="stack-subsection-prod-${escapeHtml(repo.name)}" style="display: ${prodOpen ? 'block' : 'none'};">
+                            ${renderServicesBlock(stackContainers, stackName, false)}
+                        </div>
+                    </div>`;
+                }
                 containersHtml += `
-                    <div class="stack-section-divider stack-section-divider-qa">
-                        <span class="stack-badge stack-badge-qa">QA Environment</span>
-                        ${qaDeployedTag ? `<span class="stack-divider-version" title="QA deployed version">${escapeHtml(qaDeployedTag)}</span>` : ''}
-                        <span class="stack-divider-name">qa-${escapeHtml(stackName)}</span>
+                    <div class="stack-subsection ${qaOpen ? '' : 'collapsed'}" data-subsection="qa">
+                        <div class="stack-section-divider stack-section-divider-qa stack-section-toggle" onclick="toggleStackSubSection('${escapeHtml(repo.name)}', 'qa')">
+                            ${chevronSvg}
+                            <span class="stack-badge stack-badge-qa">QA Environment</span>
+                            ${qaDeployedTag ? `<span class="stack-divider-version" title="QA deployed version">${escapeHtml(qaDeployedTag)}</span>` : ''}
+                            <span class="group-count">${qaServiceCount} svc</span>
+                            <span class="stack-divider-name">qa-${escapeHtml(stackName)}</span>
+                        </div>
+                        <div class="stack-subsection-body" id="stack-subsection-qa-${escapeHtml(repo.name)}" style="display: ${qaOpen ? 'block' : 'none'};">
+                            ${renderServicesBlock(qaStackContainers, qaStackName, true)}
+                        </div>
                     </div>
                 `;
-                containersHtml += renderServicesBlock(qaStackContainers, qaStackName, true);
+            } else {
+                containersHtml += renderServicesBlock(stackContainers, stackName, false);
             }
 
             containersHtml += `</div>`;

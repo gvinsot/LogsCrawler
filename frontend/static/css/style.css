@@ -2630,6 +2630,35 @@ a.btn {
     border-left: 3px solid rgba(168, 85, 247, 0.45);
 }
 
+/* Collapsible prod/qa sub-sections inside a stack (shown when QA is active) */
+.stack-subsection {
+    display: block;
+}
+
+.stack-section-toggle {
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.15s;
+}
+
+.stack-section-toggle:hover {
+    background: var(--bg-tertiary);
+}
+
+.stack-section-toggle .section-chevron {
+    transition: transform 0.2s ease;
+    flex-shrink: 0;
+    color: var(--text-muted);
+}
+
+.stack-subsection.collapsed .stack-section-toggle .section-chevron {
+    transform: rotate(-90deg);
+}
+
+.stack-subsection .stack-subsection-body {
+    transition: opacity 0.15s ease;
+}
+
 .stack-deployed-ago {
     font-size: 0.7rem;
     color: var(--text-muted);
