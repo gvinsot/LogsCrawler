@@ -162,16 +162,13 @@ docker-compose up -d
 
 ### 2. Deploy Agents on Each Host
 
-On each host you want to monitor, deploy the agent:
+Agents are deployed in **global mode** across the Docker Swarm via
+`devops/docker-compose.swarm.yml` — one agent runs on every node automatically.
+There is no separate per-host compose file.
 
 ```bash
-# Set environment variables
-export BACKEND_URL=http://your-central-server:5000
-export OPENSEARCH_HOSTS='["http://your-central-server:9200"]'
-export AGENT_ID=$(hostname)
-
-# Run the agent
-docker-compose -f docker-compose.agent.yml up -d
+# From the swarm manager node
+docker stack deploy -c devops/docker-compose.swarm.yml pulsarcd
 ```
 
 ### 3. Access the Dashboard
@@ -205,7 +202,7 @@ environment:
 
 ### Agent Configuration
 
-Configure each agent via environment variables in `docker-compose.agent.yml`:
+Configure each agent via environment variables in `devops/docker-compose.swarm.yml`:
 
 ```yaml
 environment:
@@ -298,9 +295,8 @@ pulsarcd/
 │       └── js/
 │           └── app.js      # Frontend JavaScript
 ├── devops/
-│   └── docker-compose.swarm.yml  # Docker Swarm deployment
-├── docker-compose.yml          # Central server deployment
-├── docker-compose.agent.yml    # Agent deployment (per host)
+│   └── docker-compose.swarm.yml  # Docker Swarm deployment (backend + agents, global)
+├── docker-compose.yml          # Central server deployment (dev/single host)
 ├── Dockerfile                  # Backend/Frontend container
 ├── Dockerfile.agent            # Agent container
 ├── requirements.txt

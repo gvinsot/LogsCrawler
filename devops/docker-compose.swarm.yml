@@ -187,14 +187,26 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.agent
-    # Run as root to access Docker socket
-    user: root
-    privileged: true
-    pid: host
+    # Security hardening:
+    # - No privileged mode, no host PID namespace
+    # - All Linux capabilities dropped (agent only does HTTP + Docker API calls)
+    # - no-new-privileges blocks setuid escalation
+    # - Read-only rootfs with a tmpfs for transient writes
+    # NOTE: /var/run/docker.sock still grants Docker API access (equivalent to host root).
+    # The next hardening step is to mediate it via a docker-socket-proxy with a whitelist
+    # of endpoints — see security follow-ups.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     volumes:
-      # Mount Docker socket for LOCAL container access only
+      # Mount Docker socket for LOCAL container access only.
+      # NB: the :ro flag only protects the socket *file*, not the Docker API behind it.
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # System and GPU device access for monitoring
+      # System metrics (read-only)
       - /sys:/sys:ro
     environment:
       # Agent ID: use node hostname (set by Swarm)
@@ -218,8 +230,9 @@ services:
       # Initial log lines to fetch
       - AGENT_LOG_LINES_PER_FETCH=500
 
-      # Authentication key for swarm-manager API (must match PULSARCD_AUTH__AGENT_KEY)
-      - AGENT_AUTH_KEY=${PULSARCD_AUTH__AGENT_KEY:-}
+      # Authentication key for swarm-manager API (must match PULSARCD_AUTH__AGENT_KEY).
+      # REQUIRED: deploy fails if unset or empty — agents must not run unauthenticated.
+      - AGENT_AUTH_KEY=${PULSARCD_AUTH__AGENT_KEY:?PULSARCD_AUTH__AGENT_KEY must be set to a non-empty value}
 
       # Log level (DEBUG, INFO, WARNING, ERROR)
       - AGENT_LOG_LEVEL=${AGENT_LOG_LEVEL:-INFO}
