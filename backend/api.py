@@ -2913,6 +2913,33 @@ _auto_build_state = {}  # {repo_name: {"last_sha": str, "building": bool, "untag
 _auto_build_task = None
 
 
+def _acquire_build_lock(repo_name: str) -> bool:
+    """Atomically claim the build slot for ``repo_name``.
+
+    Returns True if the caller now owns the slot, False if a build is
+    already in progress. Single-threaded asyncio makes the check-and-set
+    safe as long as no ``await`` runs between them.
+
+    Only the ``building`` flag is initialized here — ``last_sha`` and
+    ``untagged_commits`` are owned by ``auto_build_poller`` and must stay
+    absent until the poller has actually observed the repo, so a manual
+    trigger never tricks the poller into thinking the SHA changed.
+    """
+    state = _auto_build_state.get(repo_name)
+    if state is None:
+        _auto_build_state[repo_name] = {"building": True}
+        return True
+    if state.get("building"):
+        return False
+    state["building"] = True
+    return True
+
+
+def _release_build_lock(repo_name: str):
+    if repo_name in _auto_build_state:
+        _auto_build_state[repo_name]["building"] = False
+
+
 @app.post("/api/stacks/pipeline")
 async def trigger_pipeline_endpoint(
     repo_name: str = Query(..., description="Repository name"),
@@ -2944,7 +2971,12 @@ async def trigger_pipeline_endpoint(
                 detail=f"Invalid tag format: '{tag}'. Expected format: vX.X.X (e.g., v1.0.5)"
             )
         version = tag.lstrip('v')
-        await _trigger_pipeline(repo_name, ssh_url, version=version, tag=tag)
+        started = await _trigger_pipeline(repo_name, ssh_url, version=version, tag=tag)
+        if not started:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A build is already running for {repo_name}"
+            )
         return {"status": "started", "repo": repo_name, "tag": tag, "version": version}
     else:
         # New flow: auto-tag the commit, then run pipeline
@@ -2964,7 +2996,12 @@ async def trigger_pipeline_endpoint(
             )
 
         logger.info("Auto-tagged commit for pipeline", repo=repo_name, tag=new_tag, commit=commit[:7])
-        await _trigger_pipeline(repo_name, ssh_url, version=next_version, tag=new_tag)
+        started = await _trigger_pipeline(repo_name, ssh_url, version=next_version, tag=new_tag)
+        if not started:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A build is already running for {repo_name}"
+            )
         return {"status": "started", "repo": repo_name, "tag": new_tag, "version": next_version, "auto_tagged": True}
 AUTO_BUILD_POLL_INTERVAL = 10  # seconds – repo checks are batched so this is cheap
 
@@ -2985,7 +3022,7 @@ def _extract_version_from_output(lines: list) -> Optional[str]:
     return None
 
 
-async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, tag: str = None):
+async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, tag: str = None) -> bool:
     """Trigger a full pipeline: build → test → deploy.
 
     Args:
@@ -2993,15 +3030,25 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
         ssh_url: SSH URL for cloning
         version: Optional exact version (e.g., "1.0.5"). If provided, build uses this exact version.
         tag: Optional git tag (e.g., "v1.0.5"). If provided, build checks out this tag.
+
+    Returns:
+        True if the pipeline was started, False if a build was already
+        running for this repo (de-duplication).
     """
+    # Acquire the per-repo build lock first so any caller (API endpoint,
+    # webhook, auto-poller, manual rebuild) is de-duplicated centrally.
+    if not _acquire_build_lock(repo_name):
+        logger.warning("Pipeline already running, skipping duplicate trigger",
+                       repo=repo_name, version=version, tag=tag)
+        return False
+
     try:
         deployer, host_name = _get_deployer_and_host()
     except Exception as e:
         logger.error("Pipeline: no host available", repo=repo_name, error=str(e))
         _set_pipeline(repo_name, "build", "failed", version, build_id=None, test_id=None, deploy_id=None)
-        if repo_name in _auto_build_state:
-            _auto_build_state[repo_name]["building"] = False
-        return
+        _release_build_lock(repo_name)
+        return False
 
     # Update local clone BEFORE checking build config, so that newly added
     # build: directives in docker-compose.swarm.yml are picked up.
@@ -3034,6 +3081,11 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
     # Determine build version param: exact "1.0.5" or auto-increment "1.0"
     build_version = version if version else "1.0"
 
+    # Pull per-project build options from the version_to_build transition.
+    _vb_cfg_full = pipeline_state.get_transition_config(repo_name, "version_to_build") or {}
+    _multi_arch = bool(_vb_cfg_full.get("multi_arch", False))
+    _platforms = _vb_cfg_full.get("platforms") or ("linux/amd64,linux/arm64" if _multi_arch else None)
+
     async def _run_pipeline():
         built_version = version
         build_id = None
@@ -3045,10 +3097,13 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
                 _background_actions[build_id] = build_action
                 pipeline_state.get_or_create(repo_name).stages["build"].action_id = build_id
 
-                logger.info("Pipeline: starting build", repo=repo_name, action_id=build_id, version=build_version, tag=tag)
+                logger.info("Pipeline: starting build", repo=repo_name, action_id=build_id,
+                            version=build_version, tag=tag,
+                            multi_arch=_multi_arch, platforms=_platforms)
                 result = await deployer.build(
                     repo_name, ssh_url, version=build_version,
                     tag=tag,
+                    multi_arch=_multi_arch, platforms=_platforms,
                     output_callback=build_action.append_output,
                     cancel_event=build_action.cancel_event,
                 )
@@ -3234,11 +3289,11 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
             current_stage = pipeline_state.get_legacy(repo_name).get("stage", "build")
             _set_pipeline(repo_name, current_stage, "failed", built_version)
         finally:
-            if repo_name in _auto_build_state:
-                _auto_build_state[repo_name]["building"] = False
+            _release_build_lock(repo_name)
 
     asyncio.create_task(_run_pipeline())
     logger.info("Pipeline triggered", repo=repo_name)
+    return True
 
 
 async def auto_build_poller():
@@ -3278,12 +3333,18 @@ async def auto_build_poller():
         untagged_count = len(untagged_data.get("untagged_commits", []))
         state = _auto_build_state.get(name)
 
-        if state is None:
-            _auto_build_state[name] = {
-                "last_sha": latest_sha,
-                "building": False,
-                "untagged_commits": untagged_count,
-            }
+        # First observation of this repo (or only the build lock has touched it
+        # so far via a manual trigger) — record the SHA without firing a build.
+        if state is None or "last_sha" not in state:
+            if state is None:
+                _auto_build_state[name] = {
+                    "last_sha": latest_sha,
+                    "building": False,
+                    "untagged_commits": untagged_count,
+                }
+            else:
+                state["last_sha"] = latest_sha
+                state["untagged_commits"] = untagged_count
             if untagged_count > 0:
                 logger.info("Repo initialized with untagged commits",
                             repo=name, untagged=untagged_count)
@@ -3306,7 +3367,8 @@ async def auto_build_poller():
                         old_sha=state["last_sha"][:7],
                         new_sha=latest_sha[:7],
                         untagged=untagged_count)
-            state["building"] = True
+            # Advance last_sha so the next poll iteration doesn't re-evaluate
+            # the same commit. The actual build lock is owned by _trigger_pipeline.
             state["last_sha"] = latest_sha
 
             latest_tag_info = untagged_data.get("latest_tag")
@@ -3320,10 +3382,8 @@ async def auto_build_poller():
                         await _trigger_pipeline(name, ssh_url, version=next_ver, tag=new_tag)
                     else:
                         logger.error("Failed to auto-tag", repo=name, error=tag_result.get("error"))
-                        state["building"] = False
                 except Exception as tag_err:
                     logger.error("Auto-tag failed", repo=name, error=str(tag_err))
-                    state["building"] = False
             elif latest_tag_info:
                 tag_name = latest_tag_info.get("name", "")
                 version = tag_name.lstrip("v")
@@ -3403,9 +3463,15 @@ async def set_transition_config(repo_name: str, transition: str, request: Reques
     cfg: Dict[str, Any] = {"mode": mode}
     if transition == "test_to_deploy":
         cfg["qa_enabled"] = bool(body.get("qa_enabled", False))
+    if transition == "version_to_build":
+        cfg["multi_arch"] = bool(body.get("multi_arch", False))
+        platforms = body.get("platforms")
+        if platforms and isinstance(platforms, str) and platforms.strip():
+            cfg["platforms"] = platforms.strip()
     pipeline_state.set_transition_config(repo_name, transition, cfg)
     logger.info("Transition config updated", repo=repo_name, transition=transition,
-                mode=mode, qa_enabled=cfg.get("qa_enabled"))
+                mode=mode, qa_enabled=cfg.get("qa_enabled"),
+                multi_arch=cfg.get("multi_arch"), platforms=cfg.get("platforms"))
     return {"saved": True, "repo": repo_name, "transition": transition, **cfg}
 
 

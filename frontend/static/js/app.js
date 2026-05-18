@@ -4648,6 +4648,27 @@ async function openTransitionConfig(repoName, transition) {
                                 </div>
                             </label>
                         </div>
+                        <div id="transition-multiarch-section" style="margin-top: 20px; display: none; padding: 14px 16px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary);">
+                            <label style="display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
+                                <input type="checkbox" id="transition-multiarch-enabled" style="margin-top: 3px;">
+                                <span>
+                                    <div style="font-weight: 600; margin-bottom: 4px;">Enable multi-arch build</div>
+                                    <div style="font-size: 12px; color: var(--text-muted); line-height: 1.5;">
+                                        Builds images for multiple CPU architectures using the
+                                        <code>docker-container</code> buildx driver. This is slower
+                                        and heavier (QEMU emulation when cross-building) and is
+                                        only needed when deploying to mixed-arch nodes (e.g. amd64 + arm64).
+                                        Leave off for single-arch (host) builds — they use the host
+                                        docker engine and are much faster.
+                                    </div>
+                                </span>
+                            </label>
+                            <div id="transition-multiarch-platforms-row" style="margin-top: 12px; display: none;">
+                                <label for="transition-multiarch-platforms" style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">Target platforms (comma-separated)</label>
+                                <input type="text" id="transition-multiarch-platforms" placeholder="linux/amd64,linux/arm64" style="width: 100%; padding: 8px 10px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-tertiary); color: var(--text-primary); font-family: var(--font-mono, monospace); font-size: 12px;">
+                                <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Defaults to <code>linux/amd64,linux/arm64</code> when empty.</div>
+                            </div>
+                        </div>
                         <div id="transition-qa-section" style="margin-top: 20px; display: none; padding: 14px 16px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary);">
                             <label style="display: flex; align-items: flex-start; gap: 10px; cursor: pointer;">
                                 <input type="checkbox" id="transition-qa-enabled" style="margin-top: 3px;">
@@ -4730,6 +4751,25 @@ async function openTransitionConfig(repoName, transition) {
             qaCheckbox.checked = false;
         }
 
+        // Multi-arch option only applies to the version_to_build transition
+        const maSection = document.getElementById('transition-multiarch-section');
+        const maCheckbox = document.getElementById('transition-multiarch-enabled');
+        const maPlatformsRow = document.getElementById('transition-multiarch-platforms-row');
+        const maPlatformsInput = document.getElementById('transition-multiarch-platforms');
+        if (transition === 'version_to_build') {
+            maSection.style.display = '';
+            maCheckbox.checked = !!config.multi_arch;
+            maPlatformsInput.value = config.platforms || '';
+            maPlatformsRow.style.display = maCheckbox.checked ? '' : 'none';
+            maCheckbox.onchange = () => {
+                maPlatformsRow.style.display = maCheckbox.checked ? '' : 'none';
+            };
+        } else {
+            maSection.style.display = 'none';
+            maCheckbox.checked = false;
+            maPlatformsInput.value = '';
+        }
+
         // Show AI decision logs if available
         const aiSection = document.getElementById('transition-ai-logs-section');
         if (lastDecision) {
@@ -4769,6 +4809,14 @@ async function saveTransitionConfig() {
         if (transition === 'test_to_deploy') {
             const qaCb = document.getElementById('transition-qa-enabled');
             body.qa_enabled = !!(qaCb && qaCb.checked);
+        }
+        if (transition === 'version_to_build') {
+            const maCb = document.getElementById('transition-multiarch-enabled');
+            body.multi_arch = !!(maCb && maCb.checked);
+            const maPlat = document.getElementById('transition-multiarch-platforms');
+            if (body.multi_arch && maPlat && maPlat.value.trim()) {
+                body.platforms = maPlat.value.trim();
+            }
         }
         await apiPut(`/stacks/pipeline/${encodeURIComponent(repoName)}/transition/${encodeURIComponent(transition)}`, body);
         modal.classList.remove('active');

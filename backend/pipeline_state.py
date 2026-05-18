@@ -421,7 +421,9 @@ class PipelineStateManager:
             repo_name: Repository name
             transition: "version_to_build", "build_to_test" or "test_to_deploy"
             config: {"mode": "auto"|"auto_with_success"|"agent"|"manual",
-                     "qa_enabled": bool (test_to_deploy only)}
+                     "qa_enabled": bool (test_to_deploy only),
+                     "multi_arch": bool (version_to_build only),
+                     "platforms": str (version_to_build only, e.g. "linux/amd64,linux/arm64")}
         """
         valid_transitions = {"version_to_build", "build_to_test", "test_to_deploy"}
         valid_modes = {"auto", "auto_with_success", "agent", "manual"}
@@ -435,6 +437,14 @@ class PipelineStateManager:
         # test_to_deploy supports an optional QA-pre-deploy step
         if transition == "test_to_deploy":
             new_config["qa_enabled"] = bool(config.get("qa_enabled", False))
+        # version_to_build supports an optional multi-arch build (uses the
+        # heavier docker-container buildx driver, with QEMU emulation when
+        # cross-building). Single-arch builds use the host docker engine.
+        if transition == "version_to_build":
+            new_config["multi_arch"] = bool(config.get("multi_arch", False))
+            platforms = config.get("platforms")
+            if platforms and isinstance(platforms, str):
+                new_config["platforms"] = platforms.strip()
         entry.transition_configs[transition] = new_config
         self._save()
 

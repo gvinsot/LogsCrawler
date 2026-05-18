@@ -554,6 +554,26 @@ elif [ ${#IMAGE_PLATFORMS[@]} -gt 0 ]; then
     NEEDS_BUILDX=true
 fi
 
+# MULTI_ARCH env var (set by PulsarCD's version_to_build transition) is the
+# authoritative override: "true" forces multi-arch, "false" forces single-arch
+# on the host docker engine regardless of compose x-platforms. When unset,
+# fall back to the auto-detection above (legacy CLI invocations).
+if [ "${MULTI_ARCH:-}" = "false" ]; then
+    if [ "$NEEDS_BUILDX" = true ]; then
+        log_warning "MULTI_ARCH=false: ignoring compose x-platforms / BUILD_PLATFORMS, building single-arch"
+    fi
+    NEEDS_BUILDX=false
+    BUILD_PLATFORMS=""
+    unset IMAGE_PLATFORMS
+    declare -A IMAGE_PLATFORMS
+elif [ "${MULTI_ARCH:-}" = "true" ]; then
+    NEEDS_BUILDX=true
+    if [ -z "$BUILD_PLATFORMS" ] && [ ${#IMAGE_PLATFORMS[@]} -eq 0 ]; then
+        BUILD_PLATFORMS="linux/amd64,linux/arm64"
+        log_info "MULTI_ARCH=true with no platforms specified, defaulting to: $BUILD_PLATFORMS"
+    fi
+fi
+
 # ============================================================================
 # Step 4: Build images
 # ============================================================================
@@ -602,7 +622,11 @@ _get_service_build_info() {
     '
 }
 
-# Ensure buildx builder exists if any image needs multi-arch
+# Select the buildx builder according to NEEDS_BUILDX.
+# - Multi-arch: dedicated docker-container builder (supports QEMU cross-build).
+# - Single-arch: explicitly switch to the host docker engine ('default')
+#   builder so we don't inherit a previously set docker-container default,
+#   which is heavier (separate buildkit container, no shared image cache).
 if [ "$NEEDS_BUILDX" = true ]; then
     BUILDER_NAME="pulsarcd-multiarch"
     if ! docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
@@ -610,6 +634,11 @@ if [ "$NEEDS_BUILDX" = true ]; then
         docker buildx create --name "$BUILDER_NAME" --driver docker-container --use
     else
         docker buildx use "$BUILDER_NAME"
+    fi
+else
+    if docker buildx inspect default >/dev/null 2>&1; then
+        log_info "Single-arch build: using host docker engine builder (default)"
+        docker buildx use default
     fi
 fi
 
