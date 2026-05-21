@@ -4,7 +4,7 @@
 Any environment variable whose name ends with one of the following suffixes is
 extracted, stored as a Docker secret, and removed from the ``environment:`` block:
 
-    _SECRET, _KEY, _TOKEN, _PASSWORD
+    _SECRET, _KEY, _TOKEN, _PASSWORD, _CONNECTIONSTRING, _CONNECTION_STRING
 
 The secret is mounted into each service that previously declared the variable
 under ``/run/secrets/<VAR_NAME>``. The application is expected to detect this
@@ -46,7 +46,14 @@ except ImportError:
     sys.exit(0)
 
 
-SECRET_SUFFIXES = ("_SECRET", "_KEY", "_TOKEN", "_PASSWORD")
+SECRET_SUFFIXES = (
+    "_SECRET",
+    "_KEY",
+    "_TOKEN",
+    "_PASSWORD",
+    "_CONNECTIONSTRING",
+    "_CONNECTION_STRING",
+)
 # Matches ${NAME} plus the full Compose / POSIX parameter-expansion family:
 #   ${NAME}             - bare reference
 #   ${NAME:-default}    - default if unset OR empty

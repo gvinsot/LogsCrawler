@@ -535,8 +535,9 @@ log_info "Updating image tags to version: $VERSION"
 update_image_tags "$COMPOSE_PATH" "$VERSION" "$DEPLOY_COMPOSE"
 
 # ----------------------------------------------------------------------------
-# Convert sensitive env vars (*_SECRET, *_KEY, *_TOKEN, *_PASSWORD) into
-# Docker secrets and rewrite the compose file accordingly.
+# Convert sensitive env vars (*_SECRET, *_KEY, *_TOKEN, *_PASSWORD,
+# *_CONNECTIONSTRING, *_CONNECTION_STRING) into Docker secrets and rewrite
+# the compose file accordingly.
 # ----------------------------------------------------------------------------
 PYTHON_BIN="$(command -v python3 || command -v python || true)"
 
