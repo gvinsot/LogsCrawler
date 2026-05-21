@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
 """Convert sensitive environment variables in a docker-compose file into Docker secrets.
 
-Any environment variable whose name ends with one of the following suffixes is
-extracted, stored as a Docker secret, and removed from the ``environment:`` block:
+Two patterns are supported:
 
-    _SECRET, _KEY, _TOKEN, _PASSWORD, _CONNECTIONSTRING, _CONNECTION_STRING
+1. Variables in a service's ``environment:`` block whose name ends with one of
+   the following suffixes are extracted, stored as a Docker secret, and
+   removed from the ``environment:`` block:
 
-The secret is mounted into each service that previously declared the variable
-under ``/run/secrets/<VAR_NAME>``. The application is expected to detect this
-file and load its content as the corresponding environment variable (see
-``backend/config.py`` and ``agent/config.py``).
+       _SECRET, _KEY, _TOKEN, _PASSWORD, _CONNECTIONSTRING, _CONNECTION_STRING
+
+   The secret is mounted into each service that previously declared the
+   variable under ``/run/secrets/<VAR_NAME>``. The application is expected
+   to detect this file and load its content as the corresponding env var
+   (see ``backend/config.py`` and ``agent/config.py``).
+
+2. Top-level ``secrets:`` entries declared with ``external: true`` whose key
+   matches a sensitive suffix are materialized from the process environment.
+   For example::
+
+       secrets:
+         DB_CONNECTION_STRING:
+           external: true
+           name: mystack_DB_CONNECTION_STRING
+
+   The value of ``$DB_CONNECTION_STRING`` (loaded from ``.env`` by the
+   deploy script) is used to create the Docker secret with the declared
+   ``name:``. The compose file itself is left untouched in this case —
+   service blocks already reference the secret explicitly.
 
 Usage:
     process_secrets.py <input_compose> <output_compose> <stack_name>
@@ -147,16 +164,72 @@ def create_docker_secret(name: str, value: str) -> None:
         sys.exit(1)
 
 
+def materialize_top_level_external_secrets(
+    secrets_top: dict, stack_name: str
+) -> None:
+    """Create Docker secrets for top-level ``external: true`` entries.
+
+    Compose files can declare secrets directly at the top level, e.g.::
+
+        secrets:
+          DB_CONNECTION_STRING:
+            external: true
+            name: mystack_DB_CONNECTION_STRING
+
+    For each such entry whose key matches a sensitive suffix, the value is
+    read from the process environment (populated from ``.env`` by the
+    deploy script) and a Docker secret is created with the declared
+    ``name:`` (falling back to ``{stack_name}_{key}``).
+    """
+    if not isinstance(secrets_top, dict):
+        return
+    for sec_key, sec_def in secrets_top.items():
+        if not isinstance(sec_def, dict):
+            continue
+        if not sec_def.get("external"):
+            continue
+        if not is_secret_name(sec_key):
+            continue
+        secret_name = sec_def.get("name") or f"{stack_name}_{sec_key}"
+        if docker_secret_exists(secret_name):
+            sys.stderr.write(
+                f"[secrets] Top-level secret '{secret_name}' already exists — reusing\n"
+            )
+            continue
+        value = os.environ.get(sec_key)
+        if not value:
+            sys.stderr.write(
+                f"[secrets] Top-level secret '{sec_key}' declared external but "
+                f"env var ${sec_key} is empty/unset — cannot create '{secret_name}'\n"
+            )
+            continue
+        create_docker_secret(secret_name, value)
+        sys.stderr.write(
+            f"[secrets] top-level: {sec_key} -> docker secret '{secret_name}'\n"
+        )
+
+
 def process(compose_path: str, output_path: str, stack_name: str) -> None:
     with open(compose_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
-    if not isinstance(data, dict) or "services" not in data:
+    if not isinstance(data, dict):
         with open(output_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False)
         return
 
     secrets_top = dict(data.get("secrets") or {})
+
+    # Materialize any secrets the compose file itself declares as external.
+    materialize_top_level_external_secrets(secrets_top, stack_name)
+
+    if "services" not in data:
+        if secrets_top:
+            data["secrets"] = secrets_top
+        with open(output_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+        return
+
     used_secrets: dict = {}  # var_name -> secret_name
 
     for svc_name, svc in (data.get("services") or {}).items():
