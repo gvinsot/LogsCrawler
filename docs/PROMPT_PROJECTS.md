@@ -21,9 +21,11 @@ Des services de données sont déjà déployés. **Demander à l’admin** de cr
 
 | Service | Usage | Dans l’application |
 |--------|--------|---------------------|
-| **MongoDB** | Base de documents (collections) | Utiliser la connection string fournie par l’admin (ex. `MONGODB_URI`) avec un driver MongoDB. |
-| **PostgreSQL** | Base relationnelle | Utiliser la connection string fournie par l’admin (ex. `DATABASE_URL`) avec un client PostgreSQL. |
-| **MinIO** | Stockage d’objets compatible S3 | Utiliser l’endpoint API et les identifiants (access key / secret) fournis avec un client S3 (AWS SDK, boto3, mc, etc.). |
+| **MongoDB** | Base de documents (collections) | Utiliser la connection string fournie par l’admin (ex. `MONGODB_CONNECTION_STRING`) avec un driver MongoDB. |
+| **PostgreSQL** | Base relationnelle | Utiliser la connection string fournie par l’admin (ex. `DATABASE_CONNECTION_STRING`) avec un client PostgreSQL. |
+| **MinIO** | Stockage d’objets compatible S3 | Utiliser l’endpoint API et les identifiants (`MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY`) fournis avec un client S3 (AWS SDK, boto3, mc, etc.). |
+
+> ⚠️ **Ces valeurs sont des secrets.** Une connection string contient des identifiants : ne la mettez **jamais** en clair dans le compose ni dans git. Nommez ces variables avec un suffixe reconnu (`_CONNECTION_STRING`, `_SECRET`, `_KEY`, `_PASSWORD`, `_TOKEN`) pour qu’elles soient converties automatiquement en secrets Docker au déploiement. Voir [Gestion des secrets](#gestion-des-secrets).
 
 **Réseaux à rejoindre** (ajouter le réseau au service qui se connecte au cluster) :
 
@@ -38,7 +40,8 @@ services:
   mon-app:
     image: mon-app:latest
     environment:
-      - MONGODB_URI=${MONGODB_URI}   # connection string fournie par l’admin
+      # Suffixe _CONNECTION_STRING ⇒ converti automatiquement en secret Docker au déploiement
+      - MONGODB_CONNECTION_STRING=${MONGODB_CONNECTION_STRING}   # connection string fournie par l’admin
     networks:
       - proxy
       - mongocluster_internal
@@ -90,6 +93,121 @@ services:
 
 Le projet doit avoir dans le dossier devops un fichier .env specifique.
 Il doit y avoir un .env.example
+
+
+## Gestion des secrets
+
+Les secrets (mots de passe, tokens, clés d’API, connection strings…) ne doivent **jamais** apparaître en clair dans le `docker-compose.swarm.yml` ni être committés dans git. PulsarCD les convertit automatiquement en **secrets Docker Swarm** au moment du déploiement.
+
+### Principe
+
+1. Les valeurs sensibles vivent uniquement dans `devops/.env` (qui est **gitignoré** — voir plus bas).
+2. Dans le compose, vous référencez ces valeurs comme des variables d’environnement : `- MA_VAR=${MA_VAR}`.
+3. Au déploiement, le script [`process_secrets.py`](../scripts/process_secrets.py) :
+   - détecte les variables sensibles (par convention de nommage, voir ci-dessous) ;
+   - crée un secret Docker nommé `<stack>_<NOM_VARIABLE>` à partir de la valeur du `.env` ;
+   - **retire** la variable du bloc `environment:` (elle n’apparaît donc plus en clair) ;
+   - monte le secret dans le conteneur sous `/run/secrets/<NOM_VARIABLE>` ;
+   - déclare le secret au niveau racine comme `external: true`.
+
+L’application lit ensuite le secret depuis le fichier `/run/secrets/<NOM_VARIABLE>`.
+
+### Convention de nommage (conversion automatique)
+
+Toute variable d’un bloc `environment:` dont le **nom se termine** par l’un de ces suffixes (insensible à la casse) est automatiquement transformée en secret Docker :
+
+| Suffixe | Exemple |
+|---------|---------|
+| `_SECRET` | `JWT_SECRET`, `APP_SECRET` |
+| `_KEY` | `MINIO_SECRET_KEY`, `STRIPE_API_KEY` |
+| `_TOKEN` | `GITHUB_TOKEN`, `MA_VAR_TOKEN` |
+| `_PASSWORD` | `DB_PASSWORD`, `SMTP_PASSWORD` |
+| `_CONNECTIONSTRING` / `_CONNECTION_STRING` | `MONGODB_CONNECTION_STRING`, `DATABASE_CONNECTION_STRING` |
+
+> 💡 Nommez donc vos variables sensibles en conséquence. Une variable comme `MONGODB_URI` ou `DATABASE_URL` ne correspond à **aucun** suffixe : elle serait déployée **en clair** (visible dans `docker service inspect`). Préférez `MONGODB_CONNECTION_STRING`, `DATABASE_CONNECTION_STRING`, etc.
+
+### Mode d’emploi (cas courant)
+
+**1. Déclarer la valeur dans `devops/.env`** (jamais committé) :
+
+```bash
+MONGODB_CONNECTION_STRING=mongodb://user:p4ssw0rd@mongo:27017/mabase
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
+**2. Référencer la variable dans `docker-compose.swarm.yml`** :
+
+```yaml
+services:
+  mon-app:
+    image: registry.methodinfo.fr/mon-app:latest
+    environment:
+      - MONGODB_CONNECTION_STRING=${MONGODB_CONNECTION_STRING}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    networks:
+      - proxy
+```
+
+**3. Déployer.** Le script transforme automatiquement le compose résolu en :
+
+```yaml
+services:
+  mon-app:
+    image: registry.methodinfo.fr/mon-app:latest
+    # plus de MONGODB_CONNECTION_STRING / GITHUB_TOKEN dans environment:
+    secrets:
+      - source: mon-app_MONGODB_CONNECTION_STRING
+        target: MONGODB_CONNECTION_STRING
+      - source: mon-app_GITHUB_TOKEN
+        target: GITHUB_TOKEN
+    networks:
+      - proxy
+
+secrets:
+  mon-app_MONGODB_CONNECTION_STRING:
+    external: true
+  mon-app_GITHUB_TOKEN:
+    external: true
+```
+
+Aucune action manuelle n’est requise : il suffit de respecter la convention de nommage et de fournir la valeur dans `.env`.
+
+### Lire un secret dans l’application
+
+Chaque secret est monté en tant que **fichier** sous `/run/secrets/<NOM_VARIABLE>` (le contenu du fichier = la valeur). Deux approches :
+
+- **Lire le fichier directement** (toutes stacks/langages) :
+  ```python
+  with open("/run/secrets/MONGODB_CONNECTION_STRING") as f:
+      mongo_uri = f.read().strip()
+  ```
+- **Recharger les secrets dans l’environnement au démarrage** (approche utilisée par PulsarCD, cf. [`shared/secrets.py`](../shared/secrets.py)) : au boot, copier chaque fichier de `/run/secrets/` dans une variable d’environnement du même nom, puis lire la config via `os.environ` comme d’habitude. Les variables déjà définies dans l’environnement **ont priorité** et ne sont pas écrasées.
+
+Équivalents pour d’autres écosystèmes : Node.js `fs.readFileSync('/run/secrets/MA_VAR', 'utf8')`, ou la plupart des frameworks supportent le pattern `*_FILE` (ex. `MONGODB_CONNECTION_STRING_FILE=/run/secrets/MONGODB_CONNECTION_STRING`).
+
+### Secrets déclarés explicitement (variante)
+
+Si vous préférez déclarer le secret vous-même (par exemple pour le monter sous un autre nom de cible), déclarez-le au niveau racine en `external: true`. Le script créera le secret Docker à partir de la variable `.env` correspondante (la clé doit elle aussi respecter la convention de nommage) :
+
+```yaml
+services:
+  mon-app:
+    secrets:
+      - DB_CONNECTION_STRING
+
+secrets:
+  DB_CONNECTION_STRING:
+    external: true
+    name: mon-app_DB_CONNECTION_STRING   # optionnel ; défaut: <stack>_<clé>
+```
+
+### Règles importantes
+
+- **`.env` ne doit jamais être committé.** Ajoutez-le à `.gitignore` et ne committez que `.env.example` avec des valeurs factices (placeholders), jamais de vraie valeur. Lors d’un déploiement, le script sauvegarde puis restaure automatiquement les fichiers `.env` autour des opérations git (ils ne sont donc pas écrasés par un `git reset`).
+- **Ne loggez jamais** la valeur d’un secret et ne la passez pas en `build arg` / `ARG` de Dockerfile (les build args restent visibles dans l’historique de l’image).
+- **Les secrets Docker sont immuables.** Si un secret `<stack>_<VAR>` existe déjà, il est **réutilisé tel quel** (la valeur n’est pas mise à jour). Pour faire une rotation : `docker secret rm <stack>_<VAR>` puis redéployer (Docker Swarm refusera la suppression tant que le secret est utilisé — il faut d’abord retirer le service ou utiliser une mise à jour qui ne le référence plus).
+- **Valeur vide = pas de secret.** Si la variable n’a pas de valeur dans `.env`, elle est laissée comme variable d’environnement classique (avec un avertissement). Assurez-vous que toutes les valeurs sensibles sont bien renseignées.
+- **Ne définissez pas la même clé à la fois en secret et en variable d’environnement** : une variable d’environnement déjà présente a priorité sur le fichier `/run/secrets/` au chargement.
 
 
 ## Configuration pour Docker Swarm (Stack)
@@ -381,70 +499,3 @@ deploy:
 > constraints:
 >   - node.labels.gpu == none
 > ```
-
-## Opérations via MCP (Model Context Protocol)
-
-PulsarCD expose **deux serveurs MCP distincts** permettant aux agents IA d'interagir avec la plateforme. La séparation isole les opérations de lecture (monitoring, logs) des opérations d'écriture (build, deploy). Les deux serveurs sont sécurisés par authentification Bearer token.
-
-| Serveur | Endpoint | Rôle |
-|---------|----------|------|
-| **PulsarCD Read** | `POST https://<TRAEFIK_HOST>/ai/mcp` | Lecture seule : logs, containers, hosts, statut |
-| **PulsarCD Actions** | `POST https://<TRAEFIK_HOST>/ai/actions/mcp` | Écriture : build et deploy de stacks |
-
-### Authentification
-
-Chaque requête MCP nécessite un header `Authorization: Bearer <token>`.
-Deux types de tokens sont acceptés (identiques pour les deux serveurs) :
-- **Clé API MCP** : configurée via `PULSARCD_MCP__API_KEY` (auto-générée au démarrage si non fournie, affichée dans les logs)
-- **JWT** : les mêmes tokens utilisés par l'interface web (obtenus via `/api/auth/login`)
-
-### Tools — PulsarCD Read (`/ai/mcp`)
-
-| Tool | Description | Paramètres |
-|------|-------------|------------|
-| `list_stacks` | Lister les stacks disponibles (repos GitHub starred) | aucun |
-| `list_containers` | Lister les containers et leur état | `host?`, `status?` |
-| `list_computers` | Lister les hosts/machines monitorés | aucun |
-| `get_log_metadata` | Découvrir les services, containers, hosts et niveaux de log disponibles | aucun |
-| `search_logs` | Rechercher dans les logs collectés | `query?`, `github_project?`, `compose_services?`, `hosts?`, `containers?`, `levels?`, `http_status_min?`, `http_status_max?`, `last_hours?`, `start_time?`, `end_time?`, `opensearch_query?`, `size?` |
-| `get_action_status` | Vérifier le statut d'un build/deploy | `action_id` |
-
-### Tools — PulsarCD Actions (`/ai/actions/mcp`)
-
-| Tool | Description | Paramètres |
-|------|-------------|------------|
-| `build_stack` | Builder une image Docker depuis un repo GitHub | `repo_name`, `ssh_url`, `version`, `branch?`, `commit?` |
-| `test_stack` | Lancer les tests d'une stack (cible `test` du docker-compose.swarm.yml) | `repo_name`, `ssh_url`, `branch?`, `tag?`, `commit?` |
-| `deploy_stack` | Déployer une stack sur Docker Swarm | `repo_name`, `ssh_url`, `version`, `tag?` |
-
-> **Note** : `build_stack`, `test_stack` et `deploy_stack` retournent un `action_id`. Utilisez `get_action_status` (sur le serveur Read) pour suivre la progression.
-
-### Configuration dans Claude Desktop
-
-```json
-{
-  "mcpServers": {
-    "pulsarcd": {
-      "type": "streamable-http",
-      "url": "https://<TRAEFIK_HOST>/ai/mcp",
-      "headers": {
-        "Authorization": "Bearer <MCP_API_KEY>"
-      }
-    },
-    "pulsarcd-actions": {
-      "type": "streamable-http",
-      "url": "https://<TRAEFIK_HOST>/ai/actions/mcp",
-      "headers": {
-        "Authorization": "Bearer <MCP_API_KEY>"
-      }
-    }
-  }
-}
-```
-
-### Variables d'environnement MCP
-
-| Variable | Description | Défaut |
-|----------|-------------|--------|
-| `PULSARCD_MCP__ENABLED` | Activer/désactiver les deux serveurs MCP | `true` |
-| `PULSARCD_MCP__API_KEY` | Clé API dédiée pour le MCP | auto-générée (UUID) |
