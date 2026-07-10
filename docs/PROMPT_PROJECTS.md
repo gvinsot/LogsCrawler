@@ -290,7 +290,7 @@ services:
         condition: on-failure
       placement:
         constraints:
-          - node.labels.gpu != true
+          - node.labels.gpu == none
 
   api:
     image: registry.methodinfo.fr/api:latest
@@ -327,7 +327,7 @@ services:
         - "traefik.http.routers.art-retrainer-api-http.service=noop@internal"
       placement:
         constraints:
-          - node.labels.gpu != true
+          - node.labels.gpu == none
 networks:
   proxy:
     external: true

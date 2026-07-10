@@ -2475,7 +2475,10 @@ async def deploy_stack(
                 action.status = "cancelled"
             if result.get("success"):
                 if qa:
-                    # QA succeeded → always-manual gate before production deploy
+                    # Mark QA success first so current_version is updated, then
+                    # apply the always-manual gate before production deploy.
+                    _set_pipeline(repo_name, "qa", "success", deploy_version,
+                                  qa_id=action_id, log_lines=action.output_lines)
                     pipeline_state.record_gate(repo_name, "qa_to_deploy", False,
                                                "Manual transition — waiting for user approval after QA",
                                                version=deploy_version)
