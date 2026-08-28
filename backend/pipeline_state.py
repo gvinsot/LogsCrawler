@@ -200,8 +200,16 @@ class PipelineEntry:
             "gates": [g.to_dict() for g in self.gates],
             "last_deployed_at": self.last_deployed_at,
             "transition_configs": self.transition_configs,
-            # Enriched per-stage data
-            "stages": {name: s.to_dict() for name, s in self.stages.items()},
+            # Enriched per-stage data. ``last_log`` is deliberately left out:
+            # the UI polls this every couple of seconds and only reads statuses
+            # and versions, while the log tail would make the payload change on
+            # every poll of a running build (forcing a full re-render) and add
+            # up to _MAX_LOG_LINES lines per stage to it. Logs are served by
+            # the dedicated /actions/{id}/logs endpoints.
+            "stages": {
+                name: {k: v for k, v in s.to_dict().items() if k != "last_log"}
+                for name, s in self.stages.items()
+            },
         }
 
 

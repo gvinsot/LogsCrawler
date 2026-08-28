@@ -6495,6 +6495,13 @@ let actionLogsPollOffset = 0;
 let actionLogsFirstRender = true;
 let actionLogsEventSource = null;
 
+// Rendering is batched through requestAnimationFrame: a build can dump tens of
+// thousands of lines at once, and appending them one by one — each followed by
+// a scrollTop write, which forces a synchronous layout — freezes the main thread.
+let actionLogsPendingLines = [];
+let actionLogsFlushHandle = null;
+const ACTION_LOGS_MAX_DOM_LINES = 5000;
+
 function openActionLogs(actionId, actionType, repoName) {
     currentActionLogsId = actionId;
     currentActionLogsType = actionType;
@@ -6572,16 +6579,83 @@ function stopActionLogsPoll() {
         actionLogsEventSource.close();
         actionLogsEventSource = null;
     }
+    if (actionLogsFlushHandle !== null) {
+        cancelAnimationFrame(actionLogsFlushHandle);
+        actionLogsFlushHandle = null;
+    }
+    actionLogsPendingLines = [];
 }
 
-function appendLogLine(content, line) {
+function buildLogLine(line, extraClass) {
     const lineEl = document.createElement('div');
     lineEl.className = 'log-line';
-    if (/\b(error|ERROR|fatal|FATAL|failed|FAILED)\b/.test(line)) {
+    if (extraClass) {
+        lineEl.classList.add(extraClass);
+    } else if (/\b(error|ERROR|fatal|FATAL|failed|FAILED)\b/.test(line)) {
         lineEl.classList.add('log-error');
     }
     lineEl.textContent = line;
-    content.appendChild(lineEl);
+    return lineEl;
+}
+
+function appendLogLine(content, line) {
+    content.appendChild(buildLogLine(line));
+}
+
+/**
+ * Queue log lines for rendering. Pending lines are flushed once per animation
+ * frame in a single DocumentFragment, so a backlog of thousands of lines costs
+ * one layout instead of one per line.
+ */
+function queueActionLogLines(lines, extraClass) {
+    if (!lines || lines.length === 0) return;
+    for (const line of lines) {
+        actionLogsPendingLines.push(extraClass ? { line, cls: extraClass } : line);
+    }
+    // rAF does not fire on a hidden tab: keep the queue bounded so a long build
+    // running in the background cannot grow it without limit.
+    if (actionLogsPendingLines.length > ACTION_LOGS_MAX_DOM_LINES) {
+        actionLogsPendingLines = actionLogsPendingLines.slice(-ACTION_LOGS_MAX_DOM_LINES);
+    }
+    if (actionLogsFlushHandle === null) {
+        actionLogsFlushHandle = requestAnimationFrame(flushActionLogLines);
+    }
+}
+
+function flushActionLogLines() {
+    actionLogsFlushHandle = null;
+    const pending = actionLogsPendingLines;
+    actionLogsPendingLines = [];
+    if (pending.length === 0) return;
+
+    const content = document.getElementById('action-logs-content');
+    if (!content) return;
+
+    if (actionLogsFirstRender) {
+        content.innerHTML = '';
+        actionLogsFirstRender = false;
+    }
+
+    // Only the tail is worth building: anything before it would be trimmed away
+    // right after being inserted.
+    const start = Math.max(0, pending.length - ACTION_LOGS_MAX_DOM_LINES);
+    const fragment = document.createDocumentFragment();
+    for (let i = start; i < pending.length; i++) {
+        const item = pending[i];
+        fragment.appendChild(
+            typeof item === 'string' ? buildLogLine(item) : buildLogLine(item.line, item.cls)
+        );
+    }
+    content.appendChild(fragment);
+
+    // Cap the number of DOM nodes so long builds keep the modal responsive
+    let excess = content.childElementCount - ACTION_LOGS_MAX_DOM_LINES;
+    while (excess > 0 && content.firstChild) {
+        content.removeChild(content.firstChild);
+        excess--;
+    }
+
+    content.scrollTop = content.scrollHeight;
 }
 
 async function startActionLogsPoll(actionId) {
@@ -6597,26 +6671,17 @@ async function startActionLogsPoll(actionId) {
 
     es.onmessage = function(event) {
         if (actionId !== currentActionLogsId) { es.close(); return; }
-        const content = document.getElementById('action-logs-content');
         try {
             const data = JSON.parse(event.data);
             if (data.type === 'line') {
-                if (actionLogsFirstRender) {
-                    content.innerHTML = '';
-                    actionLogsFirstRender = false;
-                }
-                appendLogLine(content, data.line);
-                content.scrollTop = content.scrollHeight;
+                queueActionLogLines([data.line]);
+            } else if (data.type === 'lines') {
+                queueActionLogLines(data.lines);
             } else if (data.type === 'done') {
-                if (actionLogsFirstRender) {
-                    content.innerHTML = '';
-                    actionLogsFirstRender = false;
-                }
-                const statusLine = document.createElement('div');
-                statusLine.className = `log-line ${data.status === 'completed' ? 'log-success' : 'log-error'}`;
-                statusLine.textContent = `--- ${data.status.toUpperCase()} ---`;
-                content.appendChild(statusLine);
-                content.scrollTop = content.scrollHeight;
+                queueActionLogLines(
+                    [`--- ${data.status.toUpperCase()} ---`],
+                    data.status === 'completed' ? 'log-success' : 'log-error'
+                );
                 const _stopBtn = document.getElementById('action-logs-stop-btn');
                 if (_stopBtn) _stopBtn.style.display = 'none';
                 es.close();
@@ -6654,6 +6719,7 @@ async function startActionLogsFallbackPoll(actionId) {
 
             if (response.status === 404) {
                 content.innerHTML = '<div class="log-line log-error">Action introuvable — le serveur a peut-être redémarré.</div>';
+                actionLogsFirstRender = false;
                 return;
             }
 
@@ -6667,27 +6733,15 @@ async function startActionLogsFallbackPoll(actionId) {
             if (actionId !== currentActionLogsId) return;
 
             if (data.lines && data.lines.length > 0) {
-                if (actionLogsFirstRender) {
-                    content.innerHTML = '';
-                    actionLogsFirstRender = false;
-                }
-                for (const line of data.lines) {
-                    appendLogLine(content, line);
-                }
+                queueActionLogLines(data.lines);
                 actionLogsPollOffset += data.lines.length;
-                content.scrollTop = content.scrollHeight;
             }
 
             if (data.status !== 'running') {
-                if (actionLogsFirstRender) {
-                    content.innerHTML = '';
-                    actionLogsFirstRender = false;
-                }
-                const statusLine = document.createElement('div');
-                statusLine.className = `log-line ${data.status === 'completed' ? 'log-success' : 'log-error'}`;
-                statusLine.textContent = `--- ${data.status.toUpperCase()} ---`;
-                content.appendChild(statusLine);
-                content.scrollTop = content.scrollHeight;
+                queueActionLogLines(
+                    [`--- ${data.status.toUpperCase()} ---`],
+                    data.status === 'completed' ? 'log-success' : 'log-error'
+                );
                 const _stopBtn2 = document.getElementById('action-logs-stop-btn');
                 if (_stopBtn2) _stopBtn2.style.display = 'none';
                 return; // done

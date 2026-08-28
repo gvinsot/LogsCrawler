@@ -2668,15 +2668,27 @@ async def stream_action_logs(
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
 
+    # Lines are sent in batches: a build backlog can be tens of thousands of
+    # lines, and one SSE frame per line makes the browser dispatch one event
+    # (and one DOM write) per line, which freezes its main thread.
+    _BATCH_SIZE = 500
+
     async def event_generator():
         cursor = offset
         while True:
             # Send any new lines
             if cursor < len(action.output_lines):
-                for line in action.output_lines[cursor:]:
-                    data = json.dumps({"type": "line", "line": line})
+                pending = action.output_lines[cursor:]
+                cursor += len(pending)
+                for start in range(0, len(pending), _BATCH_SIZE):
+                    batch = pending[start:start + _BATCH_SIZE]
+                    if len(batch) == 1:
+                        data = json.dumps({"type": "line", "line": batch[0]})
+                    else:
+                        data = json.dumps({"type": "lines", "lines": batch})
                     yield f"data: {data}\n\n"
-                cursor = len(action.output_lines)
+                    # Let the event loop breathe while dumping a large backlog
+                    await asyncio.sleep(0)
 
             # If action is done, send final status and close
             if action.status != "running":
