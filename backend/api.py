@@ -1,7 +1,9 @@
 """FastAPI REST API for PulsarCD."""
 
 import asyncio
+import hashlib
 import json
+import os
 import re
 import traceback
 import uuid
@@ -16,7 +18,7 @@ import structlog
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 from .auth import create_token, decode_token
 from .collector import Collector
@@ -2668,10 +2670,11 @@ async def stream_action_logs(
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
 
-    # Lines are sent in batches: a build backlog can be tens of thousands of
-    # lines, and one SSE frame per line makes the browser dispatch one event
-    # (and one DOM write) per line, which freezes its main thread.
-    _BATCH_SIZE = 500
+    # One frame per line, deliberately: a cached older frontend only knows the
+    # "line" type, and batching would make it silently drop every log line.
+    # The client batches the DOM writes instead. Yield to the event loop every
+    # _YIELD_EVERY lines so dumping a large backlog does not stall the server.
+    _YIELD_EVERY = 500
 
     async def event_generator():
         cursor = offset
@@ -2680,15 +2683,11 @@ async def stream_action_logs(
             if cursor < len(action.output_lines):
                 pending = action.output_lines[cursor:]
                 cursor += len(pending)
-                for start in range(0, len(pending), _BATCH_SIZE):
-                    batch = pending[start:start + _BATCH_SIZE]
-                    if len(batch) == 1:
-                        data = json.dumps({"type": "line", "line": batch[0]})
-                    else:
-                        data = json.dumps({"type": "lines", "lines": batch})
+                for index, line in enumerate(pending, start=1):
+                    data = json.dumps({"type": "line", "line": line})
                     yield f"data: {data}\n\n"
-                    # Let the event loop breathe while dumping a large backlog
-                    await asyncio.sleep(0)
+                    if index % _YIELD_EVERY == 0:
+                        await asyncio.sleep(0)
 
             # If action is done, send final status and close
             if action.status != "running":
@@ -3880,8 +3879,66 @@ async def _handle_local_terminal(websocket, cols, rows, session_id):
 # Serve static files (frontend)
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 
+_FRONTEND_DIR = "frontend"
+_INDEX_PATH = os.path.join(_FRONTEND_DIR, "index.html")
+_STATIC_DIR = os.path.abspath(os.path.join(_FRONTEND_DIR, "static"))
+
+# href="/static/..." / src="/static/..." references, with or without a query
+_ASSET_REF_RE = re.compile(r'(?P<attr>href|src)="(?P<path>/static/[^"?]+)(?:\?[^"]*)?"')
+
+# url path -> (mtime_ns, size, version): re-hash an asset only when it changes
+_asset_versions: Dict[str, tuple] = {}
+
+
+def _asset_version(url_path: str) -> str:
+    """Return the content hash used as the cache-busting version of an asset."""
+    file_path = os.path.abspath(
+        os.path.join(_STATIC_DIR, *url_path[len("/static/"):].split("/"))
+    )
+    # Paths come from our own index.html, but keep them inside the static dir
+    try:
+        if os.path.commonpath([_STATIC_DIR, file_path]) != _STATIC_DIR:
+            return "0"
+    except ValueError:  # different drives on Windows
+        return "0"
+
+    try:
+        stat = os.stat(file_path)
+    except OSError:
+        return "0"
+
+    cached = _asset_versions.get(url_path)
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+
+    try:
+        with open(file_path, "rb") as f:
+            version = hashlib.sha256(f.read()).hexdigest()[:12]
+    except OSError:
+        return "0"
+
+    _asset_versions[url_path] = (stat.st_mtime_ns, stat.st_size, version)
+    return version
+
+
+def _render_index() -> str:
+    """Read index.html and stamp every /static reference with its content hash."""
+    with open(_INDEX_PATH, encoding="utf-8") as f:
+        html = f.read()
+    return _ASSET_REF_RE.sub(
+        lambda m: f'{m.group("attr")}="{m.group("path")}?v={_asset_version(m.group("path"))}"',
+        html,
+    )
+
 
 @app.get("/")
 async def serve_frontend():
-    """Serve the frontend."""
-    return FileResponse("frontend/index.html")
+    """Serve the frontend.
+
+    Each /static reference is stamped with a hash of that file's contents,
+    replacing the version query that used to be maintained by hand: editing an
+    asset without bumping it left browsers running a cached copy against an
+    updated backend. The document itself must be revalidated for the new
+    hashes to be picked up, hence no-cache.
+    """
+    return HTMLResponse(_render_index(), headers={"Cache-Control": "no-cache"})
