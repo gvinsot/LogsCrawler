@@ -165,8 +165,13 @@ services:
         - "traefik.http.routers.pulsarcd-http.entrypoints=web"
         - "traefik.http.routers.pulsarcd-http.middlewares=redirect-to-https@file"
         - "traefik.http.routers.pulsarcd-http.service=noop@internal"
+      # Swarm stops an unhealthy task with SIGTERM, which uvicorn handles
+      # cleanly and exits 0. With "on-failure" that counts as a success, so
+      # the task is never replaced and the service stays at 0/1 forever.
+      # "any" makes Swarm reschedule it.
       restart_policy:
-        condition: on-failure
+        condition: any
+        delay: 5s
       placement:
         constraints:
           - node.hostname == ${BACKEND_NODE_HOSTNAME:-server-b}
