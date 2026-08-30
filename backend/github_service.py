@@ -840,6 +840,28 @@ class GitHubService:
             return True, ""
 
 
+# StackDeployer is instantiated per request, but the SSH connection it uses must
+# not be: asyncssh keeps the socket open until close() is called, so a fresh
+# client per request leaked one ESTABLISHED connection each time and exhausted
+# the process fd limit (RLIMIT_NOFILE) after a few hundred polls of the
+# dashboard endpoints. Share one SSHClient per SSH target instead; SSHClient
+# already reconnects on its own when the connection drops.
+_SHARED_SSH_CLIENTS: Dict[Tuple[Any, ...], Any] = {}
+_SHARED_SSH_LOCK = asyncio.Lock()
+
+
+async def close_shared_ssh_clients() -> None:
+    """Close the SSH connections shared by every StackDeployer (shutdown only)."""
+    async with _SHARED_SSH_LOCK:
+        clients = list(_SHARED_SSH_CLIENTS.values())
+        _SHARED_SSH_CLIENTS.clear()
+    for client in clients:
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+
 class StackDeployer:
     """Service for building and deploying stacks from GitHub repos."""
 
@@ -863,27 +885,41 @@ class StackDeployer:
         if self.config.ssh_host:
             from .ssh_client import SSHClient
             from .config import HostConfig
-            
-            ssh_config = HostConfig(
-                name="github-deploy-host",
-                hostname=self.config.ssh_host,
-                port=self.config.ssh_port,
-                username=self.config.ssh_user,
-                ssh_key_path=self.config.ssh_key_path,
-                mode="ssh"
+
+            key = (
+                self.config.ssh_host,
+                self.config.ssh_port,
+                self.config.ssh_user,
+                self.config.ssh_key_path,
             )
-            self._ssh_client = SSHClient(ssh_config)
-            logger.info("Using SSH for stack operations", 
-                       host=self.config.ssh_host, 
-                       user=self.config.ssh_user)
-        
+            async with _SHARED_SSH_LOCK:
+                client = _SHARED_SSH_CLIENTS.get(key)
+                if client is None:
+                    ssh_config = HostConfig(
+                        name="github-deploy-host",
+                        hostname=self.config.ssh_host,
+                        port=self.config.ssh_port,
+                        username=self.config.ssh_user,
+                        ssh_key_path=self.config.ssh_key_path,
+                        mode="ssh"
+                    )
+                    client = SSHClient(ssh_config)
+                    _SHARED_SSH_CLIENTS[key] = client
+                    logger.info("Using SSH for stack operations",
+                               host=self.config.ssh_host,
+                               user=self.config.ssh_user)
+            self._ssh_client = client
+
         return self._ssh_client
 
     async def close(self):
-        """Close SSH connection if open."""
-        if self._ssh_client:
-            await self._ssh_client.close()
-            self._ssh_client = None
+        """Drop the reference to the shared SSH client.
+
+        The connection itself is owned by ``_SHARED_SSH_CLIENTS`` and outlives
+        this deployer; closing it here would tear it down for every other
+        in-flight request. Use :func:`close_shared_ssh_clients` at shutdown.
+        """
+        self._ssh_client = None
 
     async def _ensure_git_configured(self) -> None:
         """Ensure git is configured with user name and email."""

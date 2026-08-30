@@ -28,7 +28,7 @@ from .models import (
     DashboardStats, LogSearchQuery, LogSearchResult, TimeSeriesPoint, TimeSeriesByHost
 )
 from .opensearch_client import OpenSearchClient
-from .github_service import GitHubService, StackDeployer
+from .github_service import GitHubService, StackDeployer, close_shared_ssh_clients
 from .actions_queue import actions_queue, ActionType, ActionStatus
 from .pipeline_state import PipelineStateManager, _UNSET
 try:
@@ -219,6 +219,7 @@ async def lifespan(app: FastAPI):
     await collector.stop()
     await opensearch.close()
     await github_service.close()
+    await close_shared_ssh_clients()
     if llm_agent:
         await llm_agent.close()
 

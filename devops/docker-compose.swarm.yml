@@ -59,6 +59,13 @@ services:
       target: production
     # Run as root to access Docker socket for Swarm API queries
     user: root
+    # The default soft limit of 1024 fds is reached quickly: this process holds
+    # long-lived SSH connections to every host plus OpenSearch/Docker sockets,
+    # and once exhausted every request fails with EMFILE.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     extra_hosts:
       # Map 'dockerhost' to the Docker host IP for SSH access
       - "dockerhost:host-gateway"

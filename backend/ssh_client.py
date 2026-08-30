@@ -134,6 +134,15 @@ class SSHClient:
             
         async with self._lock:
             if not self._is_connection_open():
+                # A dead-but-not-closed connection still holds its socket fd,
+                # so release it before opening the replacement.
+                if self._connection is not None:
+                    try:
+                        self._connection.close()
+                    except Exception:
+                        pass
+                    self._connection = None
+
                 known_hosts_setting, save_key = resolve_known_hosts(
                     self.config.ssh_known_hosts_path,
                     self.config.hostname,
