@@ -511,8 +511,13 @@ fi
 # Services with x-platforms will use buildx multi-arch; others use single-arch.
 # Format: "image_name=platforms" lines, e.g. "registry.../app:latest=linux/amd64,linux/arm64"
 declare -A IMAGE_PLATFORMS
-if [ -z "$BUILD_PLATFORMS" ]; then
-    # Only read per-service platforms if there's no global override
+# Always read them, global list or not: the build loop below resolves
+# "per-service > global > single-arch" on its own. Reading them only in the
+# absence of a global list contradicted that, and made the global win — which
+# is how an arm64-only service ends up being built for amd64, and an amd64-only
+# base for arm64. A service that names its platforms means it, whatever the
+# default is.
+if true; then
     while IFS='=' read -r img plat; do
         [ -n "$img" ] && [ -n "$plat" ] && IMAGE_PLATFORMS["$img"]="$plat"
     done < <(envsubst < "$COMPOSE_PATH" | awk '
