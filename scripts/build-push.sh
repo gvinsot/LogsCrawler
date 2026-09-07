@@ -511,44 +511,42 @@ fi
 # Services with x-platforms will use buildx multi-arch; others use single-arch.
 # Format: "image_name=platforms" lines, e.g. "registry.../app:latest=linux/amd64,linux/arm64"
 declare -A IMAGE_PLATFORMS
-# Always read them, global list or not: the build loop below resolves
-# "per-service > global > single-arch" on its own. Reading them only in the
-# absence of a global list contradicted that, and made the global win — which
-# is how an arm64-only service ends up being built for amd64, and an amd64-only
-# base for arm64. A service that names its platforms means it, whatever the
-# default is.
-if true; then
-    while IFS='=' read -r img plat; do
-        [ -n "$img" ] && [ -n "$plat" ] && IMAGE_PLATFORMS["$img"]="$plat"
-    done < <(envsubst < "$COMPOSE_PATH" | awk '
-    /^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$/ {
-        if (current_image != "" && platforms != "") {
-            print current_image "=" platforms
-        }
-        current_image = ""; platforms = ""
+# Read them whatever happens, global list or not. The build loop below already
+# resolves "per-service > global > single-arch"; reading the map only when no
+# global list exists contradicted that and let the global win, which makes
+# x-platforms unreachable through the UI — it always sends a list. A service
+# that names its platforms means it. Composes that declare none are unaffected:
+# the map stays empty and the global still applies to everything.
+while IFS='=' read -r img plat; do
+    [ -n "$img" ] && [ -n "$plat" ] && IMAGE_PLATFORMS["$img"]="$plat"
+done < <(envsubst < "$COMPOSE_PATH" | awk '
+/^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$/ {
+    if (current_image != "" && platforms != "") {
+        print current_image "=" platforms
     }
-    /^[[:space:]]{4}image:[[:space:]]*/ {
-        img_line = $0; gsub(/^[[:space:]]+image:[[:space:]]*/, "", img_line); gsub(/[[:space:]]*$/, "", img_line)
-        gsub(/"/, "", img_line); gsub(/\047/, "", img_line)
-        current_image = img_line
+    current_image = ""; platforms = ""
+}
+/^[[:space:]]{4}image:[[:space:]]*/ {
+    img_line = $0; gsub(/^[[:space:]]+image:[[:space:]]*/, "", img_line); gsub(/[[:space:]]*$/, "", img_line)
+    gsub(/"/, "", img_line); gsub(/\047/, "", img_line)
+    current_image = img_line
+}
+/^[[:space:]]{4}x-platforms:[[:space:]]*/ {
+    p = $0; gsub(/^[[:space:]]+x-platforms:[[:space:]]*/, "", p); gsub(/[[:space:]]*$/, "", p)
+    gsub(/"/, "", p); gsub(/\047/, "", p)
+    platforms = p
+}
+END {
+    if (current_image != "" && platforms != "") {
+        print current_image "=" platforms
     }
-    /^[[:space:]]{4}x-platforms:[[:space:]]*/ {
-        p = $0; gsub(/^[[:space:]]+x-platforms:[[:space:]]*/, "", p); gsub(/[[:space:]]*$/, "", p)
-        gsub(/"/, "", p); gsub(/\047/, "", p)
-        platforms = p
-    }
-    END {
-        if (current_image != "" && platforms != "") {
-            print current_image "=" platforms
-        }
-    }
-    ')
+}
+')
 
-    if [ ${#IMAGE_PLATFORMS[@]} -gt 0 ]; then
-        for img in "${!IMAGE_PLATFORMS[@]}"; do
-            log_info "Per-service multi-arch: $img -> ${IMAGE_PLATFORMS[$img]}"
-        done
-    fi
+if [ ${#IMAGE_PLATFORMS[@]} -gt 0 ]; then
+    for img in "${!IMAGE_PLATFORMS[@]}"; do
+        log_info "Per-service multi-arch: $img -> ${IMAGE_PLATFORMS[$img]}"
+    done
 fi
 
 # Determine if ANY image needs multi-arch (to know if we need a buildx builder)
@@ -673,6 +671,44 @@ else
         log_info "Single-arch build: using host docker engine builder (default)"
         docker buildx use default
     fi
+fi
+
+# ============================================================================
+# Step 3d: Refuse a builder that cannot produce the requested architectures
+# ============================================================================
+# Asked for an architecture it cannot run, buildkit fails late and expensively:
+# it resolves and pulls the whole base image, then dies on the first RUN with
+# "exec format error" — after twenty gigabytes and no explanation. The builder
+# knows its platforms up front, so ask it.
+if [ "$NEEDS_BUILDX" = true ]; then
+    WANTED_PLATFORMS=$(printf '%s
+' "$BUILD_PLATFORMS" ${IMAGE_PLATFORMS[@]+"${IMAGE_PLATFORMS[@]}"}         | tr ',' '
+' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort -u)
+    AVAILABLE_PLATFORMS=$(docker buildx inspect --bootstrap "$BUILDER_NAME" 2>/dev/null         | sed -n 's/^[[:space:]]*Platforms:[[:space:]]*//p' | tr ',' '
+'         | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort -u)
+
+    MISSING_PLATFORMS=""
+    for plat in $WANTED_PLATFORMS; do
+        printf '%s
+' "$AVAILABLE_PLATFORMS" | grep -qx -- "$plat" || MISSING_PLATFORMS="$MISSING_PLATFORMS $plat"
+    done
+
+    if [ -n "$MISSING_PLATFORMS" ]; then
+        log_error "Builder '$BUILDER_NAME' cannot build:$MISSING_PLATFORMS"
+        log_info "It offers: $(echo $AVAILABLE_PLATFORMS | tr '
+' ' ')"
+        log_info ""
+        log_info "Add a node of that architecture to the builder — native, and by far the fastest:"
+        log_info "  docker context create <node> --docker host=ssh://<user>@<host>"
+        log_info "  docker buildx create --append --name $BUILDER_NAME --platform <platform> <node>"
+        log_info ""
+        log_info "Or emulate it on this host, which is much slower and lost on reboot:"
+        log_info "  docker run --privileged --rm tonistiigi/binfmt --install <arch>"
+        exit 1
+    fi
+
+    log_success "Builder '$BUILDER_NAME' covers: $(echo $WANTED_PLATFORMS | tr '
+' ' ')"
 fi
 
 # ============================================================================
