@@ -681,37 +681,36 @@ fi
 # "exec format error" — after twenty gigabytes and no explanation. The builder
 # knows its platforms up front, so ask it.
 if [ "$NEEDS_BUILDX" = true ]; then
-    WANTED_PLATFORMS=$(printf '%s
-' "$BUILD_PLATFORMS" ${IMAGE_PLATFORMS[@]+"${IMAGE_PLATFORMS[@]}"}         | tr ',' '
-' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort -u)
-    # The trailing star marks a node's native platform ("linux/arm64*"); it is
-    # decoration, not part of the name, and comparing without stripping it
-    # rejects exactly the architecture that is best supported.
-    AVAILABLE_PLATFORMS=$(docker buildx inspect --bootstrap "$BUILDER_NAME" 2>/dev/null         | sed -n 's/^[[:space:]]*Platforms:[[:space:]]*//p' | tr ',' '
-'         | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\*$//' | grep -v '^$' | sort -u)
+    _normalize_platforms() {
+        # One platform per line, trimmed. The trailing star marks a node's
+        # native platform ("linux/arm64*") and is decoration, not part of the
+        # name: keeping it rejects the architecture that is best supported.
+        tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\*$//' | grep -v '^$' | sort -u
+    }
+
+    WANTED_PLATFORMS=$(printf '%s\n' "$BUILD_PLATFORMS" ${IMAGE_PLATFORMS[@]+"${IMAGE_PLATFORMS[@]}"} | _normalize_platforms)
+    AVAILABLE_PLATFORMS=$(docker buildx inspect --bootstrap "$BUILDER_NAME" 2>/dev/null |
+        sed -n 's/^[[:space:]]*Platforms:[[:space:]]*//p' | _normalize_platforms)
 
     MISSING_PLATFORMS=""
     for plat in $WANTED_PLATFORMS; do
-        printf '%s
-' "$AVAILABLE_PLATFORMS" | grep -qx -- "$plat" || MISSING_PLATFORMS="$MISSING_PLATFORMS $plat"
+        printf '%s\n' "$AVAILABLE_PLATFORMS" | grep -qx -- "$plat" || MISSING_PLATFORMS="$MISSING_PLATFORMS $plat"
     done
 
     if [ -n "$MISSING_PLATFORMS" ]; then
         log_error "Builder '$BUILDER_NAME' cannot build:$MISSING_PLATFORMS"
-        log_info "It offers: $(echo $AVAILABLE_PLATFORMS | tr '
-' ' ')"
+        log_info "It offers: $(echo $AVAILABLE_PLATFORMS | tr '\n' ' ')"
         log_info ""
         log_info "Add a node of that architecture to the builder — native, and by far the fastest:"
         log_info "  docker context create <node> --docker host=ssh://<user>@<host>"
-        log_info "  docker buildx create --append --name $BUILDER_NAME --platform <platform> <node>"
+        log_info "  docker buildx create --append --name $BUILDER_NAME --node <node-name> --platform <platform> <node>"
         log_info ""
         log_info "Or emulate it on this host, which is much slower and lost on reboot:"
         log_info "  docker run --privileged --rm tonistiigi/binfmt --install <arch>"
         exit 1
     fi
 
-    log_success "Builder '$BUILDER_NAME' covers: $(echo $WANTED_PLATFORMS | tr '
-' ' ')"
+    log_success "Builder '$BUILDER_NAME' covers: $(echo $WANTED_PLATFORMS | tr '\n' ' ')"
 fi
 
 # ============================================================================
@@ -789,7 +788,11 @@ for img in $IMAGES_TO_BUILD; do
     BASE_IMAGE="${RESOLVED_IMG%:*}"
 
     # Determine platforms for this image: per-service > global > single-arch
-    IMG_PLATFORMS="${IMAGE_PLATFORMS[$img]:-$BUILD_PLATFORMS}"
+    # Resolved key: the map is built from the compose file read through
+    # envsubst, so it is keyed by "registry.../name:tag", never by the raw
+    # "${REGISTRY}/name:tag" this loop iterates over. Looking it up unresolved
+    # always missed, and every image silently fell back to the global list.
+    IMG_PLATFORMS="${IMAGE_PLATFORMS[$RESOLVED_IMG]:-$BUILD_PLATFORMS}"
 
     if [ -n "$IMG_PLATFORMS" ]; then
         # ── Multi-arch build using docker buildx ──
@@ -839,6 +842,12 @@ done
 if [ "$BUILD_FAILED" = false ] && [ -n "$SINGLEARCH_IMAGES" ]; then
     # Default to linux/amd64 unless DOCKER_DEFAULT_PLATFORM is already set
     export DOCKER_DEFAULT_PLATFORM="${DOCKER_DEFAULT_PLATFORM:-linux/amd64}"
+    # The host engine, not the multi-arch builder: these images need no other
+    # architecture, and leaving a remote node in the path makes compose load
+    # every build context through one SSH connection — which it refuses with
+    # "only one connection allowed".
+    docker buildx use default 2>/dev/null || true
+
     # Naming the services keeps compose off the ones handled above by buildx,
     # and off those already in the registry. Without a name it builds the whole
     # file, so an arm64-only service is rebuilt for amd64 and the run dies on
@@ -880,7 +889,11 @@ for img in $IMAGES_TO_BUILD; do
     fi
     BASE_IMAGE="${RESOLVED_IMG%:*}"
     SOURCE_TAG="${RESOLVED_IMG##*:}"
-    IMG_PLATFORMS="${IMAGE_PLATFORMS[$img]:-$BUILD_PLATFORMS}"
+    # Resolved key: the map is built from the compose file read through
+    # envsubst, so it is keyed by "registry.../name:tag", never by the raw
+    # "${REGISTRY}/name:tag" this loop iterates over. Looking it up unresolved
+    # always missed, and every image silently fell back to the global list.
+    IMG_PLATFORMS="${IMAGE_PLATFORMS[$RESOLVED_IMG]:-$BUILD_PLATFORMS}"
 
     if [ -n "$IMG_PLATFORMS" ]; then
         # Multi-arch: images already pushed by buildx, add version tags via imagetools
