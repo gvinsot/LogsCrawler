@@ -557,25 +557,10 @@ elif [ ${#IMAGE_PLATFORMS[@]} -gt 0 ]; then
     NEEDS_BUILDX=true
 fi
 
-# MULTI_ARCH env var (set by PulsarCD's version_to_build transition) is the
-# authoritative override: "true" forces multi-arch, "false" forces single-arch
-# on the host docker engine regardless of compose x-platforms. When unset,
-# fall back to the auto-detection above (legacy CLI invocations).
-if [ "${MULTI_ARCH:-}" = "false" ]; then
-    if [ "$NEEDS_BUILDX" = true ]; then
-        log_warning "MULTI_ARCH=false: ignoring compose x-platforms / BUILD_PLATFORMS, building single-arch"
-    fi
-    NEEDS_BUILDX=false
-    BUILD_PLATFORMS=""
-    unset IMAGE_PLATFORMS
-    declare -A IMAGE_PLATFORMS
-elif [ "${MULTI_ARCH:-}" = "true" ]; then
-    NEEDS_BUILDX=true
-    if [ -z "$BUILD_PLATFORMS" ] && [ ${#IMAGE_PLATFORMS[@]} -eq 0 ]; then
-        BUILD_PLATFORMS="linux/amd64,linux/arm64"
-        log_info "MULTI_ARCH=true with no platforms specified, defaulting to: $BUILD_PLATFORMS"
-    fi
-fi
+# Nothing else to decide: the compose file says what it needs, per service with
+# x-platforms or globally with x-build-platforms, and BUILD_PLATFORMS covers a
+# one-off from the command line. An external switch on top of that could only
+# contradict the file — which it did, silently discarding every declaration.
 
 # ============================================================================
 # Step 4: Build images

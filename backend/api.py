@@ -3096,11 +3096,6 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
     # Determine build version param: exact "1.0.5" or auto-increment "1.0"
     build_version = version if version else "1.0"
 
-    # Pull per-project build options from the version_to_build transition.
-    _vb_cfg_full = pipeline_state.get_transition_config(repo_name, "version_to_build") or {}
-    _multi_arch = bool(_vb_cfg_full.get("multi_arch", False))
-    _platforms = _vb_cfg_full.get("platforms") or ("linux/amd64,linux/arm64" if _multi_arch else None)
-
     async def _run_pipeline():
         built_version = version
         build_id = None
@@ -3113,12 +3108,10 @@ async def _trigger_pipeline(repo_name: str, ssh_url: str, version: str = None, t
                 pipeline_state.get_or_create(repo_name).stages["build"].action_id = build_id
 
                 logger.info("Pipeline: starting build", repo=repo_name, action_id=build_id,
-                            version=build_version, tag=tag,
-                            multi_arch=_multi_arch, platforms=_platforms)
+                            version=build_version, tag=tag)
                 result = await deployer.build(
                     repo_name, ssh_url, version=build_version,
                     tag=tag,
-                    multi_arch=_multi_arch, platforms=_platforms,
                     output_callback=build_action.append_output,
                     cancel_event=build_action.cancel_event,
                 )
@@ -3478,15 +3471,9 @@ async def set_transition_config(repo_name: str, transition: str, request: Reques
     cfg: Dict[str, Any] = {"mode": mode}
     if transition == "test_to_deploy":
         cfg["qa_enabled"] = bool(body.get("qa_enabled", False))
-    if transition == "version_to_build":
-        cfg["multi_arch"] = bool(body.get("multi_arch", False))
-        platforms = body.get("platforms")
-        if platforms and isinstance(platforms, str) and platforms.strip():
-            cfg["platforms"] = platforms.strip()
     pipeline_state.set_transition_config(repo_name, transition, cfg)
     logger.info("Transition config updated", repo=repo_name, transition=transition,
-                mode=mode, qa_enabled=cfg.get("qa_enabled"),
-                multi_arch=cfg.get("multi_arch"), platforms=cfg.get("platforms"))
+                mode=mode, qa_enabled=cfg.get("qa_enabled"))
     return {"saved": True, "repo": repo_name, "transition": transition, **cfg}
 
 

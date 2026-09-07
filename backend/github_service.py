@@ -1167,7 +1167,6 @@ class StackDeployer:
     async def build(self, repo_name: str, ssh_url: str, version: str = "1.0",
                    branch: str = None, tag: str = None, commit: str = None,
                    no_cache: bool = False,
-                   multi_arch: bool = False, platforms: str = None,
                    output_callback=None, cancel_event=None) -> Dict[str, Any]:
         """Build a stack from a repository.
 
@@ -1178,12 +1177,6 @@ class StackDeployer:
             branch: Optional branch name to build from
             tag: Optional git tag to build from (takes priority over branch)
             commit: Optional specific commit hash to build from
-            multi_arch: When True, forces the multi-arch build path (heavier
-                docker-container buildx driver). Single-arch builds use the
-                lighter docker engine builder.
-            platforms: Comma-separated platform list (e.g.
-                "linux/amd64,linux/arm64"). Only honored when ``multi_arch``
-                is True.
             output_callback: Optional callable(str) for streaming output
             cancel_event: Optional asyncio.Event for cancellation
 
@@ -1224,17 +1217,10 @@ class StackDeployer:
             # Build command with optional branch/tag/commit parameters
             # Pass absolute repo_path to avoid path computation mismatch
             # Script format: build-push.sh <folder> <version> [branch/tag] [commit] [--no-cache]
-            # Pre-prend env vars so build-push.sh knows the desired arch mode.
-            env_prefix = ""
-            if multi_arch:
-                env_prefix = "MULTI_ARCH=true "
-                if platforms:
-                    env_prefix += f"BUILD_PLATFORMS={shlex.quote(platforms)} "
-            else:
-                # Explicit "no multi-arch" so the script switches off the
-                # docker-container builder even if it's the default.
-                env_prefix = "MULTI_ARCH=false "
-            build_cmd = f"cd {_shell_quote_path(scripts_path)} && {env_prefix}bash build-push.sh {_shell_quote_path(repo_path)} {shlex.quote(version)}"
+            # Architectures are declared in the compose file itself — x-platforms
+            # per service, x-build-platforms for the whole file — so there is
+            # nothing to pass here. An env var on top could only contradict it.
+            build_cmd = f"cd {_shell_quote_path(scripts_path)} && bash build-push.sh {_shell_quote_path(repo_path)} {shlex.quote(version)}"
             if checkout_ref:
                 build_cmd += f" {shlex.quote(checkout_ref)}"
                 if commit:
