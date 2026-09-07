@@ -684,8 +684,11 @@ if [ "$NEEDS_BUILDX" = true ]; then
     WANTED_PLATFORMS=$(printf '%s
 ' "$BUILD_PLATFORMS" ${IMAGE_PLATFORMS[@]+"${IMAGE_PLATFORMS[@]}"}         | tr ',' '
 ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort -u)
+    # The trailing star marks a node's native platform ("linux/arm64*"); it is
+    # decoration, not part of the name, and comparing without stripping it
+    # rejects exactly the architecture that is best supported.
     AVAILABLE_PLATFORMS=$(docker buildx inspect --bootstrap "$BUILDER_NAME" 2>/dev/null         | sed -n 's/^[[:space:]]*Platforms:[[:space:]]*//p' | tr ',' '
-'         | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort -u)
+'         | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\*$//' | grep -v '^$' | sort -u)
 
     MISSING_PLATFORMS=""
     for plat in $WANTED_PLATFORMS; do
