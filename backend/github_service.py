@@ -994,11 +994,15 @@ class StackDeployer:
             from .ssh_client import SSHClient
             from .config import HostConfig
 
+            # The host key policy is part of the identity of the connection:
+            # two deployers configured with different policies must not share
+            # a client that was opened under the laxer of the two.
             key = (
                 self.config.ssh_host,
                 self.config.ssh_port,
                 self.config.ssh_user,
                 self.config.ssh_key_path,
+                self.config.ssh_known_hosts_path,
             )
             async with _SHARED_SSH_LOCK:
                 client = _SHARED_SSH_CLIENTS.get(key)
@@ -1009,13 +1013,15 @@ class StackDeployer:
                         port=self.config.ssh_port,
                         username=self.config.ssh_user,
                         ssh_key_path=self.config.ssh_key_path,
+                        ssh_known_hosts_path=self.config.ssh_known_hosts_path,
                         mode="ssh"
                     )
                     client = SSHClient(ssh_config)
                     _SHARED_SSH_CLIENTS[key] = client
                     logger.info("Using SSH for stack operations",
                                host=self.config.ssh_host,
-                               user=self.config.ssh_user)
+                               user=self.config.ssh_user,
+                               known_hosts=self.config.ssh_known_hosts_path)
             self._ssh_client = client
 
         return self._ssh_client

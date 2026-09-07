@@ -28,6 +28,10 @@ Environment variables:
 - PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS: "true" enables trust-on-first-use for hosts
   that have no explicit ssh_known_hosts_path. Off by default: an unknown host
   aborts the connection instead of trusting the key it is offered.
+- PULSARCD_GITHUB__SSH_KNOWN_HOSTS_PATH: host key policy for the build/deploy SSH
+  connection only (see GitHubConfig.ssh_known_hosts_path). Defaults to
+  "accept-new"; set a file path to verify that host strictly, or "none" to skip
+  verification entirely (not recommended).
 - PULSARCD_TRUST_PROXY_HEADERS: "true" makes the login rate limiter read
   X-Forwarded-For / X-Real-IP. Only set it behind a proxy that overwrites those
   headers; otherwise a client picks its own rate-limit bucket.
@@ -134,6 +138,16 @@ class GitHubConfig(BaseModel):
     ssh_user: str = "root"
     ssh_port: int = 22
     ssh_key_path: Optional[str] = None
+    # Host key policy for that build/deploy connection, using the same values as
+    # HostConfig.ssh_known_hosts_path.  It defaults to "accept-new" rather than
+    # to the strict global default because this target is normally the container's
+    # own Docker host, reached through the `dockerhost` host-gateway alias: that
+    # name cannot appear in any pre-existing known_hosts, so a strict default
+    # leaves build, deploy and the .env editor failing on a fresh volume with no
+    # key an operator could have installed beforehand.  The key is pinned on the
+    # first connection and every later one is verified against it.  Point this at
+    # a managed known_hosts file to verify strictly from the very first connection.
+    ssh_known_hosts_path: Optional[str] = "accept-new"
     # Docker registry configuration for push operations
     registry_url: Optional[str] = None
     registry_username: Optional[str] = None
@@ -415,6 +429,8 @@ def load_config() -> Settings:
     load_env(settings.github, "ssh_user", "PULSARCD_GITHUB__SSH_USER")
     load_env(settings.github, "ssh_port", "PULSARCD_GITHUB__SSH_PORT", int)
     load_env(settings.github, "ssh_key_path", "PULSARCD_GITHUB__SSH_KEY_PATH")
+    load_env(settings.github, "ssh_known_hosts_path",
+             "PULSARCD_GITHUB__SSH_KNOWN_HOSTS_PATH")
     load_env(settings.github, "registry_url", "PULSARCD_GITHUB__REGISTRY_URL")
     load_env(settings.github, "registry_username", "PULSARCD_GITHUB__REGISTRY_USERNAME")
     load_env(settings.github, "registry_password", "PULSARCD_GITHUB__REGISTRY_PASSWORD")

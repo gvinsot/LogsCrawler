@@ -161,15 +161,25 @@ services:
       # (forwardedHeaders.trustedIPs), otherwise a client picks its own bucket.
       - PULSARCD_TRUST_PROXY_HEADERS=${PULSARCD_TRUST_PROXY_HEADERS:-true}
 
-      # SSH host key verification is strict: an unknown host aborts the
-      # connection. ~/.ssh is mounted read-only, so the known_hosts file lives on
-      # the read/write data volume instead. Bootstrap it once per host with:
-      #   docker exec <task> sh -c 'ssh-keyscan -p 22 dockerhost >> /data/known_hosts'
-      # (run it FROM the container: the `dockerhost` alias does not resolve on
-      # the node.) Set PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS=true to trust the first
-      # key seen instead -- unsafe on an untrusted network.
+      # SSH host key verification for MONITORED hosts is strict: an unknown host
+      # aborts the connection. ~/.ssh is mounted read-only, so the known_hosts
+      # file lives on the read/write data volume instead. Bootstrap it once per
+      # host with:
+      #   docker exec <task> sh -c 'ssh-keyscan -p 22 <host> >> /data/known_hosts'
+      # Set PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS=true to trust the first key seen
+      # instead -- unsafe on an untrusted network.
       - PULSARCD_SSH_KNOWN_HOSTS=${PULSARCD_SSH_KNOWN_HOSTS:-/data/known_hosts}
       - PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS=${PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS:-false}
+
+      # The BUILD/DEPLOY host (build, deploy, the .env editor) is separate: it is
+      # this node's own Docker host, reached through the `dockerhost` host-gateway
+      # alias. That name resolves only inside the container, so no known_hosts
+      # prepared outside it can ever contain the entry -- a strict default just
+      # fails closed with no key an operator could have installed in advance.
+      # "accept-new" pins the key on the first connection (into the file above)
+      # and verifies strictly from then on. Point this at a known_hosts file to
+      # verify strictly from the very first connection instead.
+      - PULSARCD_GITHUB__SSH_KNOWN_HOSTS_PATH=${PULSARCD_GITHUB__SSH_KNOWN_HOSTS_PATH:-accept-new}
       # Swarm manager config - queries Swarm API to list all containers/services
       # Collection is disabled (agents_only=true), this is only for listing
       - PULSARCD_HOSTS=[{"name":"swarm-manager","mode":"docker","docker_url":"unix:///var/run/docker.sock","swarm_manager":true,"swarm_autodiscover":true}]

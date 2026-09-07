@@ -1491,6 +1491,32 @@ async function apiGet(endpoint) {
  * API GET with 404 retry support. If the endpoint returns 404,
  * refreshes the container list and retries once.
  */
+/**
+ * GET that reports why it failed instead of collapsing everything to null.
+ * apiGet() suits polling views, where a silent null is fine; a screen the user
+ * opened on purpose (the .env editor) has to be able to say "the build host
+ * refused the SSH connection" rather than show what looks like an empty file.
+ * Returns {data, error} - exactly one of the two is set.
+ */
+async function apiGetOrError(endpoint) {
+    try {
+        const response = await fetch(`${API_BASE}${endpoint}`, { headers: authHeaders() });
+        if (response.status === 401) { showLogin(); return { error: 'Not authenticated' }; }
+        if (response.status === 403) {
+            _notifyForbidden(endpoint);
+            return { error: 'This action is reserved for administrators.' };
+        }
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            return { error: body.detail || `HTTP ${response.status}` };
+        }
+        return { data: await response.json() };
+    } catch (error) {
+        console.error(`API Error (${endpoint}):`, error);
+        return { error: error.message || 'Connection error' };
+    }
+}
+
 async function apiGetWithRetry(endpoint, retryCallback = null) {
     try {
         const response = await fetch(`${API_BASE}${endpoint}`, { headers: authHeaders() });
@@ -6826,19 +6852,22 @@ async function editStackEnv(repoName) {
     
     modal.classList.add('active');
     
-    try {
-        const data = await apiGet(`/stacks/${encodeURIComponent(repoName)}/env`);
-        if (data === null) {
-            textarea.value = '# .env file not found or failed to load\n# You can create it here\n';
-        } else {
-            textarea.value = data.content || '';
-        }
-        textarea.disabled = false;
-        textarea.focus();
-    } catch (e) {
-        textarea.value = `# Error loading .env file: ${e.message || 'Unknown error'}\n# You can create it here\n`;
-        textarea.disabled = false;
+    // An empty .env and a backend that could not reach the build host look
+    // identical in the editor, and saving over the second one would wipe the
+    // real file, so the failure is shown verbatim and editing stays disabled.
+    const { data, error } = await apiGetOrError(
+        `/stacks/${encodeURIComponent(repoName)}/env`);
+    if (error) {
+        textarea.value = '# Could not read the .env file:\n# ' + error + '\n';
+        textarea.disabled = true;
+        saveBtn.disabled = true;
+        showNotification('error', error);
+        return;
     }
+    textarea.value = data.content || '';
+    textarea.disabled = false;
+    saveBtn.disabled = false;
+    textarea.focus();
 }
 
 async function saveStackEnv() {

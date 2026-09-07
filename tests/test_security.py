@@ -923,6 +923,62 @@ class TestM5OpenSearchQueryHardening:
 # SSH host key verification (blind trust-on-first-use)
 # ===========================================================================
 
+class TestBuildHostKeyPolicy:
+    """The build/deploy SSH target gets its own host key policy.
+
+    It is normally the container's own Docker host, reached through the
+    `dockerhost` host-gateway alias: that name can never appear in a
+    known_hosts file prepared outside the container, so the strict global
+    default left build, deploy and the .env editor failing with no key an
+    operator could have installed in advance.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_client_cache(self):
+        import backend.github_service as gs
+        gs._SHARED_SSH_CLIENTS.clear()
+        yield
+        gs._SHARED_SSH_CLIENTS.clear()
+
+    def test_the_default_pins_on_first_use(self):
+        from backend.config import GitHubConfig
+        assert GitHubConfig().ssh_known_hosts_path == "accept-new"
+
+    async def test_the_policy_reaches_the_ssh_client(self):
+        from backend.config import GitHubConfig
+        from backend.github_service import StackDeployer
+        deployer = StackDeployer(
+            GitHubConfig(token="t", ssh_host="dockerhost", ssh_user="deploy"), None)
+        client = await deployer._get_ssh_client()
+        assert client.config.ssh_known_hosts_path == "accept-new"
+
+    async def test_an_explicit_file_is_honoured_and_stays_strict(self, tmp_path):
+        """Pointing the variable at a file opts back into strict verification."""
+        from backend.config import GitHubConfig
+        from backend.github_service import StackDeployer
+        from backend.ssh_client import UnknownHostKeyError, resolve_known_hosts
+        managed = str(tmp_path / "known_hosts")
+        deployer = StackDeployer(
+            GitHubConfig(token="t", ssh_host="dockerhost", ssh_known_hosts_path=managed),
+            None)
+        client = await deployer._get_ssh_client()
+        assert client.config.ssh_known_hosts_path == managed
+        with pytest.raises(UnknownHostKeyError):
+            resolve_known_hosts(managed, "dockerhost", 22)
+
+    async def test_two_policies_do_not_share_one_connection(self, tmp_path):
+        """The cache key includes the policy, so a strict deployer never reuses
+        a client that was opened under trust-on-first-use."""
+        from backend.config import GitHubConfig
+        from backend.github_service import StackDeployer
+        lax = await StackDeployer(
+            GitHubConfig(token="t", ssh_host="dockerhost"), None)._get_ssh_client()
+        strict = await StackDeployer(
+            GitHubConfig(token="t", ssh_host="dockerhost",
+                         ssh_known_hosts_path=str(tmp_path / "kh")), None)._get_ssh_client()
+        assert lax is not strict
+
+
 class TestSSHHostKeyVerification:
     """An unknown host must break the connection, not be trusted on sight."""
 
