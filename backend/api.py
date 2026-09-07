@@ -2,9 +2,11 @@
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import re
+import time
 import traceback
 import uuid
 from contextlib import asynccontextmanager
@@ -114,6 +116,13 @@ async def lifespan(app: FastAPI):
     logger.info("Starting PulsarCD API")
 
     settings = load_config()
+    if not settings.auth.agent_keys:
+        logger.warning(
+            "No per-agent keys configured: the whole fleet shares a single "
+            "agent key, so compromising one agent grants access to every "
+            "agent endpoint. Set PULSARCD_AUTH__AGENT_KEYS to a JSON object "
+            "mapping each agent_id to its own key."
+        )
     opensearch = OpenSearchClient(settings.opensearch)
 
     # Initialize persistent pipeline state
@@ -322,10 +331,10 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
 
 # Mount MCP servers with authentication middleware
 # Read MCP: /ai/mcp (list_stacks, list_containers, list_computers, logs, get_action_status)
-# Actions MCP: /ai/actions/mcp (build_stack, deploy_stack)
+# Actions MCP: /ai/actions/mcp (build_stack, test_stack, deploy_stack, run_command)
 if _mcp_available:
-    app.mount("/ai/actions", MCPAuthMiddleware(get_mcp_actions_app()))
-    app.mount("/ai", MCPAuthMiddleware(get_mcp_read_app()))
+    app.mount("/ai/actions", MCPAuthMiddleware(get_mcp_actions_app(), require_admin=True))
+    app.mount("/ai", MCPAuthMiddleware(get_mcp_read_app(), require_admin=False))
 
 # CORS middleware - restricted to same-origin; only needed for dev/proxy setups
 app.add_middleware(
@@ -342,41 +351,327 @@ app.add_middleware(
 # Paths that don't require authentication
 _AUTH_EXEMPT_PREFIXES = (
     "/api/auth/login",
-    "/api/health",
     "/static/",
     "/ai",  # MCP has its own auth middleware
 )
-_AUTH_EXEMPT_EXACT = ("/", "/api/health")
+# Only the exact liveness probe is public.  "/api/health" is deliberately NOT a
+# prefix: sub-paths such as the OpenSearch diagnostic must stay authenticated.
+# The trailing-slash form is listed too -- it used to be covered by the old
+# prefix rule and reaches the same route through Starlette's redirect, so an
+# external probe configured with it would otherwise start reporting the service
+# down with a 401.
+_AUTH_EXEMPT_EXACT = ("/", "/api/health", "/api/health/")
 
-# Login rate limiting (in-memory)
+# ---- Role-based access policy ----------------------------------------------
+# Two roles exist: "admin" (full access) and "viewer" (read-only).  The policy is
+# enforced centrally in auth_middleware so that a new route is protected by
+# default instead of relying on every handler remembering to check the role.
+#
+# Rules, in order:
+#   1. Any request under /api/admin/ requires the admin role.
+#   2. Any mutating request (POST/PUT/DELETE/PATCH) under /api/ requires the
+#      admin role, unless it is an explicitly allowlisted read-only POST.
+#   3. Some GET routes leak secrets or infrastructure details and are restricted
+#      to admins even though they do not mutate anything.
+#
+# To open a new route to viewers, add it to one of the two structures below --
+# and only after checking that it neither mutates state nor triggers a
+# side effect (background job, LLM agent, remote command, ...).
+_MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+# POST endpoints that are purely read-only: they use POST only to carry a JSON
+# query body and never mutate state.  Deliberately excluded: /api/tasks/create,
+# which runs the LLM agent and creates a task in an external system.
+_READ_ONLY_POST_PATHS = frozenset({
+    "/api/logs/search",         # log search with a JSON query body
+    "/api/logs/ai-search",      # natural-language log search
+    "/api/logs/similar-count",  # counts similar log messages
+    "/api/logs/ai-analyze",     # severity assessment of a single log line
+})
+
+# GET endpoints restricted to admins (secrets / infrastructure disclosure).
+# A compiled regex keeps path-parameter routes ("/api/stacks/{repo}/env")
+# unambiguous instead of relying on string concatenation.
+_ADMIN_ONLY_GET_RE = re.compile(
+    r"^/api/(?:"
+    r"config(?:/test)?"                # infrastructure and connectivity details
+    r"|stacks/[^/]+/env"               # stack .env file content (secrets)
+    r"|containers/[^/]+/[^/]+/env"     # container environment variables (secrets)
+    r"|stacks/test-permissions/.*"     # probes the deployment's GitHub token
+    r"|github/check-access"            # ditto, across every starred repository
+    r")$"
+)
+
+# ---- Agent key policy ------------------------------------------------------
+# Only the routes the host agents actually call authenticate with an agent key.
+# Everything else under /api/agent/ falls through to the JWT + role policy
+# above.  In particular POST /api/agent/action queues arbitrary actions --
+# including `exec` in any container of any host -- so it requires an admin JWT
+# like every other mutating route; it is called from the API/UI side, never by
+# an agent.
+_AGENT_KEY_ROUTES = frozenset({
+    ("GET", "/api/agent/actions"),
+    ("POST", "/api/agent/result"),
+    ("POST", "/api/agent/system-error"),
+})
+
+# ---- Where a JWT may travel in the query string ----------------------------
+# A token in the URL leaks into reverse-proxy access logs, browser history and
+# Referer headers, so `?token=` is only honoured on the two endpoints whose
+# client cannot set an Authorization header: the SSE action-log stream
+# (EventSource) and the terminal WebSocket (browser WebSocket API).  Every
+# other /api/ route requires the Authorization header.
+# The WebSocket route is listed for completeness only: WebSocket scopes never
+# reach an HTTP middleware, that handler validates the token itself.
+_QUERY_TOKEN_PATH_RE = re.compile(
+    r"^/api/(?:stacks/actions/[^/]+/logs/stream|terminal/ws)$"
+)
+
+
+def _agent_key_matches(presented: str, expected: str) -> bool:
+    """Compare an agent key in constant time."""
+    if not presented or not expected:
+        return False
+    # Encode first: compare_digest rejects str operands containing non-ASCII.
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
+async def _extract_agent_id(request: Request) -> Optional[str]:
+    """Read the agent_id an agent request acts on (query param and JSON body).
+
+    Both sources are read on a non-GET request and must agree.  The middleware
+    authenticates one of them while the handler may read the other, so allowing
+    them to differ would let an agent authenticate with its own key through the
+    query string and then act under a peer's identity through the body.
+
+    Reading the body here is safe: Starlette's BaseHTTPMiddleware caches it and
+    replays it to the downstream handler.
+    """
+    query_agent_id = request.query_params.get("agent_id") or None
+    body_agent_id = None
+    if request.method.upper() != "GET":
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            value = body.get("agent_id")
+            body_agent_id = str(value) if value else None
+    if query_agent_id and body_agent_id and query_agent_id != body_agent_id:
+        logger.warning(
+            "Agent request carries two conflicting agent_id values",
+            query_agent_id=query_agent_id,
+            body_agent_id=body_agent_id,
+        )
+        return None
+    return query_agent_id or body_agent_id
+
+
+async def _authenticate_agent(request: Request, auth_header: str):
+    """Authenticate an agent request; return an error response or None if valid.
+
+    When settings.auth.agent_keys is configured the presented key must be the
+    one registered for the agent_id the request acts on, so a compromised agent
+    cannot poll or answer for another agent.  When it is empty the historical
+    single shared key is accepted (see the startup warning in lifespan).
+    """
+    presented = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+    agent_keys = getattr(settings.auth, "agent_keys", None) or {}
+
+    if agent_keys:
+        agent_id = await _extract_agent_id(request)
+        expected = agent_keys.get(agent_id) if agent_id else None
+        if not expected or not _agent_key_matches(presented, expected):
+            logger.warning(
+                "Agent key rejected",
+                path=request.url.path,
+                method=request.method,
+                agent_id=agent_id,
+            )
+            return JSONResponse(status_code=401, content={"detail": "Invalid agent key"})
+        request.state.agent_id = agent_id
+        return None
+
+    if not _agent_key_matches(presented, settings.auth.agent_key):
+        logger.warning("Agent key rejected", path=request.url.path, method=request.method)
+        return JSONResponse(status_code=401, content={"detail": "Invalid agent key"})
+    return None
+
+
+# ---- Login rate limiting (in-memory) ---------------------------------------
+# Failed logins are counted in two independent sliding-window buckets:
+#   * per (account, client address), to stop credential stuffing against a
+#     single user without letting a third party lock that user out;
+#   * per client address, to keep one source from sweeping many accounts.
+# The per-address ceiling is deliberately much higher than the per-account one:
+# behind a reverse proxy every request carries the proxy's address, so a low
+# per-address limit would let five bad passwords lock out the whole
+# deployment.  The address is only read from X-Forwarded-For when
+# PULSARCD_TRUST_PROXY_HEADERS opts in — the header is client-controlled
+# otherwise, and trusting it blindly lets an attacker both dodge the limit and
+# forge attempts against someone else's address.
 _login_attempts: Dict[str, List[float]] = {}
-_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_MAX_ATTEMPTS = 5                 # per account, per window
+_LOGIN_MAX_ATTEMPTS_PER_CLIENT = 30     # per client address, per window
 _LOGIN_WINDOW_SECONDS = 60
+# Hard ceiling on the number of tracked buckets so that varying the username
+# (or the forwarded address) cannot grow the map without bound.
+_LOGIN_ATTEMPTS_MAX_KEYS = 4096
+
+_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
-def _is_rate_limited(client_ip: str) -> bool:
-    """Check if a client IP is rate-limited for login attempts."""
-    import time
+def _trust_proxy_headers() -> bool:
+    """Whether X-Forwarded-* headers are set by a trusted reverse proxy.
+
+    Off by default: the headers are forgeable by any client when the app is
+    reachable directly.
+    """
+    return os.environ.get("PULSARCD_TRUST_PROXY_HEADERS", "").strip().lower() in _TRUTHY_VALUES
+
+
+def _client_address(request: Request) -> str:
+    """Client address used to rate-limit logins."""
+    if _trust_proxy_headers():
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            # Left-most entry is the original client when the chain is trusted.
+            candidate = forwarded.split(",")[0].strip()
+            if candidate:
+                return candidate[:64]
+        real_ip = (request.headers.get("X-Real-IP") or "").strip()
+        if real_ip:
+            return real_ip[:64]
+    return request.client.host if request.client else "unknown"
+
+
+def _account_bucket(username: str, client_ip: str) -> str:
+    """Bucket key for an (account, address) pair.
+
+    Keying on the account ALONE would hand any unauthenticated client a targeted
+    lockout: five bad passwords for "admin" every 60 seconds, from anywhere, and
+    the real administrator is refused with a 429 before their correct password is
+    even checked (the limit is evaluated ahead of authenticate(), and the counter
+    is only cleared by a successful login). Pairing it with the address keeps the
+    credential-stuffing protection for the attacker's own source while leaving
+    every other client unaffected.  The username is truncated: it is
+    attacker-chosen and must not be able to grow the key.
+    """
+    return "user:" + (username or "")[:128] + "|ip:" + client_ip
+
+
+def _purge_login_attempts(now: float) -> None:
+    """Drop buckets whose attempts all fell out of the sliding window."""
+    expired = [
+        key for key, attempts in _login_attempts.items()
+        if not attempts or now - attempts[-1] >= _LOGIN_WINDOW_SECONDS
+    ]
+    for key in expired:
+        _login_attempts.pop(key, None)
+
+
+def _recent_attempts(key: str, now: float) -> List[float]:
+    """Return the attempts of a bucket that are still inside the window."""
+    attempts = [t for t in _login_attempts.get(key, []) if now - t < _LOGIN_WINDOW_SECONDS]
+    if attempts:
+        _login_attempts[key] = attempts
+    else:
+        _login_attempts.pop(key, None)
+    return attempts
+
+
+def _is_rate_limited(client_ip: str, username: str = "") -> bool:
+    """Check whether a login attempt must be refused before verifying credentials."""
     now = time.time()
-    attempts = _login_attempts.get(client_ip, [])
-    # Remove old attempts outside the window
-    attempts = [t for t in attempts if now - t < _LOGIN_WINDOW_SECONDS]
-    _login_attempts[client_ip] = attempts
-    return len(attempts) >= _LOGIN_MAX_ATTEMPTS
+    _purge_login_attempts(now)
+    if username and len(_recent_attempts(_account_bucket(username, client_ip), now)) >= _LOGIN_MAX_ATTEMPTS:
+        return True
+    return len(_recent_attempts("ip:" + client_ip, now)) >= _LOGIN_MAX_ATTEMPTS_PER_CLIENT
 
 
-def _record_login_attempt(client_ip: str):
-    """Record a failed login attempt."""
-    import time
-    if client_ip not in _login_attempts:
-        _login_attempts[client_ip] = []
-    _login_attempts[client_ip].append(time.time())
+def _record_login_attempt(client_ip: str, username: str = "") -> None:
+    """Record a failed login attempt in the client-address and account buckets."""
+    now = time.time()
+    _purge_login_attempts(now)
+    keys = ["ip:" + client_ip]
+    if username:
+        keys.append(_account_bucket(username, client_ip))
+    for key in keys:
+        bucket = _login_attempts.get(key)
+        if bucket is None:
+            if len(_login_attempts) >= _LOGIN_ATTEMPTS_MAX_KEYS:
+                # Evict the least recently used bucket rather than failing to
+                # record — never grow past the ceiling, never fail open.
+                oldest = min(_login_attempts,
+                             key=lambda k: _login_attempts[k][-1] if _login_attempts[k] else 0.0)
+                _login_attempts.pop(oldest, None)
+            bucket = _login_attempts.setdefault(key, [])
+        bucket.append(now)
+
+
+def _clear_login_attempts(username: str, client_ip: str) -> None:
+    """Forget this account+address's failed attempts after a successful login."""
+    _login_attempts.pop(_account_bucket(username, client_ip), None)
+
+
+def _user_token_epoch(user: Any) -> int:
+    """Read an account's revocation epoch, tolerating records without one."""
+    try:
+        return int(getattr(user, "token_epoch", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _token_is_revoked(payload: Dict[str, Any]) -> bool:
+    """Whether a decoded JWT was invalidated after it was issued.
+
+    A password change, a role change and an account deletion all bump the
+    account's epoch (see user_manager), so a token minted before that carries a
+    lower value and is refused.  Tokens issued before the claim existed read as
+    epoch 0 and stay valid until the account is first revoked, which keeps a
+    users.json written by an older version working as-is.
+    """
+    if user_manager is None:
+        return False
+    username = payload.get("sub") or ""
+    try:
+        current = user_manager.token_epoch_for(username)
+    except Exception as e:  # never lock everyone out on a storage hiccup
+        logger.error("Token epoch lookup failed", user=username, error=str(e))
+        return False
+    if current is None:
+        return True  # account deleted while its token was still within expiry
+    if not isinstance(current, int):
+        return False
+    try:
+        presented = int(payload.get("epoch", 0) or 0)
+    except (TypeError, ValueError):
+        return True
+    return presented < current
+
+
+def _route_path(scope: Dict[str, Any]) -> str:
+    """Return the path the router will match, mirroring Starlette's own rule.
+
+    Never derive the policy path from ``request.url``: that URL is rebuilt from
+    the client-controlled Host header, so a request carrying ``Host: x?`` yields
+    an empty ``url.path`` while the router still matches ``scope["path"]`` --
+    every check below would be skipped on a fully routed request.  ``root_path``
+    is stripped for the same reason in reverse: behind a proxy that mounts the
+    app under a sub-path, the router matches the remainder, so the policy must
+    look at the remainder too.
+    """
+    path = scope.get("path", "")
+    root_path = scope.get("root_path", "")
+    if root_path and path.startswith(root_path):
+        return path[len(root_path):]
+    return path
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """Verify authentication on all /api/ endpoints."""
-    path = request.url.path
+    path = _route_path(request.scope)
 
     # Skip auth for exempt paths
     if path in _AUTH_EXEMPT_EXACT or any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
@@ -388,35 +683,134 @@ async def auth_middleware(request: Request, call_next):
 
     auth_header = request.headers.get("Authorization", "")
 
-    # Agent endpoints: validate shared agent key
-    if path.startswith("/api/agent/"):
-        if not auth_header.startswith("Bearer ") or auth_header[7:] != settings.auth.agent_key:
-            return JSONResponse(status_code=401, content={"detail": "Invalid agent key"})
+    # Agent polling endpoints: validate the agent key.  Other /api/agent/ routes
+    # (POST /api/agent/action) deliberately fall through to the JWT policy.
+    if (request.method.upper(), path) in _AGENT_KEY_ROUTES:
+        denied = await _authenticate_agent(request, auth_header)
+        if denied is not None:
+            return denied
         return await call_next(request)
 
     # All other /api/ endpoints: validate JWT Bearer token
-    # Support token via query param for SSE (EventSource can't set headers)
     token = None
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
-    elif request.query_params.get("token"):
+    elif request.query_params.get("token") and _QUERY_TOKEN_PATH_RE.match(path):
+        # Only the two streaming clients that cannot set a header.
         token = request.query_params["token"]
 
     if not token:
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
     try:
         payload = decode_token(token, settings.auth.jwt_secret)
-        request.state.user = payload.get("sub", "")
-        request.state.role = payload.get("role", "viewer")
     except jwt.PyJWTError as e:
-        logger.warning("JWT authentication failed", error=str(e), path=request.url.path)
+        logger.warning("JWT authentication failed", error=str(e), path=path)
         return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
+
+    if _token_is_revoked(payload):
+        logger.warning("Revoked token rejected",
+                       user=payload.get("sub", ""), path=path)
+        return JSONResponse(status_code=401, content={"detail": "Token has been revoked"})
+
+    request.state.user = payload.get("sub", "")
+    request.state.role = payload.get("role", "viewer")
 
     # Admin-only paths
     if path.startswith("/api/admin/") and getattr(request.state, "role", "") != "admin":
         return JSONResponse(status_code=403, content={"detail": "Admin access required"})
 
+    # Role-based access control: viewers are read-only.  See the policy block
+    # next to _AUTH_EXEMPT_PREFIXES for the rules and how to extend them.
+    if getattr(request.state, "role", "") != "admin":
+        method = request.method.upper()
+        denied = False
+        if method in _MUTATING_METHODS:
+            denied = not (method == "POST" and path in _READ_ONLY_POST_PATHS)
+        elif method == "GET" and _ADMIN_ONLY_GET_RE.match(path):
+            denied = True
+        if denied:
+            logger.warning(
+                "Access denied: admin role required",
+                user=getattr(request.state, "user", ""),
+                role=getattr(request.state, "role", ""),
+                method=method,
+                path=path,
+            )
+            return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+
     return await call_next(request)
+
+
+# ============== Security Headers ==============
+
+# Content-Security-Policy sources, kept in sync with frontend/index.html:
+#   * scripts: Chart.js and xterm come from jsdelivr, and every handler is an
+#     inline onclick attribute, hence 'unsafe-inline';
+#   * styles: the Google Fonts stylesheet, the xterm stylesheet, and inline
+#     style attributes in the markup;
+#   * fonts: the Google Fonts files;
+#   * images: the inline data: favicon.
+# Anything not listed falls back to default-src 'self'.
+_CSP_DIRECTIVES = (
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data:",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+)
+
+_HSTS_VALUE = "max-age=31536000; includeSubDomains"
+
+# host[:port] shapes only (IPv6 literals included) — the Host header is
+# client-controlled and must never be echoed into a header unvalidated.
+_HOST_HEADER_RE = re.compile(r"^[A-Za-z0-9._:\[\]-]{1,255}$")
+
+
+def _connect_src(request: Request) -> str:
+    """connect-src value: same-origin XHR/SSE plus the terminal WebSocket.
+
+    'self' is meant to cover ws:/wss: on the page's own origin, but browsers
+    disagreed on that for years; the origin's ws:// and wss:// forms are spelled
+    out so the terminal keeps working, and the host is only echoed back when it
+    has a plain host[:port] shape.
+    """
+    host = request.headers.get("host") or request.url.netloc
+    if host and _HOST_HEADER_RE.match(host):
+        return f"connect-src 'self' ws://{host} wss://{host}"
+    return "connect-src 'self'"
+
+
+def _request_is_https(request: Request) -> bool:
+    """Whether the client's leg of the connection is TLS-protected."""
+    if request.url.scheme in ("https", "wss"):
+        return True
+    forwarded = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+    return forwarded == "https"
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Attach the baseline security headers to every HTTP response.
+
+    Registered last, so it wraps auth_middleware and the headers are also
+    present on 401/403 responses.  Only response headers are touched: the SSE
+    stream is not buffered, and WebSocket scopes never reach an HTTP
+    middleware, so neither streaming path is affected.
+    """
+    response = await call_next(request)
+    headers = response.headers
+    headers.setdefault("Content-Security-Policy",
+                       "; ".join(_CSP_DIRECTIVES + (_connect_src(request),)))
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("Referrer-Policy", "no-referrer")
+    if _request_is_https(request):
+        headers.setdefault("Strict-Transport-Security", _HSTS_VALUE)
+    return response
 
 
 # ============== Auth Endpoints ==============
@@ -424,22 +818,36 @@ async def auth_middleware(request: Request, call_next):
 @app.post("/api/auth/login")
 async def auth_login(request: Request):
     """Authenticate and return a JWT token."""
-    client_ip = request.client.host if request.client else "unknown"
-
-    if _is_rate_limited(client_ip):
-        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+    client_ip = _client_address(request)
 
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid request body")
     username = body.get("username", "")
     password = body.get("password", "")
+    if not isinstance(username, str) or not isinstance(password, str):
+        raise HTTPException(status_code=400, detail="Invalid credentials format")
+
+    # Counted per account and per client address: the username is needed first,
+    # so the body is parsed before the limit is applied.
+    if _is_rate_limited(client_ip, username):
+        logger.warning("Login rate limited", username=username[:128], client_ip=client_ip)
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
 
     user = user_manager.authenticate(username, password) if user_manager else None
     if user:
-        token = create_token(username, settings.auth.jwt_secret, settings.auth.jwt_expiry_hours, role=user.role)
+        _clear_login_attempts(username, client_ip)
+        token = create_token(
+            username,
+            settings.auth.jwt_secret,
+            settings.auth.jwt_expiry_hours,
+            role=user.role,
+            token_epoch=_user_token_epoch(user),
+        )
         return {"token": token}
 
-    _record_login_attempt(client_ip)
-    logger.warning("Failed login attempt", username=username, client_ip=client_ip)
+    _record_login_attempt(client_ip, username)
+    logger.warning("Failed login attempt", username=username[:128], client_ip=client_ip)
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
@@ -651,8 +1059,11 @@ async def admin_llm_test(request: Request):
         f"{eh.instructions}\n\n"
         f"You are chatting with a DevOps user. You have access to MCP tools "
         f"from PulsarCD (search_logs, list_containers, list_computers, "
-        f"get_log_metadata, get_action_status, build_stack, deploy_stack, list_stacks) "
+        f"get_log_metadata, get_action_status, list_stacks) "
         f"and from PulsarTeam (create_task, etc.).\n"
+        f"Infrastructure-mutating tools (build_stack, test_stack, deploy_stack, "
+        f"run_command) are NOT available here: the platform policy refuses them "
+        f"unless error_handling.allow_dangerous_tools is enabled.\n"
         f"Use the appropriate tools to answer questions. "
         f"For example, if the user asks about errors, call search_logs. "
         f"If they ask about container status, call list_containers.\n"
@@ -1464,9 +1875,11 @@ async def search_logs_get(
     http_status_max: Optional[int] = Query(default=None),
     start_time: Optional[datetime] = Query(default=None),
     end_time: Optional[datetime] = Query(default=None),
-    size: int = Query(default=100, ge=1, le=10000),
-    from_: int = Query(default=0, alias="from"),
-    sort_order: str = Query(default="desc"),
+    # Bounds mirror opensearch_client.MAX_SEARCH_SIZE / MAX_SEARCH_FROM so an
+    # out-of-range request is refused rather than silently truncated.
+    size: int = Query(default=100, ge=1, le=500),
+    from_: int = Query(default=0, ge=0, le=10000, alias="from"),
+    sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
 ) -> LogSearchResult:
     """Search logs with GET parameters."""
     query = LogSearchQuery(
@@ -1531,7 +1944,9 @@ async def ai_search_logs(request: Dict[str, str]) -> Dict[str, Any]:
         http_status_max=params.get("http_status_max"),
         start_time=start_time,
         size=100,
-        sort_order=params.get("sort_order", "desc"),
+        # params comes from the LLM: anything but the two accepted values would
+        # now raise a validation error, so fall back instead of returning a 500.
+        sort_order=params.get("sort_order") if params.get("sort_order") in ("asc", "desc") else "desc",
     )
     
     result = await opensearch.search_logs(query)
@@ -1622,33 +2037,33 @@ async def create_agent_task(request: Dict[str, Any]) -> Dict[str, Any]:
 # ============== Hosts ==============
 
 @app.get("/api/hosts")
-async def list_hosts() -> List[Dict[str, Any]]:
+async def list_hosts(request: Request) -> List[Dict[str, Any]]:
     """List all hosts: configured hosts plus discovered Docker Swarm nodes.
 
     Each swarm node is exposed as a host so the Containers tab can show
     containers per node. Host count = configured + swarm nodes.
+
+    hostname/port/username together form the full SSH connection triple of every
+    node in the fleet, which is strictly more than the "hosts" block of
+    GET /api/config -- an admin-only route.  Viewers therefore only get the name
+    and the swarm flag, which is all the UI needs to target a host by name.
     """
+    is_admin = getattr(request.state, "role", "") == "admin"
+
+    def _entry(name: str, config: Any, is_swarm_node: bool) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {"name": name, "is_swarm_node": is_swarm_node}
+        if is_admin:
+            entry["hostname"] = config.hostname
+            entry["port"] = config.port
+            entry["username"] = config.username
+        return entry
+
     configured_names = {h.name for h in settings.hosts}
-    result = [
-        {
-            "name": host.name,
-            "hostname": host.hostname,
-            "port": host.port,
-            "username": host.username,
-            "is_swarm_node": False,
-        }
-        for host in settings.hosts
-    ]
+    result = [_entry(host.name, host, False) for host in settings.hosts]
     # Add discovered swarm nodes as hosts (so they appear in host list and Containers tab)
     for name, client in collector.clients.items():
         if name not in configured_names:
-            result.append({
-                "name": name,
-                "hostname": client.config.hostname,
-                "port": client.config.port,
-                "username": client.config.username,
-                "is_swarm_node": True,
-            })
+            result.append(_entry(name, client.config, True))
     return result
 
 
@@ -1727,40 +2142,37 @@ async def execute_host_action(host_name: str, request: Dict[str, str]) -> Dict[s
 
 @app.get("/api/health")
 async def health_check() -> Dict[str, Any]:
-    """Health check endpoint with OpenSearch connectivity status."""
+    """Public liveness probe: service status and OpenSearch reachability only.
+
+    This is the single unauthenticated endpoint, so it must not disclose
+    anything about the deployment.  Versions, index names and document counts
+    live in the admin-only diagnostics (/api/admin/opensearch-status and
+    /api/admin/opensearch-probe).
+    """
     result: Dict[str, Any] = {"status": "healthy", "service": "pulsarcd"}
 
-    # OpenSearch connectivity check (quick, no auth needed)
     if opensearch and opensearch._client:
         try:
-            import opensearchpy as _ospy
-            result["opensearch_client_version"] = getattr(_ospy, "__versionstr__", "unknown")
-        except Exception:
-            pass
-        try:
-            info = await opensearch._client.info()
-            os_version = info.get("version", {}).get("number", "unknown")
+            await opensearch._client.info()
             result["opensearch"] = "connected"
-            result["opensearch_version"] = os_version
-            # Quick doc counts
-            for idx_name in [opensearch.logs_index, opensearch.metrics_index, opensearch.host_metrics_index]:
-                try:
-                    count_resp = await opensearch._client.count(index=idx_name)
-                    result[f"{idx_name}_docs"] = count_resp.get("count", 0)
-                except Exception as e:
-                    result[f"{idx_name}_docs"] = f"error: {str(e)[:100]}"
         except Exception as e:
+            # The error type/message can leak host names or credentials: log it
+            # server-side and expose only the coarse state.
+            logger.warning("Health check: OpenSearch unreachable", error=str(e))
             result["opensearch"] = "error"
-            result["opensearch_error"] = f"{type(e).__name__}: {str(e)[:200]}"
     else:
         result["opensearch"] = "not_configured"
 
     return result
 
 
-@app.get("/api/health/opensearch")
+@app.get("/api/admin/opensearch-probe")
 async def opensearch_probe() -> Dict[str, Any]:
-    """Deep OpenSearch diagnostic — no auth required.
+    """Deep OpenSearch diagnostic — admin only.
+
+    Enforced by auth_middleware: every /api/admin/ route requires an admin JWT.
+    The probe writes and deletes documents and enumerates every index, so it
+    must never be reachable anonymously.
 
     Tests:
     1. Cluster connectivity and version
@@ -1880,14 +2292,12 @@ async def opensearch_probe() -> Dict[str, Any]:
         )
         total = search_resp.get("hits", {}).get("total", {})
         total_val = total.get("value", total) if isinstance(total, dict) else total
-        sample_hits = [
-            {k: v for k, v in h.get("_source", {}).items() if k in ("timestamp", "host", "compose_project", "level", "message")}
-            for h in search_resp.get("hits", {}).get("hits", [])
-        ]
+        # Only report how many documents came back: returning production log
+        # lines from a diagnostic endpoint adds nothing and leaks their content.
         result["search_test"] = {
             "status": "ok",
             "total_docs": total_val,
-            "sample_hits": sample_hits,
+            "sample_count": len(search_resp.get("hits", {}).get("hits", [])),
         }
     except Exception as e:
         result["search_test"] = {"status": "error", "error": f"{type(e).__name__}: {str(e)[:300]}"}
@@ -3509,9 +3919,12 @@ async def post_agent_result(
 ):
     """Report action result from an agent.
 
-    Agents call this after executing an action to report the result.
+    Agents call this after executing an action to report the result.  The action
+    must belong to the reporting agent: the key was validated against this same
+    agent_id, so the pair binds the result to the identity that was polled.
     """
-    action = await actions_queue.complete_action(action_id, success, output)
+    action = await actions_queue.complete_action(action_id, success, output,
+                                                 agent_id=agent_id)
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
 
@@ -3520,9 +3933,27 @@ async def post_agent_result(
 
 @app.post("/api/agent/system-error")
 async def post_agent_system_error(request: Request):
-    """Receive a system error report from a host agent."""
+    """Receive a system error report from a host agent.
+
+    The report is attributed to the identity the middleware authenticated, not
+    to the agent_id the body names: with per-agent keys those two can differ,
+    and the body is what ends up in the LLM agent's system-error store.
+    """
     body = await request.json()
-    agent_id = body.get("agent_id", "unknown")
+    claimed_agent_id = body.get("agent_id", "unknown")
+    authenticated_agent_id = getattr(request.state, "agent_id", None)
+    if authenticated_agent_id:
+        if claimed_agent_id not in ("unknown", authenticated_agent_id):
+            logger.warning("Agent system error rejected: agent_id mismatch",
+                           authenticated=authenticated_agent_id,
+                           claimed=claimed_agent_id)
+            raise HTTPException(
+                status_code=403,
+                detail="agent_id does not match the authenticated agent",
+            )
+        agent_id = authenticated_agent_id
+    else:
+        agent_id = claimed_agent_id
     category = body.get("category", "host_agent")
     error_type = body.get("error_type", "Unknown")
     error = body.get("error", "")
@@ -3567,6 +3998,10 @@ async def create_agent_action(
 
     This is the main endpoint for the frontend/API to request actions on remote hosts.
     The action is queued and the agent will pick it up on next poll.
+
+    Requires an admin JWT (enforced by auth_middleware): despite the /api/agent/
+    prefix this route is not called by agents, and the `exec` action type runs
+    an arbitrary command in any container of any host.
 
     If wait=True, the endpoint blocks until the action completes or times out.
     """
@@ -3658,6 +4093,11 @@ async def terminal_websocket(
             await websocket.close(code=4001, reason="Missing token")
             return
         payload = decode_token(token, settings.auth.jwt_secret)
+        if _token_is_revoked(payload):
+            logger.warning("Terminal WebSocket rejected: revoked token",
+                           user=payload.get("sub", ""))
+            await websocket.close(code=4001, reason="Token revoked")
+            return
         if payload.get("role") != "admin":
             await websocket.close(code=4003, reason="Admin access required")
             return
@@ -3700,6 +4140,10 @@ async def _handle_ssh_terminal(websocket, host_config, cols, rows, session_id):
     from pathlib import Path
     from .ssh_client import resolve_known_hosts, save_host_key_if_needed
 
+    # An unknown or unverifiable host raises UnknownHostKeyError here. It is left
+    # to propagate on purpose: the caller already relays str(e) to the terminal,
+    # and that message names the known_hosts file and the ssh-keyscan command to
+    # run, which is exactly what the operator needs.
     known_hosts_setting, save_key = resolve_known_hosts(
         host_config.ssh_known_hosts_path,
         host_config.hostname,

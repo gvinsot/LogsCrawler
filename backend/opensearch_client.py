@@ -1,6 +1,7 @@
 """OpenSearch client for log storage and querying."""
 
 import hashlib
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,145 @@ from .models import (
 )
 
 logger = structlog.get_logger()
+
+# --- Query cost / safety limits ------------------------------------------
+# The OpenSearch cluster is reachable without authentication in the default
+# deployment, so every query built from user (or AI) input must be bounded
+# here as well: the FastAPI layer is not the only entry point.
+DEFAULT_SEARCH_SIZE = 100
+MAX_SEARCH_SIZE = 500          # max hits returned by a single search
+MAX_RAW_QUERY_SIZE = 500       # same cap for raw MCP/AI query bodies
+MAX_SEARCH_FROM = 10000        # OpenSearch default index.max_result_window
+MAX_QUERY_LENGTH = 2048        # max chars of user-supplied full-text query
+MAX_SIMILAR_MESSAGE_LENGTH = 4096
+MAX_SEARCH_HOURS = 24 * 365    # max time window accepted from a request body
+MAX_HISTOGRAM_BUCKETS = 2000   # guards date_histogram interval abuse
+MAX_QUERY_BODY_NODES = 10000   # guards traversal of raw query bodies
+SEARCH_TIMEOUT = "30s"         # per-shard time budget enforced by OpenSearch
+
+# Operators allowed in a full-text search. This is an allow-list: FUZZY (~),
+# NEAR/SLOP and regexp are deliberately excluded because they are the
+# expensive constructs an anonymous caller could use to stall the cluster.
+SIMPLE_QUERY_FLAGS = "AND|OR|NOT|PHRASE|PRECEDENCE|PREFIX|WHITESPACE|ESCAPE"
+
+# query_string understood the AND / OR / NOT keywords, simple_query_string
+# only knows the +, | and - operators. Translating them keeps the search
+# experience (and the AI-generated queries) identical after the switch.
+_BOOL_KEYWORD_OPERATORS = (
+    (re.compile(r"\bAND\b"), " + "),
+    (re.compile(r"\bOR\b"), " | "),
+    (re.compile(r"\bNOT\s+"), " -"),
+)
+
+_INTERVAL_PATTERN = re.compile(r"^(\d{1,4})(ms|s|m|h|d)$")
+_INTERVAL_UNIT_SECONDS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+
+# Query constructs that may carry inline scripts. Raw bodies reach
+# run_logs_query from the MCP/AI layer; Painless scripts are both an
+# expensive-query vector and a far wider attack surface than the search DSL.
+_FORBIDDEN_QUERY_KEYS = frozenset({
+    "script",
+    "script_fields",
+    "script_score",
+    "scripted_metric",
+    "runtime_mappings",
+})
+
+
+def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
+    """Coerce a value to an int inside [minimum, maximum], or return default."""
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(result, maximum))
+
+
+def _translate_boolean_keywords(text: str) -> str:
+    """Rewrite Lucene boolean keywords as simple_query_string operators.
+
+    Text inside double quotes is left untouched so phrase searches keep their
+    literal words.
+    """
+    parts = text.split('"')
+    for i in range(0, len(parts), 2):  # even chunks are outside quotes
+        chunk = parts[i]
+        for pattern, replacement in _BOOL_KEYWORD_OPERATORS:
+            chunk = pattern.sub(replacement, chunk)
+        parts[i] = chunk
+    return '"'.join(parts)
+
+
+def _build_message_query(text: str) -> Dict[str, Any]:
+    """Build a bounded full-text clause for a user-supplied search string.
+
+    Uses simple_query_string instead of query_string: the searchable fields
+    are fixed (no "other_field:value" targeting), regexp / leading wildcard /
+    fuzzy syntax is unavailable, and malformed input can never raise a parse
+    error. Phrases, trailing wildcards, parentheses and boolean operators --
+    everything the log search UI actually offers -- still work.
+    """
+    cleaned = text.strip()
+    if len(cleaned) > MAX_QUERY_LENGTH:
+        logger.warning("Search query truncated",
+                       length=len(cleaned), max_length=MAX_QUERY_LENGTH)
+        cleaned = cleaned[:MAX_QUERY_LENGTH]
+
+    return {
+        "simple_query_string": {
+            "query": _translate_boolean_keywords(cleaned),
+            "fields": ["message"],
+            "default_operator": "or",
+            "flags": SIMPLE_QUERY_FLAGS,
+            "analyze_wildcard": False,
+            "lenient": True,
+        }
+    }
+
+
+def _safe_interval(interval: Any, default: str, hours: Any = 24) -> str:
+    """Validate a date_histogram interval coming from a request parameter.
+
+    Rejects anything that is not a plain "<number><unit>" value, and any
+    interval that would generate more than MAX_HISTOGRAM_BUCKETS buckets over
+    the requested window.
+    """
+    try:
+        window_seconds = int(hours) * 3600
+    except (TypeError, ValueError):
+        window_seconds = 24 * 3600
+
+    match = _INTERVAL_PATTERN.match(interval.strip()) if isinstance(interval, str) else None
+    if match:
+        seconds = int(match.group(1)) * _INTERVAL_UNIT_SECONDS[match.group(2)]
+        if seconds > 0 and window_seconds / seconds <= MAX_HISTOGRAM_BUCKETS:
+            return interval.strip()
+
+    logger.warning("Rejected invalid histogram interval",
+                   interval=str(interval)[:32], fallback=default)
+    return default
+
+
+def _reject_scripted_query(body: Any) -> None:
+    """Raise ValueError if a raw query body carries a script construct.
+
+    Traversal is iterative and node-bounded so that a deeply nested or huge
+    body cannot itself become the denial of service.
+    """
+    stack = [body]
+    visited = 0
+    while stack:
+        node = stack.pop()
+        visited += 1
+        if visited > MAX_QUERY_BODY_NODES:
+            raise ValueError("Query body is too large")
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in _FORBIDDEN_QUERY_KEYS:
+                    raise ValueError(f"Query construct not allowed: {key}")
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
 
 
 class OpenSearchClient:
@@ -485,14 +625,9 @@ class OpenSearchClient:
         must = []
         filter_clauses = []
         
-        # Full-text search
+        # Full-text search (bounded, see _build_message_query)
         if query.query:
-            must.append({
-                "query_string": {
-                    "query": query.query,
-                    "default_field": "message",
-                }
-            })
+            must.append(_build_message_query(query.query))
         
         # Host filter
         if query.hosts:
@@ -536,11 +671,22 @@ class OpenSearchClient:
             }
         }
         
+        # Cap the requested page client-side: LogSearchQuery is also built
+        # directly by the MCP tools and by internal callers, so the FastAPI
+        # constraints are not enough. Huge pages and deep paging are cheap DoS.
+        size = _clamp_int(query.size, 0, MAX_SEARCH_SIZE, DEFAULT_SEARCH_SIZE)
+        # from + size must stay inside index.max_result_window.
+        from_ = _clamp_int(query.from_, 0, max(MAX_SEARCH_FROM - size, 0), 0)
+        sort_order = query.sort_order if query.sort_order in ("asc", "desc") else "desc"
+
         body = {
             "query": es_query,
-            "sort": [{"timestamp": {"order": query.sort_order}}],
-            "from": query.from_,
-            "size": query.size,
+            "sort": [{"timestamp": {"order": sort_order}}],
+            "from": from_,
+            "size": size,
+            # Per-shard time budget: an expensive query returns partial
+            # results instead of pinning the cluster.
+            "timeout": SEARCH_TIMEOUT,
             "aggs": {
                 "levels": {"terms": {"field": "level", "size": 10}},
                 "hosts": {"terms": {"field": "host", "size": 50}},
@@ -683,6 +829,7 @@ class OpenSearchClient:
         """Get error count time series."""
         now = datetime.utcnow()
         start = now - timedelta(hours=hours)
+        interval = _safe_interval(interval, "1h", hours)
         
         body = {
             "query": {
@@ -723,6 +870,7 @@ class OpenSearchClient:
         """Get total HTTP requests count time series (any log with http_status)."""
         now = datetime.utcnow()
         start = now - timedelta(hours=hours)
+        interval = _safe_interval(interval, "1h", hours)
         
         body = {
             "query": {
@@ -763,6 +911,7 @@ class OpenSearchClient:
         """Get HTTP status count time series."""
         now = datetime.utcnow()
         start = now - timedelta(hours=hours)
+        interval = _safe_interval(interval, "1h", hours)
         
         body = {
             "query": {
@@ -803,6 +952,7 @@ class OpenSearchClient:
         """Get resource usage time series (cpu_percent or memory_percent)."""
         now = datetime.utcnow()
         start = now - timedelta(hours=hours)
+        interval = _safe_interval(interval, "15m", hours)
         
         body = {
             "query": {
@@ -843,6 +993,7 @@ class OpenSearchClient:
         
         now = datetime.utcnow()
         start = now - timedelta(hours=hours)
+        interval = _safe_interval(interval, "15m", hours)
         
         body = {
             "query": {
@@ -903,6 +1054,7 @@ class OpenSearchClient:
         
         now = datetime.utcnow()
         start = now - timedelta(hours=hours)
+        interval = _safe_interval(interval, "15m", hours)
         
         body = {
             "query": {
@@ -971,6 +1123,7 @@ class OpenSearchClient:
         """Get CPU%, memory%, and error count time series for a specific container."""
         now = datetime.utcnow()
         start = now - timedelta(hours=hours)
+        interval = _safe_interval(interval, "1h", hours)
         time_range = {"range": {"timestamp": {"gte": start.isoformat()}}}
         container_filter = {"term": {"container_id": container_id}}
 
@@ -1036,7 +1189,12 @@ class OpenSearchClient:
         Uses a simplified similarity approach by extracting key terms from the message.
         """
         import re
-        
+
+        # Bound the cost of the query: both the message and the time window
+        # come straight from an HTTP request body.
+        message = str(message)[:MAX_SIMILAR_MESSAGE_LENGTH]
+        hours = _clamp_int(hours, 1, MAX_SEARCH_HOURS, 24)
+
         # Simplify the message: remove dynamic parts and special characters
         simplified = message
         
@@ -1153,12 +1311,16 @@ class OpenSearchClient:
         """Execute a raw OpenSearch query against the logs index.
 
         Returns the raw OpenSearch response dict (hits, aggregations, total, etc.).
-        Size and from are capped server-side to prevent abuse.
+        The body is caller-supplied (MCP tools, AI generated), so it is bounded
+        here: script constructs are rejected, size and from are capped and a
+        search timeout is always enforced.
         """
-        body.setdefault("size", 50)
-        body["size"] = min(int(body["size"]), 500)
-        body.setdefault("from", 0)
         try:
+            _reject_scripted_query(body)
+            body["size"] = _clamp_int(body.get("size", 50), 0, MAX_RAW_QUERY_SIZE, 50)
+            body["from"] = _clamp_int(body.get("from", 0), 0, MAX_SEARCH_FROM, 0)
+            # Forced, not defaulted: the caller must not be able to widen it.
+            body["timeout"] = SEARCH_TIMEOUT
             return await self._client.search(index=self.logs_index, body=body)
         except Exception as e:
             logger.error("Raw logs query failed", error=str(e))

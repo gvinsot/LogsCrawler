@@ -57,8 +57,28 @@ services:
       context: ..
       dockerfile: Dockerfile
       target: production
-    # Run as root to access Docker socket for Swarm API queries
+    # Security: runs as root ONLY because /var/run/docker.sock is owned by
+    # root:docker and the image has no matching docker group. Membership in the
+    # Docker API is equivalent to root on the node, so this container is a
+    # high-value target: any RCE here also reaches the mounted SSH keys.
+    # Alternatives, in increasing order of safety:
+    #   1. drop `user: root` and add `group_add: ["<host docker GID>"]` so the
+    #      image's non-root appuser can reach the socket;
+    #   2. put a docker-socket-proxy in front of the socket and expose only the
+    #      read-only endpoints this service needs (containers/services/nodes),
+    #      then mount no socket at all here.
     user: root
+    # Hardening compatible with the socket + SSH mounts: no capability is
+    # needed to open a unix socket owned by uid 0 or to run an SSH client, and
+    # no-new-privileges blocks setuid escalation from any injected binary.
+    # (Same profile as the agent service below; read_only rootfs is NOT applied
+    # because git/docker CLI operations write outside /tmp.)
+    # NOTE: older Docker engines silently ignore security_opt in `stack deploy`;
+    # verify with `docker inspect` on the running task.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     # The default soft limit of 1024 fds is reached quickly: this process holds
     # long-lived SSH connections to every host plus OpenSearch/Docker sockets,
     # and once exhausted every request fails with EMFILE.
@@ -107,13 +127,49 @@ services:
       - PULSARCD_GITHUB__REGISTRY_PASSWORD=${DOCKER_REGISTRY_PASSWORD}
 
       # Authentication
+      # This stack is published on the public internet through Traefik, so no
+      # credential may fall back to a default: every secret below uses the
+      # strict ":?" form and the deploy fails when it is unset.
       - PULSARCD_AUTH__USERNAME=${PULSARCD_AUTH__USERNAME:-admin}
-      - PULSARCD_AUTH__PASSWORD=${PULSARCD_AUTH__PASSWORD:-changeme}
-      - PULSARCD_AUTH__JWT_SECRET=${PULSARCD_AUTH__JWT_SECRET:-}
+      # REQUIRED: never deploy with a placeholder ("changeme") password.
+      # Generate one with: openssl rand -base64 32
+      - PULSARCD_AUTH__PASSWORD=${PULSARCD_AUTH__PASSWORD:?PULSARCD_AUTH__PASSWORD must be set to a strong value}
+      # REQUIRED by choice: the backend auto-generates a random JWT secret when
+      # this is empty, which is not weak but is regenerated on every restart
+      # (all sessions are invalidated) and differs per replica (tokens issued by
+      # one task are rejected by the others). Pinning it here keeps sessions
+      # valid across restarts and scale-out. Generate with: openssl rand -base64 32
+      - PULSARCD_AUTH__JWT_SECRET=${PULSARCD_AUTH__JWT_SECRET:?PULSARCD_AUTH__JWT_SECRET must be set to a strong random value}
       - PULSARCD_AUTH__JWT_EXPIRY_HOURS=${PULSARCD_AUTH__JWT_EXPIRY_HOURS:-24}
-      - PULSARCD_AUTH__AGENT_KEY=${PULSARCD_AUTH__AGENT_KEY:-}
+      # REQUIRED: must match AGENT_AUTH_KEY below, agents must not run unauthenticated.
+      - PULSARCD_AUTH__AGENT_KEY=${PULSARCD_AUTH__AGENT_KEY:?PULSARCD_AUTH__AGENT_KEY must be set to a non-empty value}
 
       - PULSARCD_MCP__API_KEY=${PULSARCD_MCP__API_KEY:-}
+
+      # Per-agent authentication keys, as a JSON object keyed by the agent id
+      # (the agent service sets AGENT_AGENT_ID={{.Node.Hostname}}, so the keys
+      # are indexed by node hostname). Optional: when it is empty the single
+      # shared PULSARCD_AUTH__AGENT_KEY above is accepted, which is the current
+      # behaviour. Enabling it requires giving each node its own key -- see the
+      # "Per-agent keys" note in README.md before setting it, a mismatch makes
+      # every agent stop reporting.
+      - PULSARCD_AUTH__AGENT_KEYS=${PULSARCD_AUTH__AGENT_KEYS:-}
+
+      # Trust X-Forwarded-For: this stack is published behind Traefik, so the
+      # per-address login rate limit only sees the proxy address without it.
+      # Traefik must be configured to overwrite the header
+      # (forwardedHeaders.trustedIPs), otherwise a client picks its own bucket.
+      - PULSARCD_TRUST_PROXY_HEADERS=${PULSARCD_TRUST_PROXY_HEADERS:-true}
+
+      # SSH host key verification is strict: an unknown host aborts the
+      # connection. ~/.ssh is mounted read-only, so the known_hosts file lives on
+      # the read/write data volume instead. Bootstrap it once per host with:
+      #   docker exec <task> sh -c 'ssh-keyscan -p 22 dockerhost >> /data/known_hosts'
+      # (run it FROM the container: the `dockerhost` alias does not resolve on
+      # the node.) Set PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS=true to trust the first
+      # key seen instead -- unsafe on an untrusted network.
+      - PULSARCD_SSH_KNOWN_HOSTS=${PULSARCD_SSH_KNOWN_HOSTS:-/data/known_hosts}
+      - PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS=${PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS:-false}
       # Swarm manager config - queries Swarm API to list all containers/services
       # Collection is disabled (agents_only=true), this is only for listing
       - PULSARCD_HOSTS=[{"name":"swarm-manager","mode":"docker","docker_url":"unix:///var/run/docker.sock","swarm_manager":true,"swarm_autodiscover":true}]
@@ -287,5 +343,20 @@ networks:
   proxy:
     external: true
   internal:
+    # Security: NOT attachable. OpenSearch runs with DISABLE_SECURITY_PLUGIN=true
+    # (no authentication at all), so anyone able to `docker network connect` a
+    # throwaway container to this overlay could read, alter or delete every log
+    # and metric index. Only stack services may join it.
+    #
+    # MIGRATION REQUIRED on a cluster that was deployed before this line existed.
+    # `docker stack deploy` never reconciles the options of an existing network
+    # and Docker cannot flip `attachable` on a live overlay, so the old network
+    # stays attachable and this setting has NO effect until it is recreated:
+    #   docker stack rm pulsarcd
+    #   # wait for the tasks to actually disappear, then:
+    #   docker network rm pulsarcd_internal
+    #   docker stack deploy -c devops/docker-compose.swarm.yml pulsarcd
+    # Verify with:
+    #   docker network inspect pulsarcd_internal -f '{{.Attachable}}'   # -> false
     driver: overlay
-    attachable: true
+    attachable: false

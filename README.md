@@ -251,9 +251,12 @@ source venv/bin/activate  # Linux/macOS
 pip install -r requirements.txt
 
 # Start OpenSearch (required)
-docker run -d -p 9200:9200 -e "discovery.type=single-node" \
+# The security plugin is disabled, so this node has NO authentication at all:
+# publish it on the loopback interface only, never on 0.0.0.0.
+# See the Security Hardening section below.
+docker run -d -p 127.0.0.1:9200:9200 -e "discovery.type=single-node" \
   -e "DISABLE_SECURITY_PLUGIN=true" \
-  opensearchproject/opensearch:2.11.1
+  opensearchproject/opensearch:3.4.0
 
 # Run the application
 python -m backend.main
@@ -465,6 +468,120 @@ Each host in `PULSARCD_HOSTS` supports these fields (for SSH mode):
 | `swarm_manager` | Is this a Swarm manager? | No |
 | `swarm_routing` | Route commands through manager | No |
 | `swarm_autodiscover` | Auto-discover Swarm nodes | No |
+
+## Security Hardening
+
+### Required secrets
+
+`devops/docker-compose.swarm.yml` refuses to deploy when any of these is unset
+or empty (strict `${VAR:?...}` form). Generate each one with
+`openssl rand -base64 32` and store them in `devops/.env`:
+
+| Variable | Why it is mandatory |
+|----------|---------------------|
+| `PULSARCD_AUTH__PASSWORD` | Web login password. The stack is published through Traefik, so a default such as `changeme` means an internet-facing admin account. Must be at least 12 characters and must not be a known placeholder — the backend rejects weak values and bootstraps the admin with a random password printed **once** in the container logs. |
+| `PULSARCD_AUTH__JWT_SECRET` | Signs session tokens - the strongest credential in the stack: forging a token bypasses the password, the login rate limit and the role policy at once. Minimum 32 characters; the backend **refuses to start** on a shorter or placeholder value. If left empty it generates a new secret at every restart: sessions are invalidated and replicas reject each other's tokens. |
+| `PULSARCD_AUTH__AGENT_KEY` | Shared key agents use to authenticate against the backend API. Must be identical on the backend and on every agent, otherwise agents would run unauthenticated. Same 32-character minimum. |
+
+The password policy (at least 12 characters, no known placeholder) applies to
+every write path, not only the bootstrap: `POST` and `PUT /api/admin/users` reject
+a weak value with HTTP 400. Changing the password after the first boot is done
+from the UI; the value in `.env` is only used to bootstrap `/data/users.json`, so
+editing it later has no effect unless that file is deleted.
+
+**Upgrading an existing deployment:** `devops/.env` predates
+`PULSARCD_AUTH__JWT_SECRET` and the compose file now uses the strict `${VAR:?}`
+form, so the next `docker stack deploy` fails until the variable is added. Set a
+real secret rather than restoring a default - everyone is signed out once, which
+is expected.
+
+### Optional security variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `PULSARCD_AUTH__AGENT_KEYS` | *(empty)* | JSON object `{"<agent id>": "<key>"}`. When set, a key is only accepted for the agent it was issued to, so one compromised agent cannot poll or answer for another. The Swarm agent service uses `AGENT_AGENT_ID={{.Node.Hostname}}`, so keys are indexed by node hostname - and it currently distributes a single shared `AGENT_AUTH_KEY` to every node, so enabling this **requires** giving each node its own key (a per-node Docker secret, or one agent service per node) or every agent stops reporting. |
+| `PULSARCD_TRUST_PROXY_HEADERS` | `false` (`true` in the Swarm stack) | Read the client address from `X-Forwarded-For` / `X-Real-IP` for the login rate limit. Only enable it behind a proxy that **overwrites** those headers (Traefik `forwardedHeaders.trustedIPs`); reachable directly, the header is client-controlled and lets an attacker choose their own bucket. Without it, every request behind a proxy shares a single bucket. |
+| `PULSARCD_SSH_KNOWN_HOSTS` | `~/.ssh/known_hosts` | known_hosts file used for hosts that do not set `ssh_known_hosts_path`. The container bind-mounts `~/.ssh` read-only, so the stack points this at `/data/known_hosts` on the read/write volume. |
+| `PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS` | `false` | Trust-on-first-use, for hosts that have **no** explicit `ssh_known_hosts_path` only (a host with one stays strictly verified whatever this says - give that host `ssh_known_hosts_path="accept-new"` instead). |
+
+### Login rate limiting and session revocation
+
+- Failed logins are counted per (account, client address) - 5 per minute - and per
+  client address - 30 per minute. The pairing matters: a counter keyed on the
+  account alone would let anyone lock an administrator out with five bad passwords
+  a minute, correct password included.
+- Changing a password, changing a role or deleting an account bumps that account's
+  `token_epoch` in `/data/users.json`, which immediately invalidates every JWT
+  already issued for it - on the HTTP API, on the terminal WebSocket **and** on
+  both MCP mounts.
+
+### SSH host key verification
+
+Verification is strict: a host with no matching `known_hosts` entry aborts the
+connection instead of trusting whatever key the network offers. Bootstrap each
+host once, **from inside the container** (the `dockerhost` alias is a host-gateway
+alias and can never appear in the node's own `known_hosts`), after checking the
+fingerprint out of band:
+
+```bash
+docker exec $(docker ps -qf name=pulsarcd_swarm-manager) \
+  sh -c 'ssh-keyscan -p 22 dockerhost >> /data/known_hosts'
+```
+
+### Viewer role
+
+`viewer` is read-only, enforced centrally in `auth_middleware` rather than in each
+handler, so a route added later is protected by default:
+
+- every mutating method (`POST`/`PUT`/`DELETE`/`PATCH`) under `/api/` is admin-only,
+  except an explicit allowlist of POSTs that only carry a JSON query body
+  (`/api/logs/search`, `/api/logs/ai-search`, `/api/logs/similar-count`,
+  `/api/logs/ai-analyze`);
+- everything under `/api/admin/` is admin-only;
+- a few GETs are admin-only because they disclose secrets or infrastructure:
+  `/api/config`, `/api/config/test`, the `.env` routes,
+  `/api/stacks/test-permissions/...` and `/api/github/check-access`.
+  `GET /api/hosts` returns only host names to a viewer, and the full
+  hostname/port/username triple to an admin;
+- the MCP actions server (`/ai/actions/mcp`) requires `role == "admin"`.
+
+Adding a POST to the read-only allowlist means asserting it triggers no side effect
+at all - no background job, no LLM agent run, no remote command.
+
+### Deployment recommendations
+
+- **Never expose OpenSearch.** It runs with `DISABLE_SECURITY_PLUGIN=true`, i.e.
+  no authentication at all. In development `docker-compose.yml` publishes it on
+  `127.0.0.1` only; in Swarm it stays on the `internal` overlay, which is
+  declared `attachable: false` so no ad-hoc container can join it and read,
+  alter or delete the log indices.
+  **On a cluster deployed before that flag existed it has no effect yet.**
+  `docker stack deploy` never reconciles the options of an existing network and
+  Docker cannot flip `attachable` on a live overlay, so the network has to be
+  recreated once:
+  ```bash
+  docker stack rm pulsarcd
+  # wait for the tasks to actually disappear, then:
+  docker network rm pulsarcd_internal
+  docker stack deploy -c devops/docker-compose.swarm.yml pulsarcd
+  # verify:
+  docker network inspect pulsarcd_internal -f '{{.Attachable}}'   # -> false
+  ```
+- **Treat the backend as a root-equivalent service.** It mounts
+  `/var/run/docker.sock` (the `:ro` flag protects the socket file, not the
+  Docker API behind it) and the host SSH keys, and runs as `root` because the
+  image has no docker group. Reduce that surface with `group_add: ["<docker
+  GID>"]` on the non-root `appuser`, or by putting a `docker-socket-proxy` with
+  an endpoint whitelist in front of the socket.
+- **Keep the hardening flags.** Backend and agent both run with
+  `cap_drop: [ALL]` and `security_opt: [no-new-privileges:true]`; the agent adds
+  a read-only rootfs. Do not relax these to work around a permission error
+  without checking what actually needs the capability.
+- **Scope the mounted SSH key.** `SSH_KEYS_PATH` is mounted read-only but grants
+  access to every host it can reach — use a dedicated deploy key with a
+  restricted `authorized_keys` command rather than a personal key.
+- **Terminate TLS at Traefik** and keep the HTTP router redirecting to HTTPS
+  (already configured in the stack file).
 
 ## Troubleshooting
 

@@ -1,6 +1,8 @@
 """GitHub integration service for PulsarCD."""
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import re
@@ -28,6 +30,107 @@ def _shell_quote_path(path: str) -> str:
     if path.startswith("~/"):
         return "~/" + shlex.quote(path[2:])
     return shlex.quote(path)
+
+
+# Repository names and clone URLs are interpolated into file-system paths and
+# git commands that are executed by a shell on the build/deploy host. Only a
+# minimal, well-known charset is accepted so no shell metacharacter, path
+# traversal or git option can ever reach that shell.
+# Anchored with \A and \Z, never ^/$: without re.MULTILINE, "$" also matches
+# just before a trailing newline, so a name ending in "\n" would have passed
+# the charset check this pattern exists to enforce.
+# A leading "." or "_" is allowed because GitHub allows it and nearly every
+# organisation owns a ".github" repository: refusing it made build/deploy/env
+# fail on a real repository, and has_build_config() swallowed the error into a
+# silent "no build config" skip in the UI. Path traversal stays impossible: a
+# segment may not contain "/" (outside the charset) and may not be exactly "."
+# or ".." (the leading lookahead), and _validate_repo_name additionally refuses
+# any ".." sequence.
+_SEGMENT_BODY = r"(?![.]{1,2}(?![A-Za-z0-9._-]))[A-Za-z0-9._][A-Za-z0-9._-]{0,99}"
+_REPO_NAME_RE = re.compile(r"\A" + _SEGMENT_BODY + r"\Z")
+
+_HOST_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?"
+_PATH_SEGMENT_PATTERN = _SEGMENT_BODY
+
+# git@host:owner/repo.git
+_SSH_URL_SCP_RE = re.compile(
+    r"\Agit@(?P<host>" + _HOST_PATTERN + r"):"
+    r"(?P<owner>" + _PATH_SEGMENT_PATTERN + r")/"
+    r"(?P<repo>" + _PATH_SEGMENT_PATTERN + r")[.]git\Z"
+)
+# ssh://git@host[:port]/owner/repo.git
+_SSH_URL_SSH_RE = re.compile(
+    r"\Assh://git@(?P<host>" + _HOST_PATTERN + r")(?::(?P<port>[0-9]{1,5}))?/"
+    r"(?P<owner>" + _PATH_SEGMENT_PATTERN + r")/"
+    r"(?P<repo>" + _PATH_SEGMENT_PATTERN + r")[.]git\Z"
+)
+# https://host/owner/repo[.git]
+_SSH_URL_HTTPS_RE = re.compile(
+    r"\Ahttps://(?P<host>" + _HOST_PATTERN + r")/"
+    r"(?P<owner>" + _PATH_SEGMENT_PATTERN + r")/"
+    r"(?P<repo>" + _PATH_SEGMENT_PATTERN + r")(?:[.]git)?\Z"
+)
+
+
+def _validate_repo_name(name: str) -> str:
+    """Validate a repository name before it is used to build a shell path.
+
+    Args:
+        name: Repository name coming from an HTTP parameter.
+
+    Returns:
+        The validated name, unchanged.
+
+    Raises:
+        ValueError: If the name is empty, longer than 100 characters, starts
+            with ``-`` (which a command could read as an option), contains
+            ``..`` or any character outside ``[A-Za-z0-9._-]``.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("Invalid repository name: value is empty")
+    if name.startswith("-"):
+        raise ValueError(f"Invalid repository name {name!r}: must not start with '-'")
+    if ".." in name:
+        raise ValueError(f"Invalid repository name {name!r}: must not contain '..'")
+    if not _REPO_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid repository name {name!r}: only letters, digits, '.', '_' and '-' "
+            "are allowed (1-100 characters, starting with a letter or a digit)"
+        )
+    return name
+
+
+def _validate_ssh_url(url: str) -> str:
+    """Validate a git clone URL against an allowlist of known-safe shapes.
+
+    Accepted forms are ``git@host:owner/repo.git``,
+    ``ssh://git@host[:port]/owner/repo.git`` and
+    ``https://host/owner/repo[.git]``. Anything else -- exotic transports
+    (``ext::``, ``file://``), option-looking values (``--upload-pack=...``) or
+    shell metacharacters -- is rejected.
+
+    Args:
+        url: Clone URL coming from an HTTP parameter.
+
+    Returns:
+        The validated URL, unchanged.
+
+    Raises:
+        ValueError: If the URL does not match one of the accepted forms.
+    """
+    if not isinstance(url, str) or not url:
+        raise ValueError("Invalid clone URL: value is empty")
+    if len(url) > 512:
+        raise ValueError("Invalid clone URL: value is too long")
+    if ".." in url:
+        raise ValueError(f"Invalid clone URL {url!r}: must not contain '..'")
+    for pattern in (_SSH_URL_SCP_RE, _SSH_URL_SSH_RE, _SSH_URL_HTTPS_RE):
+        if pattern.match(url):
+            return url
+    raise ValueError(
+        f"Invalid clone URL {url!r}: expected git@host:owner/repo.git, "
+        "ssh://git@host[:port]/owner/repo.git or https://host/owner/repo.git"
+    )
 
 
 # Cache TTLs
@@ -245,10 +348,15 @@ class GitHubService:
         repos = []
         page = 1
 
-        # Log token prefix for debugging (first 10 chars only for security)
-        token_prefix = self.config.token[:10] if self.config.token else "none"
+        # Identify which token is in use without writing any part of it: these
+        # lines land in the log store that every viewer account can search, and
+        # a prefix leaks real secret characters (a `ghp_` PAT gives up ~6).
+        # A truncated SHA-256 tells two configured tokens apart, which is all
+        # the debugging needed, and is not reversible.
+        token_fp = (hashlib.sha256(self.config.token.encode()).hexdigest()[:8]
+                    if self.config.token else "none")
         mode_label = "starred" if starred_only else "all"
-        logger.info("Fetching repos", mode=mode_label, token_prefix=f"{token_prefix}...", url=url)
+        logger.info("Fetching repos", mode=mode_label, token_fp=token_fp, url=url)
 
         try:
             while True:
@@ -953,28 +1061,44 @@ class StackDeployer:
         Returns:
             Tuple of (success, message)
         """
+        # Reject anything that could break out of the shell commands below
+        try:
+            repo_name = _validate_repo_name(repo_name)
+            ssh_url = _validate_ssh_url(ssh_url)
+        except ValueError as e:
+            logger.warning("Rejected unsafe repository parameters", error=str(e))
+            return False, str(e)
+
         # Ensure git is configured before any git operations
         await self._ensure_git_configured()
-        
+
         repos_path = self.config.repos_path
         repo_path = f"{repos_path}/{repo_name}"
         backup_path = f"{repo_path}.backup.{int(__import__('time').time())}"
 
+        # Every path is quoted before being handed to the remote shell
+        q_repos_path = _shell_quote_path(repos_path)
+        q_repo_path = _shell_quote_path(repo_path)
+        q_git_dir = _shell_quote_path(f"{repo_path}/.git")
+        q_backup_path = _shell_quote_path(backup_path)
+        q_ssh_url = shlex.quote(ssh_url)
+
         # Check if directory exists
-        check_dir_cmd = f"test -d {repo_path} && echo 'dir_exists' || echo 'dir_missing'"
+        check_dir_cmd = f"test -d {q_repo_path} && echo 'dir_exists' || echo 'dir_missing'"
         success, dir_output = await self._run_command(check_dir_cmd)
 
         if not success:
             return False, f"Failed to check directory existence: {dir_output}"
 
         # Check if it's a valid git repo
-        check_git_cmd = f"test -d {repo_path}/.git && echo 'is_git' || echo 'not_git'"
+        check_git_cmd = f"test -d {q_git_dir} && echo 'is_git' || echo 'not_git'"
         success, git_output = await self._run_command(check_git_cmd)
 
         if "dir_missing" in dir_output:
             # Directory doesn't exist - simple clone
             logger.info("Cloning repository", repo=repo_name, path=repo_path)
-            clone_cmd = f"mkdir -p {repos_path} && cd {repos_path} && git clone {ssh_url}"
+            # "--" stops git from parsing the URL as an option
+            clone_cmd = f"mkdir -p {q_repos_path} && cd {q_repos_path} && git clone -- {q_ssh_url}"
             success, output = await self._run_command(clone_cmd)
 
             if not success:
@@ -984,49 +1108,54 @@ class StackDeployer:
 
         elif "not_git" in git_output:
             # Directory exists but is not a git repo - backup, clone, restore configs
-            logger.info("Directory exists but not a git repo, backing up and cloning", 
+            logger.info("Directory exists but not a git repo, backing up and cloning",
                        repo=repo_name, backup=backup_path)
-            
+
             # 1. Rename existing directory to backup
-            rename_cmd = f"mv {repo_path} {backup_path}"
+            rename_cmd = f"mv {q_repo_path} {q_backup_path}"
             success, output = await self._run_command(rename_cmd)
             if not success:
                 return False, f"Failed to backup existing directory: {output}"
-            
+
             # 2. Clone the repo
-            clone_cmd = f"cd {repos_path} && git clone {ssh_url}"
+            clone_cmd = f"cd {q_repos_path} && git clone -- {q_ssh_url}"
             success, output = await self._run_command(clone_cmd)
             if not success:
                 # Restore backup if clone failed
-                await self._run_command(f"mv {backup_path} {repo_path}")
+                await self._run_command(f"mv {q_backup_path} {q_repo_path}")
                 return False, f"Failed to clone repository: {output}"
-            
+
             # 3. Copy config files from backup (devops/.env, .env, etc.)
+            q_backup_devops_env = _shell_quote_path(f"{backup_path}/devops/.env")
+            q_backup_env = _shell_quote_path(f"{backup_path}/.env")
+            q_repo_devops = _shell_quote_path(f"{repo_path}/devops")
+            q_repo_devops_env = _shell_quote_path(f"{repo_path}/devops/.env")
+            q_repo_env = _shell_quote_path(f"{repo_path}/.env")
             restore_cmd = f"""
-                if [ -f {backup_path}/devops/.env ]; then
-                    mkdir -p {repo_path}/devops && cp {backup_path}/devops/.env {repo_path}/devops/.env
+                if [ -f {q_backup_devops_env} ]; then
+                    mkdir -p {q_repo_devops} && cp {q_backup_devops_env} {q_repo_devops_env}
                 fi
-                if [ -f {backup_path}/.env ]; then
-                    cp {backup_path}/.env {repo_path}/.env
+                if [ -f {q_backup_env} ]; then
+                    cp {q_backup_env} {q_repo_env}
                 fi
             """
             await self._run_command(restore_cmd)
-            
+
             # 4. Remove backup
-            await self._run_command(f"rm -rf {backup_path}")
-            
+            await self._run_command(f"rm -rf {q_backup_path}")
+
             return True, "Repository cloned (config files restored from backup)"
 
         else:
             # Valid git repository - add to safe.directory and force update
             logger.info("Updating repository", repo=repo_name)
-            
+
             # Add repo to git safe.directory to avoid ownership issues
-            safe_dir_cmd = f"git config --global --add safe.directory {repo_path}"
+            safe_dir_cmd = f"git config --global --add safe.directory {q_repo_path}"
             await self._run_command(safe_dir_cmd)
-            
+
             # Fetch latest and reset to origin (preserves untracked files like .env)
-            update_cmd = f"cd {repo_path} && git fetch origin && git reset --hard origin/$(git rev-parse --abbrev-ref HEAD)"
+            update_cmd = f"cd {q_repo_path} && git fetch origin && git reset --hard origin/$(git rev-parse --abbrev-ref HEAD)"
             success, output = await self._run_command(update_cmd)
 
             if not success:
@@ -1035,7 +1164,7 @@ class StackDeployer:
                 return True, f"Repository exists (update failed: {output})"
 
             # Get current commit hash
-            commit_success, commit_hash = await self._run_command(f"cd {repo_path} && git rev-parse --short HEAD")
+            commit_success, commit_hash = await self._run_command(f"cd {q_repo_path} && git rev-parse --short HEAD")
             commit_id = commit_hash.strip() if commit_success else "unknown"
             return True, f"Repository updated successfully (commit {commit_id})"
 
@@ -1157,10 +1286,16 @@ class StackDeployer:
 
     async def has_build_config(self, repo_name: str) -> bool:
         """Check if the repo's docker-compose.swarm.yml contains build: directives."""
+        try:
+            repo_name = _validate_repo_name(repo_name)
+        except ValueError as e:
+            logger.warning("Rejected unsafe repository name", error=str(e))
+            return False
+
         repos_path = self.config.repos_path
         compose_path = f"{repos_path}/{repo_name}/devops/docker-compose.swarm.yml"
         success, output = await self._run_command(
-            f"grep -qE '^\\s+build:' {compose_path} 2>/dev/null && echo YES || echo NO"
+            f"grep -qE '^\\s+build:' {_shell_quote_path(compose_path)} 2>/dev/null && echo YES || echo NO"
         )
         return success and "YES" in output
 
@@ -1200,6 +1335,10 @@ class StackDeployer:
         }
 
         try:
+            # Reject unsafe parameters before anything reaches a shell
+            _validate_repo_name(repo_name)
+            _validate_ssh_url(ssh_url)
+
             # Ensure docker is logged in to registry
             await self._ensure_docker_login()
             
@@ -1306,6 +1445,10 @@ class StackDeployer:
         }
 
         try:
+            # Reject unsafe parameters before anything reaches a shell
+            _validate_repo_name(repo_name)
+            _validate_ssh_url(ssh_url)
+
             # Ensure repo is cloned
             clone_success, clone_msg = await self._ensure_repo_cloned(repo_name, ssh_url)
             if not clone_success:
@@ -1382,6 +1525,10 @@ class StackDeployer:
         }
 
         try:
+            # Reject unsafe parameters before anything reaches a shell
+            _validate_repo_name(repo_name)
+            _validate_ssh_url(ssh_url)
+
             # Ensure repo is cloned
             clone_success, clone_msg = await self._ensure_repo_cloned(repo_name, ssh_url)
             if not clone_success:
@@ -1436,11 +1583,18 @@ class StackDeployer:
         Returns:
             Tuple of (success, content_or_error)
         """
+        try:
+            repo_name = _validate_repo_name(repo_name)
+        except ValueError as e:
+            logger.warning("Rejected unsafe repository name", error=str(e))
+            return False, str(e)
+
         repos_path = self.config.repos_path
         env_path = f"{repos_path}/{repo_name}/devops/.env"
+        q_env_path = _shell_quote_path(env_path)
 
         # Check if file exists
-        check_cmd = f"test -f {env_path} && echo 'exists' || echo 'missing'"
+        check_cmd = f"test -f {q_env_path} && echo 'exists' || echo 'missing'"
         success, output = await self._run_command(check_cmd)
 
         if not success:
@@ -1450,7 +1604,7 @@ class StackDeployer:
             return True, ""  # Return empty content if file doesn't exist
 
         # Read the file content
-        read_cmd = f"cat {env_path}"
+        read_cmd = f"cat -- {q_env_path}"
         success, output = await self._run_command(read_cmd)
 
         if not success:
@@ -1468,18 +1622,28 @@ class StackDeployer:
         Returns:
             Tuple of (success, message)
         """
+        try:
+            repo_name = _validate_repo_name(repo_name)
+        except ValueError as e:
+            logger.warning("Rejected unsafe repository name", error=str(e))
+            return False, str(e)
+
         repos_path = self.config.repos_path
         env_path = f"{repos_path}/{repo_name}/devops/.env"
         devops_dir = f"{repos_path}/{repo_name}/devops"
 
         # Ensure devops directory exists
-        mkdir_cmd = f"mkdir -p {devops_dir}"
+        mkdir_cmd = f"mkdir -p {_shell_quote_path(devops_dir)}"
         await self._run_command(mkdir_cmd)
 
-        # Write the content using a heredoc to handle special characters
-        # Escape single quotes in content
-        escaped_content = content.replace("'", "'\\''")
-        write_cmd = f"cat > {env_path} << 'ENVEOF'\n{content}\nENVEOF"
+        # The content is user-supplied: never let the shell see it. It is
+        # base64-encoded here and decoded on the host, so no quoting, heredoc
+        # marker or metacharacter in the content can alter the command.
+        # ``base64 -d`` is part of coreutils on any standard Debian/Ubuntu image.
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        write_cmd = (
+            f"printf %s {shlex.quote(encoded)} | base64 -d > {_shell_quote_path(env_path)}"
+        )
 
         success, output = await self._run_command(write_cmd)
 
@@ -1518,7 +1682,8 @@ class StackDeployer:
         stack_name = self._repo_to_stack_name(repo_name)
 
         # Get ALL service images in the stack
-        cmd = f"docker service ls --filter 'name={stack_name}_' --format '{{{{.Image}}}}'"
+        service_filter = f"name={stack_name}_"
+        cmd = f"docker service ls --filter {shlex.quote(service_filter)} --format '{{{{.Image}}}}'"
         success, output = await self._run_command(cmd)
 
         if not success:

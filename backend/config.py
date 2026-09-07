@@ -11,12 +11,32 @@ Environment variables:
 - PULSARCD_COLLECTOR__METRICS_INTERVAL_SECONDS: Metrics collection interval
 - PULSARCD_AI__MODEL: AI model name
 - PULSARCD_DATA_DIR: Data directory for config and users files (default: /data)
+- PULSARCD_AUTH__AGENT_KEY: Shared fallback key for agent-to-backend calls.
+  Used for every agent when PULSARCD_AUTH__AGENT_KEYS is not set, which means a
+  single compromised agent container exposes the whole fleet.
+- PULSARCD_AUTH__AGENT_KEYS: JSON object mapping an agent id to its own key,
+  e.g. {"host-a": "<secret-a>", "host-b": "<secret-b>"}. When set, an agent must
+  present the key registered for the agent_id it acts on and the shared
+  PULSARCD_AUTH__AGENT_KEY is no longer accepted on its own. A malformed value
+  is reported as a warning and ignored.
+- PULSARCD_AUTH__JWT_SECRET: JWT signing secret. Auto-generated when unset (all
+  sessions are invalidated on restart); when set it must be at least
+  MIN_SECRET_LENGTH characters or startup fails.
+- PULSARCD_SSH_KNOWN_HOSTS: known_hosts file used when a host does not set
+  ssh_known_hosts_path (default ~/.ssh/known_hosts). Point it at a writable
+  location: the container bind-mounts ~/.ssh read-only.
+- PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS: "true" enables trust-on-first-use for hosts
+  that have no explicit ssh_known_hosts_path. Off by default: an unknown host
+  aborts the connection instead of trusting the key it is offered.
+- PULSARCD_TRUST_PROXY_HEADERS: "true" makes the login rate limiter read
+  X-Forwarded-For / X-Real-IP. Only set it behind a proxy that overwrites those
+  headers; otherwise a client picks its own rate-limit bucket.
 """
 
 import json
 import os
 import uuid
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
@@ -35,7 +55,16 @@ class HostConfig(BaseModel):
     username: str = "root"
     ssh_key_path: Optional[str] = None
     # Path to known_hosts file for SSH host key verification.
-    # If empty, uses ~/.ssh/known_hosts. Set to "none" to disable (NOT recommended).
+    # Verification is STRICT: a host with no matching entry aborts the
+    # connection instead of trusting the key the network presents.
+    #   empty        -> PULSARCD_SSH_KNOWN_HOSTS, else ~/.ssh/known_hosts. Only
+    #                   these hosts follow the global
+    #                   PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS opt-in.
+    #   <path>       -> that file, always strict (the global opt-in does not
+    #                   apply, so onboarding one host cannot downgrade this one).
+    #   "accept-new" -> trust-on-first-use for this host only, saving the key to
+    #                   the default file.
+    #   "none"       -> no verification at all (NOT recommended).
     ssh_known_hosts_path: Optional[str] = None
     
     # Connection mode (choose one):
@@ -116,11 +145,20 @@ class GitHubConfig(BaseModel):
 class AuthConfig(BaseModel):
     """Authentication configuration."""
     username: str = "admin"
-    password: str = "changeme"
+    # Empty on purpose: a "changeme" default is a weak credential waiting for a
+    # future caller to wire it into a login check.  The bootstrap password comes
+    # from PULSARCD_AUTH__PASSWORD and is validated by user_manager.
+    password: str = ""
     jwt_secret: str = ""
     jwt_expiry_hours: int = 24
-    # Shared key for agent-to-backend API authentication
+    # Shared key for agent-to-backend API authentication.
+    # Only used as a fallback when agent_keys is empty: every agent then holds
+    # the same secret, so compromising one agent compromises the whole fleet.
     agent_key: str = ""
+    # Per-agent keys: {"agent_id": "key"}, loaded from PULSARCD_AUTH__AGENT_KEYS.
+    # When non-empty, an agent must present the key registered for the agent_id
+    # it acts on and the shared agent_key alone is no longer sufficient.
+    agent_keys: Dict[str, str] = {}
 
 
 class MCPConfig(BaseModel):
@@ -181,6 +219,46 @@ class Settings(BaseSettings):
         env_nested_delimiter = "__"
 
 
+# Minimum length for a secret an operator sets explicitly.  32 characters is what
+# `openssl rand -base64 32` produces; anything shorter is brute-forceable offline
+# from a single captured JWT.
+MIN_SECRET_LENGTH = 32
+
+# Values shipped in the sample compose/.env files, refused whatever their length.
+_PLACEHOLDER_SECRETS = frozenset({
+    "changeme", "change-me", "changemenow", "password", "secret", "pulsarcd",
+    "admin", "test", "dev", "development", "your-secret-here", "replace-me",
+})
+
+
+def _validate_configured_secrets(settings: "Settings") -> None:
+    """Refuse to start on a weak, explicitly configured auth secret.
+
+    Only non-empty values are checked: an unset secret is auto-generated a few
+    lines below, which is a different (documented) trade-off.  The compose guard
+    ``${VAR:?}`` only rejects an empty value, so without this a literal
+    ``PULSARCD_AUTH__JWT_SECRET=x`` satisfied the deployment contract while
+    leaving the strongest credential of the stack guessable.
+    """
+    for name, value in (
+        ("PULSARCD_AUTH__JWT_SECRET", settings.auth.jwt_secret),
+        ("PULSARCD_AUTH__AGENT_KEY", settings.auth.agent_key),
+    ):
+        if not value:
+            continue
+        if value.strip().lower() in _PLACEHOLDER_SECRETS:
+            raise RuntimeError(
+                f"{name} is a well-known placeholder value. Generate a real "
+                f"secret with `openssl rand -base64 32`."
+            )
+        if len(value) < MIN_SECRET_LENGTH:
+            raise RuntimeError(
+                f"{name} is too weak: it must be at least {MIN_SECRET_LENGTH} "
+                f"characters (got {len(value)}). Generate one with "
+                f"`openssl rand -base64 32`."
+            )
+
+
 def load_config() -> Settings:
     """Load configuration from environment variables.
 
@@ -202,10 +280,22 @@ def load_config() -> Settings:
     - PULSARCD_AI__MODEL: string
     - PULSARCD_GITHUB__*: GitHub configuration
 
+    Optional (parsed explicitly, see the module docstring):
+    - PULSARCD_AUTH__AGENT_KEY: shared fallback agent key
+    - PULSARCD_AUTH__AGENT_KEYS: JSON object {"agent_id": "key"}
+
     Example PULSARCD_HOSTS:
     [{"name": "local", "mode": "docker", "docker_url": "unix:///var/run/docker.sock"}]
     """
+    # PULSARCD_AUTH__AGENT_KEYS carries a JSON object. Hide it from
+    # pydantic-settings and parse it below so a malformed value degrades to a
+    # warning instead of aborting startup with a SettingsError.
+    agent_keys_env = os.environ.pop("PULSARCD_AUTH__AGENT_KEYS", None)
+
     settings = Settings()
+
+    if agent_keys_env is not None:
+        os.environ["PULSARCD_AUTH__AGENT_KEYS"] = agent_keys_env
 
     # Load hosts from environment variable (JSON array)
     # This needs special handling because it's a complex nested structure
@@ -264,12 +354,40 @@ def load_config() -> Settings:
     load_env(settings.auth, "jwt_secret", "PULSARCD_AUTH__JWT_SECRET")
     load_env(settings.auth, "jwt_expiry_hours", "PULSARCD_AUTH__JWT_EXPIRY_HOURS", int)
     load_env(settings.auth, "agent_key", "PULSARCD_AUTH__AGENT_KEY")
+    # Per-agent keys (JSON object) - same defensive parsing as PULSARCD_HOSTS
+    if agent_keys_env:
+        try:
+            parsed_keys = json.loads(agent_keys_env)
+            if isinstance(parsed_keys, dict):
+                settings.auth.agent_keys = {
+                    str(k): str(v) for k, v in parsed_keys.items() if k and v
+                }
+            else:
+                print("Warning: PULSARCD_AUTH__AGENT_KEYS must be a JSON object")
+        except json.JSONDecodeError as e:
+            print(f"Warning: Failed to parse PULSARCD_AUTH__AGENT_KEYS: {e}")
+        except Exception as e:
+            print(f"Warning: Invalid agent keys configuration: {e}")
+    # A configured secret must actually be a secret.  Checked BEFORE the
+    # auto-generation below, so the "not set at all" case keeps its existing
+    # behaviour.  The JWT secret is the strongest credential of the stack:
+    # forging a token bypasses the password, the login rate limit and the role
+    # policy in one step, so a short value is offline-crackable from a single
+    # captured token.
+    _validate_configured_secrets(settings)
+
     # Auto-generate JWT secret if not provided
     if not settings.auth.jwt_secret:
         settings.auth.jwt_secret = uuid.uuid4().hex
+        print("Warning: PULSARCD_AUTH__JWT_SECRET is not set; a random secret was "
+              "generated. Every restart invalidates all sessions and a multi-replica "
+              "deployment cannot validate its own tokens.")
     # Auto-generate agent key if not provided
     if not settings.auth.agent_key:
         settings.auth.agent_key = uuid.uuid4().hex
+        print("Warning: PULSARCD_AUTH__AGENT_KEY is not set; a random key was "
+              "generated. Agents configured with a fixed key will fail to "
+              "authenticate after a restart.")
 
     # MCP settings
     load_env(settings.mcp, "api_key", "PULSARCD_MCP__API_KEY")

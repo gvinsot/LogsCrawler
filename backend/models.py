@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Literal, Optional, Any
 from pydantic import BaseModel, Field
 
 
@@ -98,9 +98,12 @@ class LogSearchQuery(BaseModel):
     http_status_max: Optional[int] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
-    size: int = Field(default=100, le=10000)
-    from_: int = Field(default=0, alias="from")
-    sort_order: str = "desc"
+    # Mirrors opensearch_client.MAX_SEARCH_SIZE / MAX_SEARCH_FROM: the client
+    # clamps silently, so validate here to fail loudly (422) instead of
+    # returning 500 rows to a caller that asked for 2000.
+    size: int = Field(default=100, ge=0, le=500)
+    from_: int = Field(default=0, ge=0, le=10000, alias="from")
+    sort_order: Literal["asc", "desc"] = "desc"
     
     class Config:
         populate_by_name = True

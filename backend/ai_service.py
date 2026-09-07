@@ -18,7 +18,7 @@ def build_system_prompt(metadata: Optional[Dict[str, Any]] = None) -> str:
     base_prompt = """You are an AI assistant that converts natural language questions about logs into OpenSearch query parameters.
 
 You must respond with a valid JSON object containing these fields:
-- query: string or null (full-text search query, use OpenSearch query syntax)
+- query: string or null (free-text search on the message field only)
 - levels: array of strings (log levels to filter)
 - http_status_min: number or null (minimum HTTP status code)
 - http_status_max: number or null (maximum HTTP status code)
@@ -33,7 +33,7 @@ These parameters are converted into an OpenSearch query with the following struc
   "query": {
     "bool": {
       "must": [
-        {"query_string": {"query": "search terms", "default_field": "message"}}
+        {"simple_query_string": {"query": "search terms", "fields": ["message"], "default_operator": "or"}}
       ],
       "filter": [
         {"terms": {"host": ["host1", "host2"]}},
@@ -57,7 +57,7 @@ Available log fields in OpenSearch:
 - container_id: string (keyword field)
 - compose_project: string (keyword field - Docker Compose project name)
 - compose_service: string (keyword field - Docker Compose service name)
-- message: string (text field, full-text searchable with wildcards)
+- message: string (text field, full-text searchable; trailing wildcard "term*" only)
 - level: string (keyword - exact match)
 - http_status: integer (HTTP status code, e.g., 200, 404, 500)
 - stream: string (stdout or stderr)
@@ -68,7 +68,16 @@ IMPORTANT RULES:
 3. The "query" field searches in the message text - use it for keywords like "timeout", "connection", "error message content"
 4. The "levels" field filters by log level - use it for ERROR, WARN, INFO, DEBUG
 5. If searching for a service/container by name, put it in "containers" array, NOT in "query"
-6. Use "compose_projects" to filter by Docker Compose stack/project name"""
+6. Use "compose_projects" to filter by Docker Compose stack/project name
+7. The "query" field is executed as a simple_query_string restricted to the
+   message field. Only these forms work: plain keywords, "quoted phrases",
+   AND / OR / NOT, parentheses, and a trailing wildcard (term*).
+8. NEVER put field:value syntax in "query" (it is searched as literal words in
+   the message text and matches nothing). Filter by field with the hosts,
+   containers, compose_projects and levels arrays instead.
+9. NEVER use a leading wildcard (*term), a regular expression (/re/) or fuzzy
+   matching (term~2) in "query": they are disabled and silently return no
+   result."""
 
     # Add dynamic context if metadata is provided
     if metadata:

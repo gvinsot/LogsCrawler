@@ -31,9 +31,108 @@ class MCPServerConfig(BaseModel):
     api_key: str = ""
 
 
+# ---------------------------------------------------------------------------
+# MCP tool safety policy
+# ---------------------------------------------------------------------------
+
+# Tools that are always considered dangerous: they execute commands or mutate
+# infrastructure.  They are refused unless ``allow_dangerous_tools`` is set,
+# even when listed explicitly in ``allowed_tools``.
+#
+# This list must cover EVERY tool registered on the privileged MCP server
+# (``mcp_actions`` in backend/mcp_server.py, mounted at /ai/actions): each of
+# them reaches the Swarm manager over SSH, so a tool missing here is a path to
+# arbitrary code execution that prompt injection can steer the agent onto.
+# tests/test_security.py pins the two lists together -- add the new tool here
+# whenever one is registered on mcp_actions.
+DANGEROUS_TOOL_NAMES: List[str] = [
+    "run_command",
+    "build_stack",
+    "deploy_stack",
+    # test_stack clones an attacker-suppliable repository on the Swarm manager
+    # and runs `bash test.sh`, i.e. the repository's own docker compose "test"
+    # target: it is a shell, and no keyword below matches its name.
+    "test_stack",
+]
+
+# Any tool whose name contains one of these fragments is treated as dangerous.
+# Unlike DANGEROUS_TOOL_NAMES, a keyword match can be overridden by naming the
+# tool explicitly in ``allowed_tools`` (escape hatch for read-only tools whose
+# name happens to contain one of these words).
+DANGEROUS_TOOL_KEYWORDS: List[str] = [
+    "exec",
+    "deploy",
+    "build",
+    "remove",
+    "delete",
+    "restart",
+]
+
+
+def is_critical_tool(tool_name: str) -> bool:
+    """Return True for tools that can never be reached without an explicit opt-in."""
+    name = (tool_name or "").strip().lower()
+    if not name:
+        return False
+    return any(dangerous in name for dangerous in DANGEROUS_TOOL_NAMES)
+
+
+def is_dangerous_tool(tool_name: str) -> bool:
+    """Return True when a tool name looks like a command/mutation tool."""
+    name = (tool_name or "").strip().lower()
+    if not name:
+        return False
+    if is_critical_tool(name):
+        return True
+    return any(keyword in name for keyword in DANGEROUS_TOOL_KEYWORDS)
+
+
+def tool_denial_reason(
+    tool_name: str,
+    allowed_tools: Optional[List[str]] = None,
+    allow_dangerous_tools: bool = False,
+) -> Optional[str]:
+    """Evaluate the tool policy for a tool name.
+
+    Args:
+        tool_name: Name advertised by the MCP server (or requested by the LLM).
+        allowed_tools: Explicit allowlist.  Empty means "every non-dangerous tool".
+        allow_dangerous_tools: Master switch for command/mutation tools.
+
+    Returns:
+        None when the tool may be used, otherwise a human-readable denial reason.
+    """
+    name = (tool_name or "").strip()
+    if not name:
+        return "empty tool name"
+
+    allowlist = {t.strip() for t in (allowed_tools or []) if t and t.strip()}
+    explicitly_allowed = name in allowlist
+
+    if allowlist and not explicitly_allowed:
+        return "tool is not listed in error_handling.allowed_tools"
+
+    if is_critical_tool(name) and not allow_dangerous_tools:
+        return ("tool executes commands or mutates infrastructure and "
+                "error_handling.allow_dangerous_tools is disabled")
+
+    if is_dangerous_tool(name) and not allow_dangerous_tools and not explicitly_allowed:
+        return ("tool name matches a dangerous-operation keyword "
+                "(exec/deploy/build/remove/delete/restart) and "
+                "error_handling.allow_dangerous_tools is disabled")
+
+    return None
+
+
 class ErrorHandlingConfig(BaseModel):
     """LLM error handling instructions."""
     enabled: bool = True
+    # MCP tool policy for the LLM agent.  Empty allowed_tools means "every
+    # discovered tool that is not dangerous"; dangerous tools additionally
+    # require allow_dangerous_tools.  Both fields are optional so existing
+    # config.yml files keep loading with safe defaults.
+    allowed_tools: List[str] = []
+    allow_dangerous_tools: bool = False
     instructions: str = (
         "You are a DevOps agent for PulsarCD. You MUST use the available MCP "
         "tools to investigate errors.\n"

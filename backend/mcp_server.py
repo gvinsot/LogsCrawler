@@ -361,15 +361,20 @@ async def list_containers(
 # ---------------------------------------------------------------------------
 @mcp_read.tool(description="List all monitored hosts/computers including discovered Swarm nodes")
 async def list_computers() -> str:
-    """List all hosts (configured + discovered swarm nodes)."""
+    """List all hosts (configured + discovered swarm nodes).
+
+    hostname and mode are deliberately NOT returned. This server is mounted with
+    require_admin=False, so any viewer JWT reaches it, while the same
+    information is admin-only on GET /api/config -- returning it here would
+    reopen that disclosure through a side door. Every read tool targets a host by
+    `name`, which is what this returns.
+    """
     from .api import settings, collector
 
     configured_names = {h.name for h in settings.hosts}
     result = [
         {
             "name": h.name,
-            "hostname": h.hostname,
-            "mode": h.mode,
             "swarm_manager": h.swarm_manager,
             "is_swarm_node": False,
         }
@@ -380,8 +385,6 @@ async def list_computers() -> str:
             result.append(
                 {
                     "name": name,
-                    "hostname": client.config.hostname,
-                    "mode": client.config.mode,
                     "swarm_manager": False,
                     "is_swarm_node": True,
                 }
@@ -419,8 +422,13 @@ Search logs stored in OpenSearch.
 ## Standard mode (use named parameters)
 
 Parameters:
-- query            Free-text search on the message field (Lucene syntax supported,
-                   e.g. "connection refused", "timeout AND retry", "error*")
+- query            Free-text search on the message field only. Supported:
+                   plain keywords, "quoted phrases", AND / OR / NOT, parentheses
+                   and a trailing wildcard (e.g. "timeout AND retry", "error*").
+                   NOT supported (silently matches nothing): field:value syntax,
+                   leading wildcards (*term), regular expressions (/re/) and
+                   fuzzy matching (term~2). Filter by field with hosts,
+                   containers, compose_services, levels instead.
 - github_project   GitHub repo name (case-insensitive) — matched against the
                    compose_project field. E.g. "MyApp" → searches compose_project="myapp"
 - compose_services Comma-separated compose service names to filter on
@@ -449,7 +457,14 @@ Response fields:
 
 Set opensearch_query to a JSON string containing a full OpenSearch request body.
 All standard parameters above are IGNORED when this is set.
-Size is capped at 500. The raw OpenSearch response is returned as-is.
+The raw OpenSearch response is returned as-is, with these limits enforced:
+- "size" is capped at 500 and "from" at 10000 (deep pagination is refused);
+- the request times out after 30s;
+- any body containing script, script_fields, script_score, scripted_metric or
+  runtime_mappings -- at any depth -- is refused with
+  {"error": "Query construct not allowed: script"}. This also rules out the
+  bucket_script / bucket_selector pipeline aggregations: compute ratios from
+  the returned bucket counts instead of asking OpenSearch to evaluate them.
 
 Example — error counts per service over the last 24 hours:
   opensearch_query = '{
@@ -550,7 +565,9 @@ async def search_logs(
         end_time=parsed_end,
         sort_order=sort_order if sort_order in ("asc", "desc") else "desc",
         size=min(max(size, 0), 200),
-        **{"from": max(from_offset, 0)},
+        # Clamped, not validated: the caller is an LLM and an out-of-range
+        # offset must degrade to the last reachable page, not raise.
+        **{"from": min(max(from_offset, 0), 10000)},
     )
 
     result = await opensearch.search_logs(search_query)
@@ -679,7 +696,14 @@ async def run_command(
     timeout = max(1, min(timeout, 120))
 
     # ── Execute ──────────────────────────────────────────────────────────
-    logger.info("MCP run_command", command=command[:200], host=target_host, timeout=timeout)
+    # The command text is logged ONCE and every later line refers to it by
+    # correlation id: an admin command routinely carries a secret in an argument
+    # (`docker login -p ...`, `curl -H "Authorization: ..."`), and this stdout is
+    # indexed in the log store that every viewer account can search. Repeating
+    # the payload would widen that exposure without adding audit value.
+    run_id = uuid.uuid4().hex[:12]
+    logger.info("MCP run_command", run_id=run_id, command=command[:200],
+                host=target_host, timeout=timeout)
     MAX_OUTPUT = 50_000
 
     try:
@@ -694,6 +718,14 @@ async def run_command(
         if len(stderr) > MAX_OUTPUT:
             stderr = stderr[:MAX_OUTPUT] + f"\n... (truncated, {len(stderr)} chars total)"
 
+        # Audit trail: record the outcome of every command executed on a host.
+        logger.info(
+            "MCP run_command completed",
+            run_id=run_id,
+            host=target_host,
+            exit_code=exit_code,
+        )
+
         return json.dumps({
             "success": exit_code == 0,
             "exit_code": exit_code,
@@ -704,6 +736,12 @@ async def run_command(
         })
 
     except asyncio.TimeoutError:
+        logger.warning(
+            "MCP run_command timed out",
+            run_id=run_id,
+            host=target_host,
+            timeout=timeout,
+        )
         return json.dumps({
             "success": False,
             "error": f"Command timed out after {timeout}s",
@@ -711,7 +749,8 @@ async def run_command(
             "command": command,
         })
     except Exception as exc:
-        logger.error("MCP run_command failed", command=command[:200], host=target_host, error=str(exc))
+        logger.error("MCP run_command failed", run_id=run_id, host=target_host,
+                     error=str(exc))
         return json.dumps({
             "success": False,
             "error": str(exc),

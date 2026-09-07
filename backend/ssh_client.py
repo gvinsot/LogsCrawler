@@ -5,9 +5,10 @@ import json
 import os
 import re
 import shlex
+import socket
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import asyncssh
 import structlog
@@ -21,21 +22,105 @@ from . import utils
 
 logger = structlog.get_logger()
 
-# ---------- TOFU (Trust On First Use) helpers ----------
-DEFAULT_KNOWN_HOSTS_PATH = str(Path.home() / ".ssh" / "known_hosts")
+# ---------- SSH host key verification (known_hosts) ----------
+# Overridable because the container image bind-mounts ~/.ssh read-only: neither
+# `ssh-keyscan >> ...` nor the TOFU writer can persist anything there, which left
+# the strict default with no way to bootstrap a host.  The deployment points this
+# at the read/write data volume (PULSARCD_SSH_KNOWN_HOSTS=/data/known_hosts).
+KNOWN_HOSTS_PATH_ENV = "PULSARCD_SSH_KNOWN_HOSTS"
+DEFAULT_KNOWN_HOSTS_PATH = (
+    os.environ.get(KNOWN_HOSTS_PATH_ENV, "").strip()
+    or str(Path.home() / ".ssh" / "known_hosts")
+)
+
+# Host key verification is STRICT by default: an unknown host aborts the
+# connection instead of silently trusting whatever key the network presents.
+# Trust On First Use (TOFU, i.e. StrictHostKeyChecking=accept-new) stays
+# available but must be requested explicitly, either with this environment
+# variable or with ssh_known_hosts_path="accept-new" on the host config.
+ACCEPT_NEW_HOSTKEYS_ENV = "PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS"
+ACCEPT_NEW_SENTINEL = "accept-new"
+DISABLED_SENTINEL = "none"
+_TRUTHY_VALUES = {"1", "true", "yes", "y", "on"}
+
+
+class UnknownHostKeyError(ConnectionError):
+    """Raised when a host is missing from known_hosts and TOFU is not enabled."""
+
+
+def _accept_new_hostkeys_enabled() -> bool:
+    """Return True when TOFU is explicitly enabled through the environment."""
+    return os.environ.get(ACCEPT_NEW_HOSTKEYS_ENV, "").strip().lower() in _TRUTHY_VALUES
+
+
+def _known_hosts_entry(hostname: str, port: int) -> str:
+    """Format the known_hosts host pattern for *hostname*:*port*."""
+    return f"[{hostname}]:{port}" if port and port != 22 else hostname
+
+
+def _resolve_address(hostname: str) -> Optional[str]:
+    """Best-effort IP for *hostname*, or None when it cannot be resolved."""
+    try:
+        return socket.gethostbyname(hostname)
+    except OSError:
+        return None
 
 
 def _host_is_known(known_hosts_path: str, hostname: str, port: int) -> bool:
-    """Check whether *hostname*:*port* already has an entry in *known_hosts_path*."""
+    """Check whether *hostname*:*port* already has an entry in *known_hosts_path*.
+
+    The matching mirrors what asyncssh does during the handshake, which also
+    passes the peer's IP address: an entry stored under the host's IP (the usual
+    result of `ssh-keyscan <ip>`) is a valid entry, and treating it as unknown
+    turned a connection asyncssh would have verified into a hard refusal.
+    Revoked keys and X.509 subjects count as "known" too -- the host is not new,
+    and asyncssh must be the one to refuse it rather than TOFU trusting it.
+
+    Raises:
+        UnknownHostKeyError: the file exists but cannot be parsed.  asyncssh
+            refuses the whole file over a single malformed line, so staying
+            silent here reported every host as unknown with no way to tell why.
+    """
     if not os.path.isfile(known_hosts_path):
         return False
     try:
         kh = asyncssh.read_known_hosts(known_hosts_path)
-        result = kh.match(hostname, None, port)
-        # result[0] = trusted host keys, result[1] = trusted CA keys
-        return bool(result[0] or result[1])
+    except Exception as exc:
+        logger.error("known_hosts file could not be parsed; every host would be "
+                     "treated as unknown", file=known_hosts_path, error=str(exc))
+        raise UnknownHostKeyError(
+            f"known_hosts file '{known_hosts_path}' is unreadable or malformed "
+            f"({exc}). A single bad line invalidates the whole file: fix or "
+            f"remove that line, then retry."
+        ) from exc
+    try:
+        result = kh.match(hostname, _resolve_address(hostname), port)
     except Exception:
         return False
+    # (host_keys, ca_keys, revoked_keys, x509_certs, revoked_certs,
+    #  x509_subjects, revoked_subjects)
+    return bool(result[0] or result[1] or result[2] or result[3] or result[5])
+
+
+def _unknown_host_key_error(
+    hostname: str, port: int, known_hosts_path: str
+) -> UnknownHostKeyError:
+    """Build the actionable error raised for an unknown, unverifiable host."""
+    entry = _known_hosts_entry(hostname, port)
+    return UnknownHostKeyError(
+        f"SSH host key for {entry} is not trusted: no matching entry in "
+        f"'{known_hosts_path}'. Refusing to connect, because accepting an "
+        f"unverified key would let a man-in-the-middle take over this host "
+        f"permanently. Fix it in one of these ways: (1) pre-populate the file, "
+        f"e.g. `ssh-keyscan -p {port} {hostname} >> {known_hosts_path}`, after "
+        f"checking the fingerprint out-of-band (an existing entry stored under a "
+        f"different name or IP does not count - it must match the configured "
+        f"hostname '{hostname}'); (2) point the host's ssh_known_hosts_path at a "
+        f"managed known_hosts file; or (3) re-enable trust-on-first-use, which is "
+        f"unsafe on untrusted networks, with {ACCEPT_NEW_HOSTKEYS_ENV}=true "
+        f"(hosts without an explicit ssh_known_hosts_path only) or "
+        f'ssh_known_hosts_path="{ACCEPT_NEW_SENTINEL}" (this host).'
+    )
 
 
 def _save_host_key(known_hosts_path: str, hostname: str, port: int, key) -> None:
@@ -43,11 +128,12 @@ def _save_host_key(known_hosts_path: str, hostname: str, port: int, key) -> None
     try:
         Path(known_hosts_path).parent.mkdir(parents=True, exist_ok=True)
         key_data = key.export_public_key("openssh").decode("utf-8").strip()
-        host_entry = f"[{hostname}]:{port}" if port and port != 22 else hostname
+        host_entry = _known_hosts_entry(hostname, port)
         with open(known_hosts_path, "a") as fh:
             fh.write(f"{host_entry} {key_data}\n")
-        logger.info("TOFU: saved new host key", host=hostname, port=port,
-                     file=known_hosts_path)
+        logger.warning("TOFU: saved NEW UNVERIFIED host key", host=hostname, port=port,
+                       file=known_hosts_path,
+                       fingerprint=key.get_fingerprint())
     except Exception as exc:
         logger.warning("TOFU: failed to save host key", host=hostname,
                        error=str(exc))
@@ -55,37 +141,84 @@ def _save_host_key(known_hosts_path: str, hostname: str, port: int, key) -> None
 
 def resolve_known_hosts(
     ssh_known_hosts_path: Optional[str], hostname: str, port: int
-):
-    """Resolve the ``known_hosts`` parameter for :func:`asyncssh.connect` with
-    Trust-On-First-Use semantics (equivalent to ``StrictHostKeyChecking=accept-new``).
+) -> Tuple[Optional[str], Union[bool, str]]:
+    """Resolve the ``known_hosts`` parameter for :func:`asyncssh.connect`.
 
-    Returns ``(known_hosts_setting, save_key)`` where *save_key* indicates that
-    the server key should be persisted after a successful connection.
+    Verification is strict by default (equivalent to ``StrictHostKeyChecking=yes``):
+    an unknown host raises :class:`UnknownHostKeyError` instead of being trusted
+    on sight. Trust-On-First-Use is only used when explicitly requested through
+    the ``PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS`` environment variable or through
+    ``ssh_known_hosts_path="accept-new"``; ``ssh_known_hosts_path="none"``
+    disables verification altogether (logged as a warning).
+
+    Returns ``(known_hosts_setting, save_key)`` where *save_key* is ``False`` when
+    nothing has to be persisted, or the known_hosts path the newly accepted server
+    key must be appended to after a successful connection.
     """
-    if ssh_known_hosts_path:
-        if ssh_known_hosts_path.lower() == "none":
-            return None, False          # verification explicitly disabled
-        return ssh_known_hosts_path, False  # use the caller-supplied file
+    configured = (ssh_known_hosts_path or "").strip()
+    accept_new = False
 
-    # Default path — TOFU behaviour
-    kh_path = DEFAULT_KNOWN_HOSTS_PATH
+    if configured:
+        lowered = configured.lower()
+        if lowered == DISABLED_SENTINEL:
+            # Verification explicitly turned off by the operator.
+            logger.warning(
+                "SSH host key verification is DISABLED for this host "
+                "(ssh_known_hosts_path='none'): the connection is exposed to "
+                "man-in-the-middle attacks",
+                host=hostname, port=port,
+            )
+            return None, False
+        if lowered == ACCEPT_NEW_SENTINEL:
+            accept_new = True
+            kh_path = DEFAULT_KNOWN_HOSTS_PATH
+        else:
+            # An explicit known_hosts file is an explicit decision to verify
+            # strictly.  The global environment opt-in deliberately does NOT
+            # apply here: enabling TOFU to onboard one new host would otherwise
+            # silently downgrade every host that already had a managed file,
+            # the moment one of them stopped matching (key rotation, transient
+            # unavailability) -- and the new key would be appended to it.
+            kh_path = configured
+    else:
+        accept_new = _accept_new_hostkeys_enabled()
+        kh_path = DEFAULT_KNOWN_HOSTS_PATH
+
     if _host_is_known(kh_path, hostname, port):
-        return kh_path, False            # host already trusted → strict check
-    return None, True                    # unknown host → accept & save later
+        return kh_path, False        # host already trusted -> strict check
+
+    if not accept_new:
+        raise _unknown_host_key_error(hostname, port, kh_path)
+
+    # TOFU explicitly enabled: this single connection is unauthenticated.
+    logger.warning(
+        "TOFU ENABLED: connecting to an UNKNOWN host without verifying its key; "
+        "a man-in-the-middle present right now would be trusted permanently",
+        host=hostname, port=port, known_hosts=kh_path,
+        enabled_by=(f'ssh_known_hosts_path="{ACCEPT_NEW_SENTINEL}"'
+                    if configured.lower() == ACCEPT_NEW_SENTINEL
+                    else f"{ACCEPT_NEW_HOSTKEYS_ENV}=true"),
+    )
+    return None, kh_path             # unknown host -> accept & save later
 
 
 def save_host_key_if_needed(
     conn: asyncssh.SSHClientConnection,
-    save_key: bool,
+    save_key: Union[bool, str],
     hostname: str,
     port: int,
 ) -> None:
-    """Persist the server host key when *save_key* is ``True`` (TOFU)."""
+    """Persist the server host key when TOFU accepted a new host.
+
+    *save_key* is the second value returned by :func:`resolve_known_hosts`:
+    ``False`` when nothing must be written, or the known_hosts path to append to.
+    """
     if not save_key:
         return
+    known_hosts_path = save_key if isinstance(save_key, str) else DEFAULT_KNOWN_HOSTS_PATH
     server_key = conn.get_server_host_key()
     if server_key:
-        _save_host_key(DEFAULT_KNOWN_HOSTS_PATH, hostname, port, server_key)
+        _save_host_key(known_hosts_path, hostname, port, server_key)
 
 
 def is_localhost(hostname: str) -> bool:

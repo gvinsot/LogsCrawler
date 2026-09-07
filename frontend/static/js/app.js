@@ -53,6 +53,34 @@ function logout() {
 
 let _currentUserRole = 'viewer';
 
+/**
+ * Whether the signed-in account may trigger state-changing operations.
+ * The backend enforces this centrally (every mutating /api/ route and a few
+ * secret-bearing GETs are admin-only); this is only so the UI stops offering
+ * actions that would come back as a 403.
+ */
+function isAdmin() {
+    return _currentUserRole === 'admin';
+}
+
+/** Reflect the role on <body> so stylesheets can hide admin-only controls. */
+function applyRoleToDocument() {
+    if (document.body) {
+        document.body.classList.toggle('role-viewer', !isAdmin());
+        document.body.classList.toggle('role-admin', isAdmin());
+    }
+}
+
+/**
+ * Turn a 403 from the API into a message that explains itself.
+ * Without this the viewer sees a bare "HTTP 403" for every action button.
+ */
+function _notifyForbidden(endpoint) {
+    console.warn(`Forbidden (${endpoint}): admin role required`);
+    showNotification('warning',
+        'This action is reserved for administrators (your account is read-only).');
+}
+
 async function checkAuth() {
     const token = getAuthToken();
     if (!token) {
@@ -67,6 +95,7 @@ async function checkAuth() {
         }
         const data = await response.json();
         _currentUserRole = data.role || 'viewer';
+        applyRoleToDocument();
         updateUserMenu(data.username || 'user', data.role || 'viewer');
         hideLogin();
         switchView(getViewFromHash() || 'dashboard');
@@ -478,6 +507,8 @@ function _agentHistoryIcon(type) {
         log_analysis: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
         log_analysis_error: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
         chat: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+        // A tool call the security policy refused (shield icon).
+        tool_blocked: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
     };
     return icons[type] || icons.chat;
 }
@@ -506,6 +537,8 @@ function _agentHistoryTitle(entry) {
             return `Recurring error skipped (cooldown) — ${entry.label || entry.services || entry.projects || ''}`;
         case 'chat':
             return `Chat: ${(entry.message || '').substring(0, 60)}`;
+        case 'tool_blocked':
+            return `Tool call blocked — ${entry.tool || ''}`;
         default:
             return entry.type;
     }
@@ -531,6 +564,10 @@ function _agentHistoryDetail(entry) {
     }
     if (entry.type === 'log_analysis' || entry.type === 'log_analysis_error') {
         if (entry.project) parts.push('Project: ' + entry.project);
+    }
+    if (entry.type === 'tool_blocked') {
+        if (entry.reason) parts.push('Reason: ' + entry.reason);
+        if (entry.arguments) parts.push('Arguments: ' + entry.arguments);
     }
     if (entry.type === 'recurring_detected' || entry.type === 'recurring_cooldown') {
         const params = [];
@@ -1439,6 +1476,9 @@ async function apiGet(endpoint) {
     try {
         const response = await fetch(`${API_BASE}${endpoint}`, { headers: authHeaders() });
         if (response.status === 401) { showLogin(); return null; }
+        // A handful of GETs disclose secrets or infrastructure detail and are
+        // admin-only (config, .env contents, GitHub token probes).
+        if (response.status === 403) { _notifyForbidden(endpoint); return null; }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return await response.json();
     } catch (error) {
@@ -1480,6 +1520,7 @@ async function apiPost(endpoint, data) {
         }
         const response = await fetch(`${API_BASE}${endpoint}`, opts);
         if (response.status === 401) { showLogin(); return null; }
+        if (response.status === 403) { _notifyForbidden(endpoint); return null; }
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.detail || `HTTP ${response.status}`);
@@ -1499,6 +1540,7 @@ async function apiPut(endpoint, data) {
             body: JSON.stringify(data)
         });
         if (response.status === 401) { showLogin(); return null; }
+        if (response.status === 403) { _notifyForbidden(endpoint); return null; }
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.detail || `HTTP ${response.status}`);
@@ -3317,9 +3359,22 @@ async function executeSearchWithParams(params) {
     updatePagination();
 }
 
+// OpenSearch refuses a result window past index.max_result_window, and the API
+// now validates `from` against the same bound instead of clamping it silently.
+// Cap the pager here too, otherwise "Next" walks past the last reachable page
+// and the request comes back as a 422.
+const LOGS_MAX_RESULT_WINDOW = 10000;
+
+function logsTotalPages() {
+    const reachable = Math.min(totalLogs, LOGS_MAX_RESULT_WINDOW);
+    return Math.ceil(reachable / logsPageSize);
+}
+
 function updatePagination() {
-    const totalPages = Math.ceil(totalLogs / logsPageSize);
-    document.getElementById('page-info').textContent = `Page ${logsPage + 1} of ${totalPages || 1}`;
+    const totalPages = logsTotalPages();
+    const capped = totalLogs > LOGS_MAX_RESULT_WINDOW;
+    document.getElementById('page-info').textContent =
+        `Page ${logsPage + 1} of ${totalPages || 1}${capped ? ' (search window limit)' : ''}`;
     document.getElementById('prev-page').disabled = logsPage === 0;
     document.getElementById('next-page').disabled = logsPage >= totalPages - 1;
 }
@@ -3332,8 +3387,7 @@ function prevPage() {
 }
 
 function nextPage() {
-    const totalPages = Math.ceil(totalLogs / logsPageSize);
-    if (logsPage < totalPages - 1 && lastSearchParams) {
+    if (logsPage < logsTotalPages() - 1 && lastSearchParams) {
         logsPage++;
         executeSearchWithParams(lastSearchParams);
     }
@@ -6755,6 +6809,11 @@ function closeStackOutputModal() {
 // ============== Stack Env Editor ==============
 
 async function editStackEnv(repoName) {
+    // .env contents are secrets: the backend serves them to admins only.
+    if (!isAdmin()) {
+        _notifyForbidden(`/stacks/${repoName}/env`);
+        return;
+    }
     const modal = document.getElementById('stack-env-modal');
     const title = document.getElementById('stack-env-title');
     const textarea = document.getElementById('stack-env-content');
@@ -6796,10 +6855,12 @@ async function saveStackEnv() {
             content: textarea.value
         });
         
-        if (result.success) {
+        // apiPut returns null when the request was refused (403 already
+        // reported to the user) or failed to parse.
+        if (result && result.success) {
             showNotification('success', 'File saved successfully');
             closeStackEnvModal();
-        } else {
+        } else if (result) {
             showNotification('error', result.message || 'Failed to save file');
         }
     } catch (e) {

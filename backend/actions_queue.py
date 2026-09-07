@@ -132,12 +132,27 @@ class ActionsQueue:
         action_id: str,
         success: bool,
         output: str,
+        agent_id: Optional[str] = None,
     ) -> Optional[Action]:
-        """Mark an action as completed."""
+        """Mark an action as completed.
+
+        When *agent_id* is given the action must belong to that agent, so an
+        agent holding a valid key cannot answer for -- or forge the output of --
+        an action queued for one of its peers.
+        """
         async with self._lock:
             action = self._actions.get(action_id)
             if not action:
                 logger.warning("Action not found", action_id=action_id)
+                return None
+
+            if agent_id is not None and action.agent_id != agent_id:
+                logger.warning(
+                    "Action result rejected: it belongs to another agent",
+                    action_id=action_id,
+                    owner=action.agent_id,
+                    reported_by=agent_id,
+                )
                 return None
 
             action.status = ActionStatus.COMPLETED if success else ActionStatus.FAILED

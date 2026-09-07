@@ -150,6 +150,11 @@ class RecurringErrorDetector:
         re.compile(r'LLM agent (handling|handled|error|skipped)', re.IGNORECASE),
         re.compile(r'Recurring error (detected|handled)', re.IGNORECASE),
         re.compile(r'MCP tool(s| call)', re.IGNORECASE),
+        # run_command's audit trail is our own output, and it echoes text the
+        # operator typed: feeding it back to the agent as a detected error would
+        # both loop and re-inject that text into the prompt.
+        re.compile(r'MCP run_command', re.IGNORECASE),
+        re.compile(r'MCP auth (failed|denied)', re.IGNORECASE),
         re.compile(r'Log collection (error|loop)', re.IGNORECASE),
         re.compile(r'Metrics collection error', re.IGNORECASE),
         re.compile(r'Node discovery error', re.IGNORECASE),

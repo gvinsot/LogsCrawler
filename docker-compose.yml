@@ -26,9 +26,13 @@ services:
         hard: 65536
     volumes:
       - opensearch-data:/usr/share/opensearch/data
+    # Security: the security plugin is disabled above, so this OpenSearch has
+    # NO authentication — anyone who can reach it can read, alter or delete all
+    # logs. Bind the published ports to the loopback interface only, never to
+    # 0.0.0.0. The pulsarcd service still reaches it over the compose network.
     ports:
-      - "9200:9200"
-      - "9600:9600"
+      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9600:9600"
     networks:
       - pulsarcd-net
     healthcheck:
@@ -44,8 +48,21 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: pulsarcd-app
-    # Run as root to access Docker socket (or use group_add with docker GID)
+    # Security: runs as root only to reach /var/run/docker.sock (root:docker).
+    # Docker API access is equivalent to root on the host, so prefer, in order:
+    #   1. `group_add: ["<host docker GID>"]` with the image's non-root appuser;
+    #   2. a docker-socket-proxy exposing only the endpoints this app needs.
     user: root
+    # Same hardening profile as the Swarm stack: no capability is needed to open
+    # a unix socket owned by uid 0 or to run git/ssh, and no-new-privileges
+    # blocks setuid escalation from anything dropped into the container.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # The application port is published on all interfaces on purpose (this file
+    # also serves single-host deployments) -- it is authenticated. Use
+    # "127.0.0.1:5000:8000" for a pure development box.
     ports:
       - "5000:8000"
     volumes:
@@ -58,6 +75,21 @@ services:
     environment:
       # ========== All configuration via environment variables ==========
       - PULSARCD_DEBUG=false
+
+      # SSH host key verification is strict: an unknown host aborts the
+      # connection instead of trusting whatever key answers. Keep known_hosts on
+      # the read/write data volume and bootstrap it from inside the container:
+      #   docker exec pulsarcd-app sh -c 'ssh-keyscan -p 22 <host> >> /data/known_hosts'
+      # PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS=true trusts the first key seen instead
+      # (trust-on-first-use); unsafe on an untrusted network.
+      - PULSARCD_SSH_KNOWN_HOSTS=/data/known_hosts
+      #- PULSARCD_SSH_ACCEPT_NEW_HOSTKEYS=true
+
+      # Set when this container sits behind a reverse proxy that rewrites
+      # X-Forwarded-For; without it the per-address login rate limit only ever
+      # sees the proxy address. Leave unset when the port is reached directly:
+      # the header is client-controlled and would let anyone pick their bucket.
+      #- PULSARCD_TRUST_PROXY_HEADERS=true
 
       # OpenSearch configuration
       - PULSARCD_OPENSEARCH__HOSTS=["http://opensearch:9200"]
