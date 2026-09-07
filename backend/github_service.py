@@ -140,8 +140,14 @@ COMMITS_CACHE_TTL = timedelta(seconds=30)
 COMMIT_DIFF_CACHE_TTL = timedelta(minutes=10)
 TAGS_CACHE_TTL = timedelta(minutes=2)
 
-# File path for persistent tag date cache
-TAG_DATE_CACHE_FILE = Path(__file__).parent.parent / ".tag_date_cache.json"
+# File path for persistent tag date cache.
+# It lives on the data volume, not next to the code: /app belongs to the image's
+# non-root user, so the container (which runs as root with "cap_drop: ALL", hence
+# without the permission-bypass capability) cannot write there -- and a file
+# written inside the image layer would be lost on every deploy anyway.
+TAG_DATE_CACHE_FILE = (
+    Path(os.environ.get("PULSARCD_DATA_DIR", "/data")) / ".tag_date_cache.json"
+)
 
 
 class GitHubService:
