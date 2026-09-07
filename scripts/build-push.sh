@@ -587,6 +587,34 @@ if [ "$NO_CACHE" = "--no-cache" ]; then
 fi
 
 # Helper: extract build context/dockerfile/target for a given image from compose
+# Service that carries an image. The batch build below needs the names, not the
+# images: told to build nothing in particular, compose rebuilds every service of
+# the file — including those already built for another architecture, which then
+# fail on a base image that has no manifest for the default platform.
+_get_service_name_for_image() {
+    # Both sides resolved: the compose file is read through envsubst, so a raw
+    # "${REGISTRY}/name" coming from the caller would never match what it sees.
+    local img
+    img=$(printf '%s' "$1" | envsubst)
+    envsubst < "$COMPOSE_PATH" | awk -v target_img="$img" '
+    /^[[:space:]]{2}[a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$/ {
+        if (current_image == target_img && service != "") { print service; found = 1; exit }
+        service = $0
+        gsub(/^[[:space:]]+/, "", service); gsub(/:[[:space:]]*$/, "", service)
+        current_image = ""
+    }
+    /^[[:space:]]{4}image:[[:space:]]*/ {
+        img_line = $0; gsub(/^[[:space:]]+image:[[:space:]]*/, "", img_line); gsub(/[[:space:]]*$/, "", img_line)
+        gsub(/"/, "", img_line); gsub(/\047/, "", img_line)
+        current_image = img_line
+    }
+    END {
+        # exit above still runs END: without the flag the name is printed twice.
+        if (!found && current_image == target_img && service != "") print service
+    }
+    '
+}
+
 _get_service_build_info() {
     local img="$1"
     envsubst < "$COMPOSE_PATH" | awk -v target_img="$img" '
@@ -703,6 +731,10 @@ fi
 
 # Collect single-arch images to build via docker compose
 SINGLEARCH_IMAGES=""
+SINGLEARCH_SERVICES=""
+# Cleared as soon as one image cannot be traced back to a service: naming only
+# some of them would leave the others unbuilt, so it is all or nothing.
+SINGLEARCH_NAMED=true
 
 BUILD_FAILED=false
 for img in $IMAGES_TO_BUILD; do
@@ -750,6 +782,12 @@ for img in $IMAGES_TO_BUILD; do
     else
         # ── Single-arch: collect for batch build via docker compose ──
         SINGLEARCH_IMAGES="$SINGLEARCH_IMAGES $img"
+        SVC_NAME=$(_get_service_name_for_image "$img")
+        if [ -n "$SVC_NAME" ]; then
+            SINGLEARCH_SERVICES="$SINGLEARCH_SERVICES $SVC_NAME"
+        else
+            SINGLEARCH_NAMED=false
+        fi
     fi
 done
 
@@ -757,8 +795,18 @@ done
 if [ "$BUILD_FAILED" = false ] && [ -n "$SINGLEARCH_IMAGES" ]; then
     # Default to linux/amd64 unless DOCKER_DEFAULT_PLATFORM is already set
     export DOCKER_DEFAULT_PLATFORM="${DOCKER_DEFAULT_PLATFORM:-linux/amd64}"
-    log_info "Building single-arch images via docker compose (platform: $DOCKER_DEFAULT_PLATFORM)..."
-    if ! docker compose -f "$COMPOSE_PATH" build $BUILD_ARGS; then
+    # Naming the services keeps compose off the ones handled above by buildx,
+    # and off those already in the registry. Without a name it builds the whole
+    # file, so an arm64-only service is rebuilt for amd64 and the run dies on
+    # "no match for platform in manifest".
+    if [ "$SINGLEARCH_NAMED" = true ]; then
+        log_info "Building single-arch images via docker compose (platform: $DOCKER_DEFAULT_PLATFORM):$SINGLEARCH_SERVICES"
+        BUILD_TARGETS="$SINGLEARCH_SERVICES"
+    else
+        log_warning "Could not name every single-arch service, falling back to building the whole compose file"
+        BUILD_TARGETS=""
+    fi
+    if ! docker compose -f "$COMPOSE_PATH" build $BUILD_ARGS $BUILD_TARGETS; then
         log_error "Docker compose build failed!"
         BUILD_FAILED=true
     fi
