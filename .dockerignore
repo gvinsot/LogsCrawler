@@ -1,2 +1,9 @@
 docker-compose.yml
 docker-compose.dev.yml
+
+# Secrets: never let a COPY bake these into an image
+.env
+**/.env
+*.pem
+id_rsa*
+id_ed25519*

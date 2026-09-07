@@ -37,6 +37,12 @@ FROM base AS test
 # Install test dependencies
 RUN pip install --no-cache-dir pytest pytest-asyncio "httpx>=0.23.0,<0.28.0"
 
+# pytest.ini carries asyncio_mode=auto (async tests are collected but not run
+# without it, they fail as "async def not natively supported") and
+# xfail_strict. Without this copy the image silently runs a different, weaker
+# configuration than a developer machine.
+COPY pytest.ini ./
+
 # Copy test files
 COPY tests/ ./tests/
 
