@@ -77,6 +77,15 @@ services:
     # verify with `docker inspect` on the running task.
     cap_drop:
       - ALL
+    cap_add:
+      # Required: the SSH keys are bind-mounted from an operator account's
+      # ~/.ssh (mode 700, owned by that uid), and this container runs as root.
+      # Root only reads files it does not own by bypassing the permission
+      # check, which "cap_drop: ALL" takes away -- every SSH operation (build,
+      # deploy, the .env editor, the periodic `docker service ls`) then fails
+      # with EACCES on the key. DAC_READ_SEARCH grants the read/search bypass
+      # only; DAC_OVERRIDE would also bypass write and execute checks.
+      - DAC_READ_SEARCH
     security_opt:
       - no-new-privileges:true
     # The default soft limit of 1024 fds is reached quickly: this process holds
